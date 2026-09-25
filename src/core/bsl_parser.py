@@ -611,6 +611,17 @@ def _parse_param_names(params: str) -> set[str]:
     return names
 
 
+def _form_context_vars(directive: str, form_attributes: set[str]) -> set[str]:
+    """Реквизиты формы, видимые процедуре с этой директивой: все, кроме
+    процедур БезКонтекста/NoContext (там контекста формы нет)."""
+    if not form_attributes:
+        return set()
+    low = directive.lower()
+    if 'безконтекста' in low or 'nocontext' in low:
+        return set()
+    return form_attributes
+
+
 class BSLParser:
     """Parses .bsl file content into procedures and calls.
 
@@ -633,15 +644,29 @@ class BSLParser:
         # — project-wide pre-pass result, see ParseResult.factory_functions.
         self.known_factory_functions = known_factory_functions or {}
 
-    def parse_file(self, file_path: str, encoding: str = 'utf-8-sig') -> ParseResult:
+    def parse_file(self, file_path: str, encoding: str = 'utf-8-sig',
+                   form_attributes: set[str] | None = None) -> ParseResult:
         """Parse a .bsl file."""
         content = read_bsl_text(file_path, encoding)
         if content is None:
             return ParseResult(has_errors=True)
-        return self.parse(content)
+        return self.parse(content, form_attributes=form_attributes)
 
-    def parse(self, content: str) -> ParseResult:
-        """Parse BSL source code string."""
+    def parse(self, content: str, form_attributes: set[str] | None = None) -> ParseResult:
+        """Parse BSL source code string.
+
+        form_attributes — lower-case имена реквизитов формы из её Form.xml
+        (см. xml_walker.read_form_attributes), только для модуля формы.
+        Реквизит виден во всех процедурах с контекстом формы как обычная
+        переменная, поэтому засевается в их множество известных
+        переменных — как параметр процедуры. Реквизит формы перекрывает
+        одноимённый общий модуль (так работает сама платформа: контекст
+        формы приоритетнее глобального), поэтому в таких процедурах
+        `Имя.Метод(` не станет вызовом модуля, даже если такой модуль есть
+        в known_modules. В процедурах &НаСервереБезКонтекста контекста
+        формы нет — там имя по-прежнему может быть только модулем.
+        """
+        form_attributes = form_attributes or set()
         lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         result = ParseResult(line_count=len(lines), content=content)
 
@@ -786,7 +811,8 @@ class BSLParser:
                     directive=directive_str, signature=stripped,
                     intercepts=intercepts, is_async=is_async,
                 )
-                constructed_vars[id(current_proc)] = _parse_param_names(params)
+                constructed_vars[id(current_proc)] = (
+                    _parse_param_names(params) | _form_context_vars(directive_str, form_attributes))
                 current_directive = ''
                 current_intercept_keyword = ''
                 current_intercept_target = ''
@@ -834,7 +860,8 @@ class BSLParser:
                             signature=f'{async_prefix}{kind_raw} {name}({params})' + (' Экспорт' if is_export else ''),
                             intercepts=intercepts, is_async=is_async,
                         )
-                        constructed_vars[id(current_proc)] = _parse_param_names(params)
+                        constructed_vars[id(current_proc)] = (
+                            _parse_param_names(params) | _form_context_vars(directive_str, form_attributes))
                         current_directive = ''
                         current_intercept_keyword = ''
                         current_intercept_target = ''

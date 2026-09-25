@@ -300,7 +300,7 @@ class Indexer:
         satisfying "one transaction per file-batch" for free.
         """
         import hashlib
-        from .xml_walker import XMLWalker
+        from .xml_walker import XMLWalker, read_form_attributes
         from .bsl_parser import BSLParser
 
         start = time.time()
@@ -359,7 +359,13 @@ class Indexer:
             # Hash first, before any parsing — an unchanged file costs one
             # file read instead of a full parse + a batch of DB writes.
             try:
-                file_hash = hashlib.md5(Path(mf.file_path).read_bytes()).hexdigest()
+                hasher = hashlib.md5(Path(mf.file_path).read_bytes())
+                # Реквизиты формы влияют на разбор её модуля (см.
+                # read_form_attributes), так что правка одного Form.xml
+                # тоже должна переразобрать модуль.
+                if mf.form_xml_path:
+                    hasher.update(Path(mf.form_xml_path).read_bytes())
+                file_hash = hasher.hexdigest()
             except Exception:
                 file_hash = ''
 
@@ -367,7 +373,9 @@ class Indexer:
             if prior is not None and file_hash and prior['file_hash'] == file_hash:
                 stats['files_skipped'] += 1
             else:
-                result = parser.parse_file(mf.file_path)
+                form_attributes = (read_form_attributes(mf.form_xml_path)
+                                   if mf.form_xml_path else None)
+                result = parser.parse_file(mf.file_path, form_attributes=form_attributes)
                 if not result.has_errors:
                     stats['files'] += 1
                     stats['lines'] += result.line_count

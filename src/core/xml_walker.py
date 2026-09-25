@@ -7,12 +7,14 @@ Structure:
     ├── CommonModules/#U041e#U0431#U0449.../Ext/Module.bsl
     ├── Catalogs/#U041d#U043e#U043c.../Ext/ObjectModule.bsl
     ├── Catalogs/#U041d#U043e#U043c.../Forms/#U0424.../Ext/Form/Module.bsl
+    ├── CommonForms/#U0412.../Ext/Form/Module.bsl   (общая форма, без Forms/)
     ├── Documents/#U041f.../Ext/ObjectModule.bsl
     ├── Ext/ManagedApplicationModule.bsl
     └── Ext/SessionModule.bsl
 """
 
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +62,7 @@ class ModuleFile:
     module_type: str            # МодульОбъекта, МодульМенеджера, Модуль...
     form_name: str = ''         # For form modules: ФормаЭлемента, etc.
     full_name: str = ''         # Справочник.Номенклатура.Форма.ФормаЭлемента
+    form_xml_path: str = ''     # For form modules: absolute path to Ext/Form.xml, if present
 
 
 def decode_1c_dirname(name: str) -> str:
@@ -70,6 +73,41 @@ def decode_1c_dirname(name: str) -> str:
     def replace_match(m):
         return chr(int(m.group(1), 16))
     return re.sub(r'#U([0-9A-Fa-f]{4})', replace_match, name)
+
+
+def _local_tag(tag: str) -> str:
+    return tag.rsplit('}', 1)[-1]
+
+
+def read_form_attributes(form_xml_path: str | Path) -> set[str]:
+    """Имена реквизитов формы (lower-case) из её Ext/Form.xml.
+
+    Берутся только прямые <Attribute> внутри <Attributes> корня <Form> —
+    и внутри <BaseForm>: у заимствованной формы расширения там лежит копия
+    исходной формы, чьи реквизиты модуль расширения тоже видит. Колонки
+    реквизитов-таблиц (<Columns>/<Column>, <AdditionalColumns>) — не
+    переменные модуля, а параметры и элементы формы доступны только через
+    Параметры.X / Элементы.X, поэтому их здесь нет намеренно.
+
+    Имена тегов в выгрузке всегда английские, язык выгрузки влияет только
+    на значения (name="Объект" / name="Object"), так что разбор один.
+    Битый или отсутствующий файл — пустое множество: реквизиты лишь
+    подавляют фантомные вызовы, их отсутствие ничего не ломает.
+    """
+    try:
+        root = ET.parse(str(form_xml_path)).getroot()
+    except (OSError, ET.ParseError):
+        return set()
+    containers = [root] + [c for c in root if _local_tag(c.tag) == 'BaseForm']
+    names: set[str] = set()
+    for container in containers:
+        for attrs in container:
+            if _local_tag(attrs.tag) != 'Attributes':
+                continue
+            for attr in attrs:
+                if _local_tag(attr.tag) == 'Attribute' and attr.get('name'):
+                    names.add(attr.get('name').lower())
+    return names
 
 
 class XMLWalker:
@@ -124,6 +162,24 @@ class XMLWalker:
                             full_name=full_name,
                         ))
 
+                # Common form module: CommonForms/{Name}/Ext/Form/Module.bsl —
+                # the object itself is the form, there's no Forms/ subdir.
+                # full_name matches report_parser's object name (ОбщаяФорма.X).
+                if kind == 'ОбщаяФорма':
+                    form_bsl = obj_ext / 'Form' / 'Module.bsl'
+                    if form_bsl.exists():
+                        form_xml = obj_ext / 'Form.xml'
+                        modules.append(ModuleFile(
+                            file_path=str(form_bsl),
+                            relative_path=form_bsl.relative_to(root).as_posix(),
+                            object_kind=kind,
+                            object_name=obj_name,
+                            module_type='МодульФормы',
+                            form_name=obj_name,
+                            full_name=f'{kind}.{obj_name}',
+                            form_xml_path=str(form_xml) if form_xml.exists() else '',
+                        ))
+
                 # Form modules: Forms/{EncodedFormName}/Ext/Form/Module.bsl
                 forms_dir = obj_dir / 'Forms'
                 if forms_dir.exists():
@@ -133,6 +189,7 @@ class XMLWalker:
                         form_name = decode_1c_dirname(form_dir.name)
                         form_bsl = form_dir / 'Ext' / 'Form' / 'Module.bsl'
                         if form_bsl.exists():
+                            form_xml = form_dir / 'Ext' / 'Form.xml'
                             full_name = f'{kind}.{obj_name}.Форма.{form_name}'
                             modules.append(ModuleFile(
                                 file_path=str(form_bsl),
@@ -142,6 +199,7 @@ class XMLWalker:
                                 module_type='МодульФормы',
                                 form_name=form_name,
                                 full_name=full_name,
+                                form_xml_path=str(form_xml) if form_xml.exists() else '',
                             ))
 
         return modules
