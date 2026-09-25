@@ -230,6 +230,19 @@ CREATE TABLE IF NOT EXISTS index_state (
     progress_total      INTEGER DEFAULT 0,
     progress_phase      TEXT DEFAULT ''
 );
+
+-- Отпечаток парсера (src/core/parser_fingerprint.py), которым разобран
+-- BSL-код источника. По источнику, а не на весь индекс: reindex одного
+-- источника не делает «свежими» остальные. Отдельная таблица, а не столбец
+-- в sources/index_state: IF NOT EXISTS добавит её и в индекс старого
+-- формата без пересоздания (_recreate_if_stale_schema не нужен).
+CREATE TABLE IF NOT EXISTS parser_state (
+    source_id                TEXT PRIMARY KEY,
+    fingerprint              TEXT NOT NULL DEFAULT '',
+    updated_at               TEXT DEFAULT '',
+    last_full_reparse_at     TEXT DEFAULT '',
+    last_full_reparse_reason TEXT DEFAULT ''
+);
 """
 
 
@@ -346,7 +359,7 @@ class Database:
             self.connect()
         for table in ['calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
-                       'sources', 'index_state']:
+                       'sources', 'index_state', 'parser_state']:
             self.conn.execute(f"DELETE FROM {table}")
         for fts in ('metadata_fts', 'attributes_fts', 'procedures_fts'):
             try:
@@ -431,6 +444,31 @@ class Database:
             'progress_phase': state['progress_phase'],
             'updated_at': state['updated_at'],
         }
+
+    def get_parser_states(self, conn: sqlite3.Connection | None = None) -> dict[str, dict]:
+        """{source_id: строка parser_state}. reindex читает писателем,
+        diagnose_index передаёт своё читающее соединение (read_conn)."""
+        conn = conn or self.conn or self.read_conn()
+        return {r['source_id']: dict(r) for r in conn.execute("SELECT * FROM parser_state")}
+
+    def set_parser_fingerprint(self, source_id: str, fingerprint: str,
+                               full_reparse_reason: str = ''):
+        """Записать отпечаток, которым только что разобран источник;
+        full_reparse_reason — если разбор был полным из-за смены парсера."""
+        now = datetime.now().isoformat()
+        if not self.conn:
+            self.connect()
+        self.conn.execute(
+            """INSERT INTO parser_state (source_id, fingerprint, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(source_id) DO UPDATE SET fingerprint=excluded.fingerprint,
+                                                    updated_at=excluded.updated_at""",
+            (source_id, fingerprint, now))
+        if full_reparse_reason:
+            self.conn.execute(
+                "UPDATE parser_state SET last_full_reparse_at=?, last_full_reparse_reason=? "
+                "WHERE source_id=?", (now, full_reparse_reason, source_id))
+        self.conn.commit()
 
     def update_state(self, **kwargs):
         now = datetime.now().isoformat()
