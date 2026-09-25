@@ -221,3 +221,107 @@ EndProcedure
 '''
     calls = _calls(BSLParser().parse(code, form_attributes={'settingscomposer'}))
     assert not any(m == 'SettingsComposer' for m, _ in calls), calls
+
+
+# ---------------------------------------------------------------------------
+# Полный конвейер: XMLWalker → Indexer.index_bsl → resolve_calls
+# ---------------------------------------------------------------------------
+
+from src.core.db import Database  # noqa: E402
+from src.core.indexer import Indexer  # noqa: E402
+
+
+def _build_tree(xml_dir: Path) -> Path:
+    """Мини-выгрузка: общий модуль + форма справочника (ru) + форма
+    обработки (en). Возвращает путь к Form.xml русской формы."""
+    _write(xml_dir / 'CommonModules' / 'ОбщегоНазначения' / 'Ext' / 'Module.bsl', '''
+Процедура СообщитьПользователю(Текст) Экспорт
+КонецПроцедуры
+''')
+    ru_form = xml_dir / 'Catalogs' / 'Организации' / 'Forms' / 'ФормаЭлемента' / 'Ext'
+    _write(ru_form / 'Form.xml', _form_xml(
+        '\t\t<Attribute name="Объект" id="1"/>\n'
+        '\t\t<Attribute name="ТабДок" id="2"/>\n'))
+    _write(ru_form / 'Form' / 'Module.bsl', '''
+&НаСервере
+Процедура Сформировать()
+	Область = ТабДок.ПолучитьОбласть("Шапка");
+	ОбщегоНазначения.СообщитьПользователю("готово");
+КонецПроцедуры
+''')
+    en_form = xml_dir / 'DataProcessors' / 'Exchange' / 'Forms' / 'Form' / 'Ext'
+    _write(en_form / 'Form.xml', _form_xml(
+        '\t\t<Attribute name="Object" id="1"/>\n'
+        '\t\t<Attribute name="SettingsComposer" id="2"/>\n'))
+    _write(en_form / 'Form' / 'Module.bsl', '''
+&AtServer
+Procedure OnCreateAtServer(Cancel, StandardProcessing)
+	Settings = SettingsComposer.GetSettings();
+	ОбщегоНазначения.СообщитьПользователю("ok");
+EndProcedure
+''')
+    return ru_form / 'Form.xml'
+
+
+def _index(db: Database, xml_dir: Path) -> dict:
+    known_modules, known_objects = Indexer.scan_known_names([str(xml_dir)])
+    indexer = Indexer(db)
+    stats = indexer.index_bsl(str(xml_dir), source_id='main',
+                              known_modules=known_modules, known_objects=known_objects)
+    indexer.resolve_calls()
+    return stats
+
+
+def _call_rows(db: Database):
+    return db.conn.execute("""
+        SELECT c.callee_module, c.callee_proc, cr.callee_id
+        FROM calls c LEFT JOIN calls_resolved cr ON cr.call_id = c.id
+    """).fetchall()
+
+
+def test_indexer_uses_form_attributes_ru_and_en():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        xml_dir = Path(tmpdir) / 'xml'
+        _build_tree(xml_dir)
+        db = Database(str(Path(tmpdir) / 'index.db'))
+        db.connect()
+        db.init_schema()
+        try:
+            _index(db, xml_dir)
+            rows = _call_rows(db)
+            pairs = {(r['callee_module'], r['callee_proc']) for r in rows}
+            assert ('ТабДок', 'ПолучитьОбласть') not in pairs, pairs
+            assert ('SettingsComposer', 'GetSettings') not in pairs, pairs
+            resolved = [r for r in rows
+                        if (r['callee_module'], r['callee_proc'])
+                        == ('ОбщегоНазначения', 'СообщитьПользователю')]
+            assert len(resolved) == 2 and all(r['callee_id'] for r in resolved), (
+                "настоящий общий модуль из модулей обеих форм должен резолвиться")
+        finally:
+            db.close()
+
+
+def test_form_xml_change_alone_triggers_reparse_of_form_module():
+    """Реквизиты влияют на разбор модуля формы, поэтому хеш модуля учитывает
+    Form.xml: правка только Form.xml переразбирает модуль, остальные файлы
+    по-прежнему пропускаются."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        xml_dir = Path(tmpdir) / 'xml'
+        ru_form_xml = _build_tree(xml_dir)
+        db = Database(str(Path(tmpdir) / 'index.db'))
+        db.connect()
+        db.init_schema()
+        try:
+            _index(db, xml_dir)
+            again = _index(db, xml_dir)
+            assert again['files'] == 0 and again['files_skipped'] == 3, again
+
+            # Реквизит ТабДок удалён из формы — теперь это неизвестное имя,
+            # и прежний «фантомный» вызов возвращается (как без Form.xml).
+            _write(ru_form_xml, _form_xml('\t\t<Attribute name="Объект" id="1"/>\n'))
+            changed = _index(db, xml_dir)
+            assert changed['files'] == 1 and changed['files_skipped'] == 2, changed
+            pairs = {(r['callee_module'], r['callee_proc']) for r in _call_rows(db)}
+            assert ('ТабДок', 'ПолучитьОбласть') in pairs, pairs
+        finally:
+            db.close()
