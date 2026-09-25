@@ -104,3 +104,120 @@ def test_missing_or_broken_form_xml_gives_empty_set():
         assert read_form_attributes(tmp / 'nope.xml') == set()
     finally:
         shutil.rmtree(tmp)
+
+
+# ---------------------------------------------------------------------------
+# BSLParser(form_attributes=...)
+# ---------------------------------------------------------------------------
+
+from src.core.bsl_parser import BSLParser  # noqa: E402
+
+
+def _calls(result) -> set[tuple[str, str]]:
+    return {(c.callee_module, c.callee_proc) for c in result.calls}
+
+
+_FORM_CODE = '''
+&НаСервере
+Процедура СформироватьНаСервере()
+	Настройки = КомпоновщикНастроек.ПолучитьНастройки();
+	Область = ТабДок.ПолучитьОбласть("Шапка");
+	ОбщегоНазначения.СообщитьПользователю("готово");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура РазделыПриАктивизацииСтроки(Элемент)
+	Строки = РазделыОтчета.ПолучитьЭлементы();
+КонецПроцедуры
+'''
+
+
+def test_form_attribute_method_call_is_not_a_module_call():
+    parser = BSLParser(known_modules={'общегоназначения'})
+    calls = _calls(parser.parse(
+        _FORM_CODE, form_attributes={'компоновщикнастроек', 'табдок', 'разделыотчета'}))
+    assert ('КомпоновщикНастроек', 'ПолучитьНастройки') not in calls
+    assert ('ТабДок', 'ПолучитьОбласть') not in calls
+    assert ('РазделыОтчета', 'ПолучитьЭлементы') not in calls
+    # Настоящий общий модуль в том же модуле формы по-прежнему даёт вызов.
+    assert ('ОбщегоНазначения', 'СообщитьПользователю') in calls
+
+
+def test_without_form_attributes_behaviour_is_unchanged():
+    """Негативный контроль: без Form.xml (или для обычного модуля) те же
+    строки дают прежние «фантомные» вызовы — поведение не менялось."""
+    calls = _calls(BSLParser(known_modules={'общегоназначения'}).parse(_FORM_CODE))
+    assert ('КомпоновщикНастроек', 'ПолучитьНастройки') in calls
+    assert ('ТабДок', 'ПолучитьОбласть') in calls
+
+
+def test_form_attribute_names_are_case_insensitive():
+    code = '''
+Процедура Тест()
+	табдок.ПолучитьОбласть("Шапка");
+	TABDOC.GetArea("Header");
+КонецПроцедуры
+'''
+    calls = _calls(BSLParser(known_modules={'tabdoc'}).parse(
+        code, form_attributes={'табдок', 'tabdoc'}))
+    assert not any(m.lower() in ('табдок', 'tabdoc') for m, _ in calls), calls
+
+
+def test_chain_from_form_attribute_is_a_variable_too():
+    code = '''
+&НаСервере
+Процедура Тест()
+	Настройки = КомпоновщикНастроек.ПолучитьНастройки();
+	Настройки.Отбор.Элементы.Очистить();
+	Структура = Настройки.ПолучитьСтруктуру();
+КонецПроцедуры
+'''
+    calls = _calls(BSLParser().parse(code, form_attributes={'компоновщикнастроек'}))
+    assert ('Настройки', 'ПолучитьСтруктуру') not in calls, calls
+
+
+def test_form_attribute_shadows_same_named_common_module():
+    """Реквизит формы с именем реального общего модуля: в процедуре с
+    контекстом формы платформа видит реквизит, а не модуль, — вызова модуля
+    нет (иначе ребро молча вело бы не туда). В &НаСервереБезКонтекста
+    контекста формы нет — там это честный вызов общего модуля."""
+    code = '''
+&НаКлиенте
+Процедура НаКлиенте()
+	Печать.Вывести();
+	Копия = Печать;
+	Копия.Вывести();
+КонецПроцедуры
+
+&НаСервереБезКонтекста
+Процедура БезКонтекста()
+	Печать.Вывести();
+КонецПроцедуры
+
+&AtServerNoContext
+Procedure NoContext()
+	Печать.Вывести();
+EndProcedure
+'''
+    result = BSLParser(known_modules={'печать'}).parse(code, form_attributes={'печать'})
+    module_calls = sorted(c.line for c in result.calls
+                          if c.callee_kind == 'common_module' and c.callee_module == 'Печать')
+    no_context_lines = [i for i, l in enumerate(code.split('\n'), 1)
+                        if l.strip() == 'Печать.Вывести();'][1:]
+    assert module_calls == no_context_lines, (module_calls, no_context_lines)
+
+
+def test_english_directives_keep_form_context():
+    code = '''
+&AtClient
+Procedure OnOpen(Cancel)
+	SettingsComposer.GetSettings();
+EndProcedure
+
+&AtServer
+Procedure OnCreateAtServer(Cancel, StandardProcessing)
+	SettingsComposer.LoadSettings(Settings);
+EndProcedure
+'''
+    calls = _calls(BSLParser().parse(code, form_attributes={'settingscomposer'}))
+    assert not any(m == 'SettingsComposer' for m, _ in calls), calls
