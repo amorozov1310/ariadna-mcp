@@ -619,16 +619,8 @@ class ProjectManager:
                     p = self.projects_dir / project_id / s.xml_path
                     if p.exists():
                         walked[s.id] = walker.walk(str(p))
-            known_modules: set[str] = set()
-            known_objects: dict[str, set[str]] = {}
-            common_module_files = []
-            for mfs in walked.values():
-                for mf in mfs:
-                    if mf.object_kind == 'ОбщийМодуль':
-                        known_modules.add(mf.object_name.lower())
-                        common_module_files.append(mf)
-                    elif mf.object_kind != 'Конфигурация':
-                        known_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
+            known_modules, known_objects, common_module_files = Indexer.collect_known_facts(
+                [mf for mfs in walked.values() for mf in mfs])
 
             # Этап 7 (cross-module factory-function inference): a second,
             # full parse of every common module — real extra cost (see

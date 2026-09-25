@@ -222,15 +222,25 @@ class Indexer:
         """
         from .xml_walker import XMLWalker
         walker = XMLWalker()
+        module_files = [mf for xp in xml_paths for mf in walker.walk(xp)]
+        known_modules, known_objects, _ = Indexer.collect_known_facts(module_files)
+        return known_modules, known_objects
+
+    @staticmethod
+    def collect_known_facts(module_files) -> tuple[set[str], dict[str, set[str]], list]:
+        """known_modules, known_objects и список файлов общих модулей из уже
+        обойдённых ModuleFile — общая часть Pass 1 для scan_known_names,
+        index_bsl и ProjectManager.reindex (входит в отпечаток парсера)."""
         known_modules: set[str] = set()
         known_objects: dict[str, set[str]] = {}
-        for xp in xml_paths:
-            for mf in walker.walk(xp):
-                if mf.object_kind == 'ОбщийМодуль':
-                    known_modules.add(mf.object_name.lower())
-                elif mf.object_kind != 'Конфигурация':
-                    known_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
-        return known_modules, known_objects
+        common_module_files = []
+        for mf in module_files:
+            if mf.object_kind == 'ОбщийМодуль':
+                known_modules.add(mf.object_name.lower())
+                common_module_files.append(mf)
+            elif mf.object_kind != 'Конфигурация':
+                known_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
+        return known_modules, known_objects, common_module_files
 
     @staticmethod
     def scan_known_factory_functions(common_module_files: list) -> dict[str, set[str]]:
@@ -325,13 +335,7 @@ class Indexer:
         total_files = len(module_files)
 
         if known_modules is None or known_objects is None:
-            self_modules: set[str] = set()
-            self_objects: dict[str, set[str]] = {}
-            for mf in module_files:
-                if mf.object_kind == 'ОбщийМодуль':
-                    self_modules.add(mf.object_name.lower())
-                elif mf.object_kind != 'Конфигурация':
-                    self_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
+            self_modules, self_objects, _ = Indexer.collect_known_facts(module_files)
             if known_modules is None:
                 known_modules = self_modules
             if known_objects is None:
