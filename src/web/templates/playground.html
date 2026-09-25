@@ -1,0 +1,294 @@
+{% extends "base.html" %}
+{% block title %}Playground — {{ project.name }}{% endblock %}
+{% block container_class %}container-wide{% endblock %}
+{% block active_nav %}playground{% endblock %}
+{% block content %}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg>
+    MCP Tools Playground
+</h1>
+<p class="muted">Проект: <strong>{{ project.id }}</strong> — {{ project.name }}</p>
+
+<div class="playground-layout">
+    <div class="playground-form">
+        <label for="tool-select">Tool:</label>
+        <select id="tool-select" onchange="onToolChange()">
+            {% for tool in tools_meta %}
+            <option value="{{ tool.name }}">{{ tool.name }}</option>
+            {% endfor %}
+        </select>
+
+        <div id="tool-description" class="tool-desc"></div>
+
+        <div id="tool-params"></div>
+
+        <button onclick="executeTool()" class="btn btn-primary" id="run-btn">
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#play"/></svg> Выполнить</button>
+    </div>
+
+    <div class="playground-result">
+        <h3>Результат</h3>
+        <div id="result-box" class="result-box">
+            <p class="muted">Выберите tool и нажмите "Выполнить"</p>
+        </div>
+        <div id="result-meta" class="muted" style="margin-top:8px"></div>
+    </div>
+</div>
+
+<div class="playground-history">
+    <h3>История (последние 6)</h3>
+    <div id="history-list">
+        <p class="muted">Пока пусто</p>
+    </div>
+</div>
+
+<script>
+const TOOLS_META = {{ tools_meta | tojson }};
+// Подпись кнопки с иконкой из спрайта — чтобы восстановить её после выполнения.
+const RUN_BTN_HTML = document.getElementById('run-btn').innerHTML;
+const PROJECT_ID = "{{ project.id }}";
+let history = [];
+
+function onToolChange() {
+    const sel = document.getElementById('tool-select');
+    const tool = TOOLS_META.find(t => t.name === sel.value);
+    if (!tool) return;
+
+    document.getElementById('tool-description').textContent = tool.description;
+
+    // Fix #1: Clear result on tool change
+    document.getElementById('result-box').innerHTML = '<p class="muted">Нажмите "Выполнить"</p>';
+    document.getElementById('result-meta').textContent = '';
+
+    const paramsDiv = document.getElementById('tool-params');
+    paramsDiv.innerHTML = '';
+
+    paramsDiv.innerHTML += `
+        <div class="param-row">
+            <label>project_id</label>
+            <input type="text" value="${PROJECT_ID}" disabled class="param-input">
+        </div>`;
+
+    for (const p of tool.params) {
+        let input = '';
+        // Правило подсказок то же, что в остальных формах: в placeholder —
+        // только пример значения с приставкой «напр. », пояснение — строкой
+        // под полем. У select'ов подсказка пояснительная, ей в placeholder
+        // делать нечего (его там и не бывает).
+        const example = p.hint ? `напр. ${p.hint}` : '';
+        let hintLine = '';
+        if (p.type === 'select') {
+            const labels = p.option_labels || {};
+            const options = (p.options || []).map(o => {
+                const label = labels[o] || o || '(любой)';
+                return `<option value="${o}">${label}</option>`;
+            }).join('');
+            input = `<select id="param-${p.name}" class="param-input">${options}</select>`;
+            if (p.hint) hintLine = `<div class="form-hint">${p.hint}</div>`;
+        } else if (p.type === 'number') {
+            input = `<input type="number" id="param-${p.name}" value="${p.default || ''}" class="param-input">`;
+            if (p.hint) hintLine = `<div class="form-hint">${p.hint}</div>`;
+        } else {
+            input = `<input type="text" id="param-${p.name}" placeholder="${example}" class="param-input">`;
+        }
+        const req = p.required ? ' <span class="required">*</span>' : '';
+        paramsDiv.innerHTML += `
+            <div class="param-row">
+                <label>${p.name}${req}</label>
+                ${input}
+                ${hintLine}
+            </div>`;
+    }
+}
+
+// Fix #2: Format result as rich HTML
+const COL_LABELS = {
+    'full_name': 'Полное имя', 'object_full_name': 'Объект', 'name': 'Имя',
+    'kind': 'Тип', 'synonym': 'Синоним', 'comment': 'Комментарий',
+    'type_desc': 'Тип данных', 'attr_name': 'Реквизит',
+    'Имя': 'Имя', 'Вид': 'Вид', 'Тип': 'Тип', 'Синоним': 'Синоним',
+    'Свойство': 'Свойство', 'Значение': 'Значение',
+    'Количество': 'Кол-во', 'Показатель': 'Показатель',
+};
+
+function formatResult(data) {
+    if (!data.result_data) {
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'white-space:pre-wrap;margin:0;font-size:13px';
+        pre.textContent = data.result || 'No result';
+        return pre;
+    }
+
+    const rd = data.result_data;
+    const container = document.createElement('div');
+
+    if (rd.count !== undefined) {
+        const header = document.createElement('div');
+        header.className = 'result-header';
+        header.innerHTML = `<strong>${rd.count}</strong> результат(ов)`;
+        container.appendChild(header);
+    }
+
+    // Table for list results (search_metadata, search_attributes, find_references, list_objects)
+    if (rd.items && rd.items.length > 0) {
+        const table = document.createElement('table');
+        table.className = 'detail-table';
+        table.style.marginTop = '8px';
+
+        const keys = Object.keys(rd.items[0]);
+        const thead = document.createElement('thead');
+        thead.innerHTML = '<tr>' + keys.map(k => `<th>${COL_LABELS[k] || k}</th>`).join('') + '</tr>';
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        for (const item of rd.items) {
+            const tr = document.createElement('tr');
+            for (const k of keys) {
+                const td = document.createElement('td');
+                const val = item[k] || '';
+                if (k === 'full_name' || k === 'object_full_name') {
+                    td.innerHTML = `<a href="/projects/${PROJECT_ID}/object/${encodeURIComponent(val)}" target="_blank" class="result-name">${val}</a>`;
+                } else if (k === 'type_desc' && val) {
+                    td.innerHTML = `<span class="mono">${val}</span>`;
+                } else if (k === 'kind') {
+                    td.innerHTML = `<span class="result-kind">${val}</span>`;
+                } else {
+                    td.textContent = val;
+                }
+                tr.appendChild(td);
+            }
+            tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        container.appendChild(table);
+    }
+
+    // Sections for object details
+    if (rd.sections) {
+        for (const sec of rd.sections) {
+            const h = document.createElement('h4');
+            h.textContent = sec.title;
+            h.style.cssText = 'margin:12px 0 6px;font-size:14px';
+            container.appendChild(h);
+
+            if (sec.items && sec.items.length) {
+                const table = document.createElement('table');
+                table.className = 'detail-table';
+                const keys = Object.keys(sec.items[0]);
+                table.innerHTML = '<thead><tr>' + keys.map(k => `<th>${COL_LABELS[k] || k}</th>`).join('') + '</tr></thead>';
+                const tbody = document.createElement('tbody');
+                for (const item of sec.items) {
+                    const tr = document.createElement('tr');
+                    for (const k of keys) {
+                        const td = document.createElement('td');
+                        td.textContent = item[k] || '';
+                        if (k === 'type_desc') td.className = 'mono';
+                        tr.appendChild(td);
+                    }
+                    tbody.appendChild(tr);
+                }
+                table.appendChild(tbody);
+                container.appendChild(table);
+            }
+
+            if (sec.text) {
+                const pre = document.createElement('pre');
+                pre.style.cssText = 'white-space:pre-wrap;font-size:13px;margin:4px 0';
+                pre.textContent = sec.text;
+                container.appendChild(pre);
+            }
+        }
+    }
+
+    // Plain text fallback if no structured data rendered
+    if (container.children.length === 0) {
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'white-space:pre-wrap;margin:0;font-size:13px';
+        pre.textContent = data.result || 'No result';
+        container.appendChild(pre);
+    }
+
+    return container;
+}
+
+async function executeTool() {
+    const sel = document.getElementById('tool-select');
+    const toolName = sel.value;
+    const tool = TOOLS_META.find(t => t.name === toolName);
+    if (!tool) return;
+
+    const params = {};
+    for (const p of tool.params) {
+        const el = document.getElementById('param-' + p.name);
+        if (el && el.value) {
+            params[p.name] = el.value;
+        }
+    }
+
+    const btn = document.getElementById('run-btn');
+    const resultBox = document.getElementById('result-box');
+    btn.disabled = true;
+    btn.textContent = 'Выполняется…';
+    resultBox.innerHTML = '<p class="muted">Загрузка...</p>';
+
+    try {
+        const resp = await fetch(`/api/projects/${PROJECT_ID}/playground`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tool: toolName, params}),
+        });
+        const data = await resp.json();
+
+        // Fix #2: Rich formatting
+        resultBox.innerHTML = '';
+        resultBox.appendChild(formatResult(data));
+
+        document.getElementById('result-meta').textContent =
+            `${data.elapsed_ms} мс · project: ${PROJECT_ID} · ${data.timestamp}`;
+
+        // History
+        const paramStr = Object.entries(params).map(([k,v]) => `${k}="${v}"`).join(', ');
+        const lines = (data.result || '').split('\n');
+        const summary = lines[0].substring(0, 60);
+        history.unshift({
+            time: data.timestamp,
+            tool: toolName,
+            params: paramStr,
+            summary: summary,
+            ms: data.elapsed_ms,
+        });
+        if (history.length > 6) history.pop();
+        renderHistory();
+
+    } catch (e) {
+        resultBox.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = RUN_BTN_HTML;
+    }
+}
+
+function renderHistory() {
+    const div = document.getElementById('history-list');
+    if (history.length === 0) {
+        div.innerHTML = '<p class="muted">Пока пусто</p>';
+        return;
+    }
+    div.innerHTML = history.map(h => `
+        <div class="history-item" onclick="replayHistory('${h.tool}')">
+            <span class="history-time">${h.time}</span>
+            <span class="history-tool">${h.tool}</span>(${h.params})
+            → <span class="history-summary">${h.summary}</span>
+            <span class="muted">${h.ms}ms</span>
+        </div>
+    `).join('');
+}
+
+function replayHistory(toolName) {
+    document.getElementById('tool-select').value = toolName;
+    onToolChange();
+}
+
+onToolChange();
+</script>
+{% endblock %}

@@ -1,0 +1,31 @@
+# Имя проекта задано явно: иначе compose берёт его из имени каталога
+# (сейчас 1c-scout) и подставляет в группу контейнеров и в имя образа —
+# старое название продолжало бы мелькать в Docker Desktop.
+name: ariadna
+
+services:
+  ariadna:
+    build: .
+    image: ariadna
+    container_name: ariadna
+    ports:
+      - "${MCP_HOST_PORT:-19877}:9877"        # MCP SSE server (deprecated transport, kept for compat)
+      - "${MCP_HTTP_HOST_PORT:-19879}:9879"   # MCP streamable HTTP server
+      - "${WEB_HOST_PORT:-19878}:9878"        # Web UI
+    volumes:
+      - ./data:/data                       # Projects, indexes, uploads
+    environment:
+      # Контейнер по умолчанию живёт в UTC, и даты в UI (время индексации)
+      # расходились с часами на стене.
+      - TZ=${TZ:-Europe/Moscow}
+      - DATA_DIR=/data
+      - MCP_PORT=9877
+      - MCP_HTTP_PORT=9879
+      - WEB_PORT=9878
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9878/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+    restart: unless-stopped

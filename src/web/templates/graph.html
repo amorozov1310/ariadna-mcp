@@ -1,0 +1,393 @@
+{% extends "base.html" %}
+{% block title %}Граф зависимостей — {{ project.name }}{% endblock %}
+
+{% block active_nav %}graph{% endblock %}
+
+{% block content %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.6/dist/vis-network.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.6/dist/dist/vis-network.min.css">
+
+{# Этап U0/U6: один раздел «Граф», переключатель текст/визуал внутри. #}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
+    Граф вызовов
+</h1>
+<div class="view-switch">
+    <span class="view-tab active">Визуальный</span>
+    <a class="view-tab" href="/projects/{{ project.id }}/calltree{% if procedure %}?procedure={{ procedure }}&module={{ module }}&direction={{ direction }}&depth={{ depth }}{% if source_id %}&source_id={{ source_id }}{% endif %}{% endif %}">Текстовое дерево</a>
+</div>
+
+<div class="card">
+    <div class="graph-tabs">
+        <button class="graph-tab active" id="tab-calltree" onclick="switchTab('calltree')">Дерево вызовов</button>
+        <button class="graph-tab" id="tab-references" onclick="switchTab('references')">Ссылки на объект</button>
+    </div>
+
+    <!-- Call tree form -->
+    <div id="form-calltree" class="graph-form">
+        <div class="form-row">
+            <div class="form-group" style="flex:2">
+                <label>Имя процедуры</label>
+                <input id="ct-procedure" placeholder="напр. ОбработкаПроведения" value="{{ procedure }}">
+                <div class="form-hint">Точное имя процедуры или функции, без скобок.</div>
+            </div>
+            <div class="form-group" style="flex:2">
+                <label>Модуль — необязательно</label>
+                <input id="ct-module" placeholder="напр. ОбщегоНазначения" value="{{ module }}">
+                <div class="form-hint">Нужен, только если имя встречается в нескольких модулях.</div>
+            </div>
+            <div class="form-group" style="flex:1">
+                <label>Направление</label>
+                <select id="ct-direction">
+                    <option value="down" {% if direction != 'up' %}selected{% endif %}>Вниз — кого вызывает</option>
+                    <option value="up" {% if direction == 'up' %}selected{% endif %}>Вверх — кто вызывает</option>
+                </select>
+                <div class="form-hint">Вниз — что делает процедура. Вверх — кто на неё завязан.</div>
+            </div>
+            <div class="form-group" style="flex:0.5">
+                <label>Глубина</label>
+                <input type="number" id="ct-depth" value="{{ depth or 3 }}" min="1" max="10">
+                <div class="form-hint">Уровней вызовов, 1–10.</div>
+            </div>
+            {% if sources and sources|length > 1 %}
+            <div class="form-group" style="flex:1">
+                <label>Источник</label>
+                <select id="ct-source">
+                    <option value="">Все</option>
+                    {% for s in sources %}
+                    <option value="{{ s.id }}" {% if source_id == s.id %}selected{% endif %}>
+                        {{ s.label }}{% if s.source_type == 'extension' %} (ext){% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+        </div>
+        <div style="margin-top:8px">
+            <button class="btn btn-primary" onclick="loadCalltreeGraph()">Построить граф</button>
+        </div>
+    </div>
+
+    <!-- References form -->
+    <div id="form-references" class="graph-form" style="display:none">
+        <div class="form-row">
+            <div class="form-group" style="flex:3">
+                <label>Имя объекта конфигурации</label>
+                <input id="ref-object" placeholder="напр. Справочник.Номенклатура">
+                <div class="form-hint">Можно и короткое имя — «Контрагенты».</div>
+            </div>
+            <div class="form-group" style="flex:0.5">
+                <label>Глубина</label>
+                <input type="number" id="ref-depth" value="1" min="1" max="3">
+                <div class="form-hint">Уровней связей, 1–3.</div>
+            </div>
+            {% if sources and sources|length > 1 %}
+            <div class="form-group" style="flex:1">
+                <label>Источник</label>
+                <select id="ref-source">
+                    <option value="">Все</option>
+                    {% for s in sources %}
+                    <option value="{{ s.id }}">{{ s.label }}{% if s.source_type == 'extension' %} (ext){% endif %}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+        </div>
+        <div style="margin-top:8px">
+            <button class="btn btn-primary" onclick="loadReferencesGraph()">Построить граф</button>
+            <span class="text-muted" style="margin-left:12px;font-size:12px">Стрелка: A → B значит «A ссылается на B через реквизит»</span>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="flex-between mb-8">
+        <div>
+            <h3 id="graph-title" style="margin:0">Граф</h3>
+            <div id="graph-stats" class="text-muted" style="font-size:12px"></div>
+        </div>
+        <div>
+            <button class="btn btn-secondary btn-sm" onclick="fitGraph()">По размеру</button>
+            <button class="btn btn-secondary btn-sm" onclick="togglePhysics()">Физика: <span id="physics-state">вкл</span></button>
+            <label class="text-muted" style="font-size:12px;margin-left:8px">
+                Layout:
+                <select id="layout-select" onchange="setLayout(this.value)" style="padding:4px 6px">
+                    <option value="hierarchical">Иерархия</option>
+                    <option value="physics">Сила</option>
+                </select>
+            </label>
+        </div>
+    </div>
+
+    <div id="legend" style="display:none;margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:4px;font-size:12px"></div>
+
+    <div id="graph-wrap" style="position:relative">
+        <div id="graph-container" style="width:100%;height:650px;border:1px solid var(--border);border-radius:6px;background:var(--bg-inset);position:relative"></div>
+        <div id="graph-empty" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);text-align:center;pointer-events:none">
+            <svg class="icon" style="width:40px;height:40px;opacity:.3;margin-bottom:var(--space-2)"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
+            <div>Введите параметры и нажмите «Построить граф»</div>
+        </div>
+        <div id="graph-loader" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);pointer-events:none">
+            Загрузка...
+        </div>
+    </div>
+</div>
+
+<style>
+.view-switch { display:flex; gap:0; margin-bottom:var(--space-4); border-bottom:2px solid var(--border); }
+.view-tab { padding:8px var(--space-4); font-size:var(--fs-base); font-weight:500; color:var(--text2);
+            border-bottom:2px solid transparent; margin-bottom:-2px; }
+.view-tab:hover { color:var(--text); text-decoration:none; }
+.view-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.graph-tabs { display:flex; gap:0; margin-bottom:var(--space-3); border-bottom:2px solid var(--border); }
+.graph-tab { background:none; border:none; padding:8px var(--space-4); font-size:var(--fs-base); font-weight:500;
+             color:var(--text2); cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px;
+             font-family:var(--font); }
+.graph-tab:hover { color:var(--text); }
+.graph-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.legend-item { display:inline-flex; align-items:center; gap:6px; margin-right:14px; }
+.legend-swatch { width:14px; height:14px; border-radius:3px; display:inline-block; }
+</style>
+
+<script>
+const PROJECT_ID = "{{ project.id }}";
+let network = null;
+
+// vis.js рисует своим канвасом и про CSS-переменные не знает, поэтому
+// цвета ему приходится передавать значениями. Берём их из тех же токенов,
+// что и вся остальная страница — иначе на тёмной теме граф остаётся
+// слепящим белым островом посреди тёмного интерфейса.
+function themeColors() {
+    const css = getComputedStyle(document.documentElement);
+    const v = (name, fallback) => (css.getPropertyValue(name).trim() || fallback);
+    return {
+        surface: v('--bg2', '#ffffff'),
+        inset: v('--bg-inset', '#f0f3f5'),
+        text: v('--text', '#14202a'),
+        muted: v('--text2', '#55666f'),
+        border: v('--border-strong', '#c3ced5'),
+        accent: v('--accent', '#0f766e'),
+        highlight: v('--accent-2-soft', '#fdf3e3'),
+    };
+}
+let physicsEnabled = true;
+let currentData = null;
+
+function switchTab(tab) {
+    document.querySelectorAll('.graph-tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + tab).classList.add('active');
+    document.getElementById('form-calltree').style.display = tab === 'calltree' ? 'block' : 'none';
+    document.getElementById('form-references').style.display = tab === 'references' ? 'block' : 'none';
+}
+
+function showLoader(show) {
+    document.getElementById('graph-empty').style.display = 'none';
+    document.getElementById('graph-loader').style.display = show ? 'block' : 'none';
+}
+
+async function loadCalltreeGraph() {
+    const params = new URLSearchParams({
+        procedure: document.getElementById('ct-procedure').value,
+        module: document.getElementById('ct-module').value,
+        direction: document.getElementById('ct-direction').value,
+        depth: document.getElementById('ct-depth').value,
+        _: Date.now(),  // cache-buster
+    });
+    const src = document.getElementById('ct-source');
+    if (src && src.value) params.append('source_id', src.value);
+
+    if (!params.get('procedure')) {
+        alert('Укажите имя процедуры');
+        return;
+    }
+
+    showLoader(true);
+    try {
+        const resp = await fetch(`/api/projects/${PROJECT_ID}/graph/calltree?${params}`,
+                                 { cache: 'no-store' });
+        const data = await resp.json();
+        if (data.error) { alert(data.error); showLoader(false); return; }
+        renderGraph(data, `Дерево: ${data.root_procedure} (${data.direction === 'up' ? 'вверх' : 'вниз'})`);
+    } catch (e) {
+        alert('Ошибка: ' + e);
+    }
+    showLoader(false);
+}
+
+async function loadReferencesGraph() {
+    const params = new URLSearchParams({
+        object_name: document.getElementById('ref-object').value,
+        depth: document.getElementById('ref-depth').value,
+        _: Date.now(),  // cache-buster
+    });
+    const src = document.getElementById('ref-source');
+    if (src && src.value) params.append('source_id', src.value);
+
+    if (!params.get('object_name')) {
+        alert('Укажите имя объекта');
+        return;
+    }
+
+    showLoader(true);
+    try {
+        const resp = await fetch(`/api/projects/${PROJECT_ID}/graph/references?${params}`,
+                                 { cache: 'no-store' });
+        const data = await resp.json();
+        if (data.error) { alert(data.error); showLoader(false); return; }
+        renderGraph(data, `Ссылки на ${data.root_object}`);
+    } catch (e) {
+        alert('Ошибка: ' + e);
+    }
+    showLoader(false);
+}
+
+function renderGraph(data, title) {
+    currentData = data;
+    document.getElementById('graph-title').textContent = title;
+    document.getElementById('graph-stats').textContent =
+        `Узлов: ${data.total_nodes} · Рёбер: ${data.total_edges}`;
+
+    // Legend
+    const legendEl = document.getElementById('legend');
+    if (data.legend && data.legend.length > 0) {
+        legendEl.innerHTML = '<strong>Источники:</strong> ' + data.legend.map(l =>
+            `<span class="legend-item"><span class="legend-swatch" style="background:${l.color}"></span>${l.source_label}</span>`
+        ).join('');
+        legendEl.style.display = 'block';
+    } else {
+        legendEl.style.display = 'none';
+    }
+
+    // Nuclear option: destroy the old vis.Network AND completely replace the
+    // container DOM node with a fresh one. vis.js attaches many internal
+    // event listeners and DOM nodes that are not always cleaned by destroy(),
+    // so the only truly reliable reset is to throw away the container itself.
+    if (network) {
+        try { network.destroy(); } catch (e) { /* ignore */ }
+        network = null;
+    }
+    const oldContainer = document.getElementById('graph-container');
+    const newContainer = document.createElement('div');
+    newContainer.id = 'graph-container';
+    newContainer.style.cssText = oldContainer.style.cssText;
+    // Preserve the stylesheet-derived inline style attribute set in markup
+    oldContainer.parentNode.replaceChild(newContainer, oldContainer);
+
+    const container = newContainer;
+    const nodes = new vis.DataSet(data.nodes);
+    const edges = new vis.DataSet(data.edges);
+
+    const layout = document.getElementById('layout-select').value;
+    const theme = themeColors();
+    const options = {
+        nodes: {
+            shape: 'box',
+            shapeProperties: { borderRadius: 6 },
+            margin: 10,
+            // Wrap long procedure names onto multiple lines so they never overlap neighbours.
+            widthConstraint: { minimum: 70, maximum: 160 },
+            font: {
+                size: 12,
+                face: 'Inter, Segoe UI, system-ui, sans-serif',
+                color: theme.text,
+                multi: false,   // plain text
+            },
+            borderWidth: 2,
+            color: { border: theme.border, background: theme.surface },
+        },
+        edges: {
+            smooth: { type: 'continuous' },
+            color: { color: theme.muted, highlight: theme.accent },
+            arrows: { to: { scaleFactor: 0.6 } },
+            font: { size: 10, background: theme.surface, strokeWidth: 0, color: theme.muted },
+        },
+        physics: {
+            enabled: physicsEnabled && layout === 'physics',
+            barnesHut: { gravitationalConstant: -10000, springLength: 150, avoidOverlap: 0.5 },
+            stabilization: { iterations: 150 },
+        },
+        interaction: { hover: true, tooltipDelay: 200, navigationButtons: true, zoomView: true },
+    };
+
+    // Цвет источника уходит в РАМКУ, заливка — цвет поверхности темы:
+    // так узел читается и на светлом, и на тёмном фоне, а принадлежность
+    // источнику видна по канту.
+    //
+    // Исходный цвет запоминается в _srcColor и НЕ теряется: renderGraph
+    // вызывается повторно (смена layout, переключение темы) на тех же
+    // данных, а после первого прохода n.color — уже объект, а не строка.
+    // Раньше повторный проход из-за этого молча пропускался, и при
+    // переключении на тёмную тему узлы оставались белыми с белым текстом.
+    data.nodes.forEach(n => {
+        if (n._srcColor === undefined) {
+            n._srcColor = (typeof n.color === 'string') ? n.color : null;
+        }
+        if (n._srcColor) {
+            n.color = {
+                border: n._srcColor,
+                background: theme.surface,
+                highlight: { border: n._srcColor, background: theme.highlight },
+                hover: { border: n._srcColor, background: theme.inset },
+            };
+            n.borderWidth = 3;   // emphasise source colour on border
+        }
+    });
+    // Rebuild DataSet with transformed colours
+    nodes.clear();
+    nodes.add(data.nodes);
+
+    if (layout === 'hierarchical') {
+        options.layout = {
+            hierarchical: {
+                enabled: true,
+                direction: 'UD',  // Up-Down
+                sortMethod: 'directed',
+                levelSeparation: 160,    // more vertical space between levels
+                nodeSpacing: 220,        // more horizontal space between siblings
+                treeSpacing: 240,
+                blockShifting: true,
+                edgeMinimization: true,
+                parentCentralization: true,
+            },
+        };
+        options.physics.enabled = false;
+    }
+
+    network = new vis.Network(container, { nodes, edges }, options);
+
+    // Click opens object detail page where possible
+    network.on('click', function(params) {
+        if (params.nodes.length === 0) return;
+        const node = nodes.get(params.nodes[0]);
+        if (node.full_name && node.kind) {
+            const url = `/projects/${PROJECT_ID}/object/${encodeURIComponent(node.full_name)}` +
+                (node.source_id ? `?source_id=${node.source_id}` : '');
+            window.open(url, '_blank');
+        }
+    });
+}
+
+// Тему могут переключить, когда граф уже построен — перерисовываем его
+// теми же данными, чтобы цвета догнали интерфейс.
+new MutationObserver(() => {
+    if (currentData) renderGraph(currentData, document.getElementById('graph-title').textContent);
+}).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+function fitGraph() { if (network) network.fit({ animation: true }); }
+
+function togglePhysics() {
+    physicsEnabled = !physicsEnabled;
+    document.getElementById('physics-state').textContent = physicsEnabled ? 'вкл' : 'выкл';
+    if (network) network.setOptions({ physics: { enabled: physicsEnabled } });
+}
+
+function setLayout(value) {
+    if (currentData) renderGraph(currentData, document.getElementById('graph-title').textContent);
+}
+
+// Auto-load if procedure was passed in URL
+{% if procedure %}
+window.addEventListener('load', () => loadCalltreeGraph());
+{% endif %}
+</script>
+{% endblock %}

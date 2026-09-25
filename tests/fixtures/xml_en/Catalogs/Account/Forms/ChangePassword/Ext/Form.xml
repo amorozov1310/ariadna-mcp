@@ -1,0 +1,302 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<CommandBarLocation>Bottom</CommandBarLocation>
+	<AutoCommandBar name="FormCommandBar" id="-1">
+		<HorizontalAlign>Right</HorizontalAlign>
+		<Autofill>false</Autofill>
+		<ChildItems>
+			<Button name="FormGenerateNewPassword" id="27">
+				<Type>CommandBarButton</Type>
+				<CommandName>Form.Command.GenerateNewPassword</CommandName>
+				<ExtendedTooltip name="FormGenerateNewPasswordExtendedTooltip" id="28"/>
+			</Button>
+			<Button name="FormChangePassword" id="25">
+				<Type>CommandBarButton</Type>
+				<CommandName>Form.Command.ChangePassword</CommandName>
+				<ExtendedTooltip name="FormChangePasswordExtendedTooltip" id="26"/>
+			</Button>
+			<Button name="FormClose" id="29">
+				<Type>CommandBarButton</Type>
+				<CommandName>Form.StandardCommand.Close</CommandName>
+				<ExtendedTooltip name="FormCloseExtendedTooltip" id="30"/>
+			</Button>
+		</ChildItems>
+	</AutoCommandBar>
+	<Events>
+		<Event name="OnCreateAtServer">OnCreateAtServer</Event>
+	</Events>
+	<ChildItems>
+		<LabelField name="Login" id="1">
+			<DataPath>Login</DataPath>
+			<ContextMenu name="LoginContextMenu" id="2"/>
+			<ExtendedTooltip name="LoginExtendedTooltip" id="3"/>
+		</LabelField>
+		<UsualGroup name="GroupPerson" id="34">
+			<Representation>None</Representation>
+			<ShowTitle>false</ShowTitle>
+			<ExtendedTooltip name="GroupPersonExtendedTooltip" id="35"/>
+			<ChildItems>
+				<LabelField name="Person" id="4">
+					<DataPath>Person</DataPath>
+					<ContextMenu name="PersonContextMenu" id="5"/>
+					<ExtendedTooltip name="PersonExtendedTooltip" id="6"/>
+				</LabelField>
+				<LabelField name="Appointment" id="31">
+					<DataPath>Appointment</DataPath>
+					<TitleLocation>None</TitleLocation>
+					<ContextMenu name="AppointmentContextMenu" id="32"/>
+					<ExtendedTooltip name="AppointmentExtendedTooltip" id="33"/>
+				</LabelField>
+			</ChildItems>
+		</UsualGroup>
+		<LabelField name="App" id="7">
+			<DataPath>App</DataPath>
+			<ContextMenu name="AppContextMenu" id="8"/>
+			<ExtendedTooltip name="AppExtendedTooltip" id="9"/>
+		</LabelField>
+		<LabelField name="PwdPolicy" id="10">
+			<DataPath>PwdPolicy</DataPath>
+			<ContextMenu name="PwdPolicyContextMenu" id="11"/>
+			<ExtendedTooltip name="PwdPolicyExtendedTooltip" id="12"/>
+		</LabelField>
+		<InputField name="Password1" id="13">
+			<DataPath>Password1</DataPath>
+			<ToolTipRepresentation>Balloon</ToolTipRepresentation>
+			<PasswordMode>true</PasswordMode>
+			<ExtendedEditMultipleValues>true</ExtendedEditMultipleValues>
+			<ContextMenu name="Password1ContextMenu" id="14"/>
+			<ExtendedTooltip name="Password1ExtendedTooltip" id="15"/>
+			<Events>
+				<Event name="EditTextChange">Password1EditTextChange</Event>
+			</Events>
+		</InputField>
+		<InputField name="Password2" id="16">
+			<DataPath>Password2</DataPath>
+			<ToolTipRepresentation>Balloon</ToolTipRepresentation>
+			<PasswordMode>true</PasswordMode>
+			<ExtendedEditMultipleValues>true</ExtendedEditMultipleValues>
+			<ContextMenu name="Password2ContextMenu" id="17"/>
+			<ExtendedTooltip name="Password2ExtendedTooltip" id="18"/>
+		</InputField>
+		<CheckBoxField name="RequirePasswordChange" id="19">
+			<DataPath>RequirePasswordChange</DataPath>
+			<CheckBoxType>Auto</CheckBoxType>
+			<ContextMenu name="RequirePasswordChangeContextMenu" id="20"/>
+			<ExtendedTooltip name="RequirePasswordChangeExtendedTooltip" id="21"/>
+		</CheckBoxField>
+		<InputField name="TextRequired" id="22">
+			<DataPath>TextRequired</DataPath>
+			<ReadOnly>true</ReadOnly>
+			<AutoMaxWidth>false</AutoMaxWidth>
+			<MultiLine>true</MultiLine>
+			<ExtendedEditMultipleValues>true</ExtendedEditMultipleValues>
+			<ContextMenu name="TextRequiredContextMenu" id="23"/>
+			<ExtendedTooltip name="TextRequiredExtendedTooltip" id="24"/>
+		</InputField>
+	</ChildItems>
+	<Attributes>
+		<Attribute name="Account" id="1">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Account</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>cfg:CatalogRef.Account</v8:Type>
+			</Type>
+		</Attribute>
+		<Attribute name="PwdPolicy" id="2">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Pwd policy</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Парольная политика</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>cfg:CatalogRef.PwdPolicy</v8:Type>
+			</Type>
+		</Attribute>
+		<Attribute name="App" id="3">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>App</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Приложение</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>cfg:CatalogRef.AppMS</v8:Type>
+			</Type>
+		</Attribute>
+		<Attribute name="RequirePasswordChange" id="4">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Require password change</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Требовать смену пароля</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>xs:boolean</v8:Type>
+			</Type>
+		</Attribute>
+		<Attribute name="Password1" id="5">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Password</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Пароль</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>xs:string</v8:Type>
+				<v8:StringQualifiers>
+					<v8:Length>0</v8:Length>
+					<v8:AllowedLength>Variable</v8:AllowedLength>
+				</v8:StringQualifiers>
+			</Type>
+		</Attribute>
+		<Attribute name="Password2" id="6">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Repeat password</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Повтор пароля</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>xs:string</v8:Type>
+				<v8:StringQualifiers>
+					<v8:Length>0</v8:Length>
+					<v8:AllowedLength>Variable</v8:AllowedLength>
+				</v8:StringQualifiers>
+			</Type>
+		</Attribute>
+		<Attribute name="Person" id="7">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Person</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Сотрудник</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>cfg:CatalogRef.Person</v8:Type>
+			</Type>
+		</Attribute>
+		<Attribute name="TextRequired" id="8">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Text required</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Текст требований</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>xs:string</v8:Type>
+				<v8:StringQualifiers>
+					<v8:Length>0</v8:Length>
+					<v8:AllowedLength>Variable</v8:AllowedLength>
+				</v8:StringQualifiers>
+			</Type>
+		</Attribute>
+		<Attribute name="Login" id="9">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Login</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Логин</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>xs:string</v8:Type>
+				<v8:StringQualifiers>
+					<v8:Length>100</v8:Length>
+					<v8:AllowedLength>Variable</v8:AllowedLength>
+				</v8:StringQualifiers>
+			</Type>
+		</Attribute>
+		<Attribute name="Appointment" id="10">
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Appointment</v8:content>
+				</v8:item>
+			</Title>
+			<Type>
+				<v8:Type>cfg:CatalogRef.Appointment</v8:Type>
+			</Type>
+		</Attribute>
+		<Attribute name="NodeRef" id="11">
+			<Type>
+				<v8:Type>cfg:CatalogRef.Node</v8:Type>
+			</Type>
+		</Attribute>
+	</Attributes>
+	<Commands>
+		<Command name="GenerateNewPassword" id="1">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Generate new</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Сгенерировать новый</v8:content>
+				</v8:item>
+			</Title>
+			<ToolTip>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Generate new password</v8:content>
+				</v8:item>
+			</ToolTip>
+			<Action>GenerateNewPassword</Action>
+		</Command>
+		<Command name="ChangePassword" id="2">
+			<Title>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Change password</v8:content>
+				</v8:item>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Сменить пароль</v8:content>
+				</v8:item>
+			</Title>
+			<ToolTip>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Change password</v8:content>
+				</v8:item>
+			</ToolTip>
+			<Action>ChangePassword</Action>
+		</Command>
+	</Commands>
+</Form>

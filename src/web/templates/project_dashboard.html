@@ -1,0 +1,449 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} — Ариадна{% endblock %}
+{% block active_nav %}overview{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h2>{{ project.name }}</h2>
+        <span class="badge badge-{{ project.status }}">
+            {% if project.status == 'ready' %}Готов
+            {% elif project.status == 'indexing' %}Индексация…
+            {% elif project.status == 'error' %}Ошибка
+            {% else %}Пусто{% endif %}
+        </span>
+    </div>
+    {% if project.description %}
+    <div class="text-muted mb-8">{{ project.description }}</div>
+    {% endif %}
+
+    {% if stats.objects > 0 %}
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.objects|num }}</div>
+            <div class="stat-label">Объектов</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.attributes|num }}</div>
+            <div class="stat-label">Реквизитов</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.forms|num }}</div>
+            <div class="stat-label">Форм</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.modules|num }}</div>
+            <div class="stat-label">Модулей</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.procedures|num }}</div>
+            <div class="stat-label">Процедур</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.sources|num }}</div>
+            <div class="stat-label">Источников</div>
+        </div>
+    </div>
+    {% if project.status == 'indexing' %}
+    <p class="text-muted" style="font-size:var(--fs-sm)">
+        Числа — по итогам последней завершённой индексации; обновятся, когда текущая закончится.
+    </p>
+    {% endif %}
+    {% endif %}
+
+    {#
+      U9: вместо «стены» из 25-34 значений через точку — топ с барами.
+      Каждая строка кликабельна и ведёт в поиск с уже выставленным
+      фильтром по виду; хвост списка убран под раскрытие, чтобы
+      дашборд начинался с того, из чего конфигурация состоит на самом деле.
+    #}
+    {% if kinds_breakdown %}
+    {% macro kind_row(k) %}
+    <a class="kind-row" href="/projects/{{ project.id }}/search?kind={{ k.kind }}"
+       title="{{ k.kind }} — {{ k.count|num }} объектов, {{ k.share_str }} от всех">
+        <span class="kind-name">{{ k.kind }}</span>
+        <span class="kind-bar"><span style="width:{{ k.bar|round(1) }}%"></span></span>
+        <span class="kind-count">{{ k.count|num }}</span>
+        <span class="kind-share">{{ k.share_str }}</span>
+    </a>
+    {% endmacro %}
+
+    <div class="card-header" style="margin-top:var(--space-5)">
+        <h3 class="section-title">Виды метаданных</h3>
+        <span class="text-muted" style="font-size:var(--fs-sm)">Всего видов: {{ kinds_breakdown|length }}</span>
+    </div>
+    <div class="kinds">
+        {% for k in kinds_breakdown[:10] %}{{ kind_row(k) }}{% endfor %}
+    </div>
+    {% if kinds_breakdown|length > 10 %}
+    <details class="disclosure" style="margin-top:var(--space-3)">
+        <summary>
+            <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#chevron-down"/></svg>
+            Показать остальные ({{ kinds_breakdown|length - 10 }})
+        </summary>
+        <div class="kinds disclosure-body">
+            {% for k in kinds_breakdown[10:] %}{{ kind_row(k) }}{% endfor %}
+        </div>
+    </details>
+    {% endif %}
+    {% endif %}
+</div>
+
+<!-- Источники -->
+<div class="card">
+    <div class="card-header">
+        <h3 class="section-title">
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#package"/></svg>
+            Источники данных
+        </h3>
+    </div>
+
+    {% if project.sources %}
+    <div class="source-list">
+        {% for src in project.sources %}
+        {#
+          Этап U0/U1: строка источника — grid [инфо | действия], а любая
+          раскрываемая форма живёт ОТДЕЛЬНЫМ рядом на всю ширину карточки
+          (.source-forms). Раньше <details> с формой лежал внутри flex-ряда
+          рядом с текстом, и при раскрытии .source-info с min-width:0
+          схлопывался до нуля — название переносилось по одному символу в
+          строку. Открыть обе формы сразу теперь безопасно.
+        #}
+        <div class="source-item">
+            <div class="source-info">
+                <div class="source-label">
+                    {{ src.label }}
+                    {% if src.source_type == 'extension' %}
+                    <span class="badge badge-accent">расширение</span>
+                    {% else %}
+                    <span class="badge badge-neutral">конфигурация</span>
+                    {% endif %}
+                </div>
+                <div class="source-meta">
+                    <span class="meta-item mono">{{ src.id }}</span>
+                    {#
+                      Раньше здесь висело «отчёт есть» — след времён, когда
+                      отчёт Конфигуратора загружали руками. Теперь он
+                      генерируется из XML при индексации, и сам по себе ни о
+                      чём не говорит. Показываем то, что реально определяет
+                      возможности источника: есть ли XML (без неё нет кода
+                      BSL, а значит ни графа вызовов, ни поиска по коду).
+                    #}
+                    {% if src.xml_path %}
+                    <span class="meta-item" title="XML-выгрузка конфигурации — из неё индексируются метаданные и код BSL">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#folder"/></svg>
+                        XML-выгрузка
+                    </span>
+                    {% elif src.report_path %}
+                    <span class="meta-item" style="color:var(--warning)"
+                          title="Источник добавлен только отчётом по конфигурации: метаданные есть, кода BSL нет">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#file-text"/></svg>
+                        только отчёт, без кода BSL
+                    </span>
+                    {% else %}
+                    <span class="meta-item" style="color:var(--warning)" title="У источника нет данных для индексации">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+                        нет данных
+                    </span>
+                    {% endif %}
+                    {% if src.indexed_at %}
+                    <span class="meta-item" title="Последняя индексация">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#clock"/></svg>
+                        {{ src.indexed_at[:19].replace('T', ' ') }}
+                    </span>
+                    {% else %}
+                    <span class="meta-item" style="color:var(--warning)">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+                        требуется индексация
+                    </span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="source-actions">
+                <form action="/api/projects/{{ project.id }}/reindex" method="post" style="display:inline">
+                    <input type="hidden" name="source_id" value="{{ src.id }}">
+                    <button type="submit" class="btn btn-secondary btn-sm btn-icon"
+                            aria-label="Переиндексировать источник «{{ src.label }}»"
+                            title="Переиндексировать только этот источник">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#refresh"/></svg>
+                    </button>
+                </form>
+                <form action="/api/projects/{{ project.id }}/sources/{{ src.id }}/delete" method="post" style="display:inline"
+                      onsubmit="return confirm('Удалить источник «{{ src.label }}» и все его данные?')">
+                    <button type="submit" class="btn btn-danger btn-sm btn-icon"
+                            aria-label="Удалить источник «{{ src.label }}»"
+                            title="Удалить источник">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#trash"/></svg>
+                    </button>
+                </form>
+            </div>
+
+            <div class="source-forms">
+                <details class="disclosure">
+                    <summary>
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
+                        Изменить
+                    </summary>
+                    <form action="/api/projects/{{ project.id }}/sources/{{ src.id }}/update"
+                          method="post" enctype="multipart/form-data" class="disclosure-body">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Название</label>
+                                <input name="label" value="{{ src.label }}">
+                            </div>
+                            <div class="form-group">
+                                <label>Тип</label>
+                                <select name="source_type">
+                                    <option value="main" {% if src.source_type == 'main' %}selected{% endif %}>Конфигурация</option>
+                                    <option value="extension" {% if src.source_type == 'extension' %}selected{% endif %}>Расширение</option>
+                                </select>
+                            </div>
+                        </div>
+                        {# Отчёт по конфигурации здесь не загружают: с этапа 5 он
+                           генерируется из XML сам при индексации. Источник —
+                           только XML-выгрузка. #}
+                        <div class="form-group">
+                            <label>Новая XML-выгрузка (.zip) — необязательно</label>
+                            <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
+                        </div>
+                        <label style="display:block;margin:var(--space-2) 0">
+                            <input type="checkbox" name="auto_reindex" checked>
+                            Сразу переиндексировать этот источник
+                        </label>
+                        <div class="btn-row">
+                            <button type="submit" class="btn btn-primary btn-sm">Сохранить изменения</button>
+                            <span class="text-muted" style="font-size:var(--fs-sm)">Замена файла перезаписывает старый</span>
+                        </div>
+                    </form>
+                </details>
+
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-muted" style="margin-top:var(--space-2)">Нет источников. Добавьте отчёт по конфигурации или XML-выгрузку.</p>
+    {% endif %}
+
+    <details class="disclosure" style="margin-top:var(--space-3)">
+        <summary>
+            <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg>
+            Добавить источник
+        </summary>
+        <form action="/api/projects/{{ project.id }}/sources" method="post"
+              enctype="multipart/form-data" class="disclosure-body">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>ID источника</label>
+                    <input name="source_id" required placeholder="напр. main" value="{% if not project.sources %}main{% endif %}">
+                    <div class="form-hint">Латиница без пробелов — это имя каталога источника на диске.</div>
+                </div>
+                <div class="form-group">
+                    <label>Название</label>
+                    <input name="label" required placeholder="напр. Бухгалтерия предприятия">
+                    <div class="form-hint">Как источник будет называться в интерфейсе.</div>
+                </div>
+                <div class="form-group">
+                    <label>Тип</label>
+                    <select name="source_type">
+                        <option value="main">Конфигурация</option>
+                        <option value="extension">Расширение</option>
+                    </select>
+                </div>
+            </div>
+            {#
+              Отчёта по конфигурации здесь больше нет: с этапа 5 он
+              генерируется из XML-выгрузки автоматически при индексации
+              (generate_config_report), так что выгружать его из
+              Конфигуратора руками не нужно. Единственный вход — XML.
+            #}
+            <div class="form-group">
+                <label>XML-выгрузка (.zip)</label>
+                <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
+                <div class="form-hint">
+                    Отчёт по конфигурации выгружать не нужно — он строится из этой XML сам.
+                    Файл необязателен при монтировании volume: положите выгрузку в
+                    <span class="mono">/data/projects/{{ project.id }}/sources/{id}/xml/</span>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">Добавить</button>
+        </form>
+    </details>
+</div>
+
+<!-- Действия -->
+<div class="card">
+    <div class="flex-between">
+        <button onclick="startReindex()" class="btn btn-primary" id="reindex-btn"
+                {% if not project.sources or project.status == 'indexing' %}disabled{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#refresh"/></svg>
+            Переиндексировать
+        </button>
+        <form action="/api/projects/{{ project.id }}/delete" method="post"
+              onsubmit="return confirm('Удалить проект «{{ project.name }}» и все данные?')">
+            <button type="submit" class="btn btn-danger btn-sm">
+                <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#trash"/></svg>
+                Удалить проект
+            </button>
+        </form>
+    </div>
+    <div id="reindex-status" class="progress-panel" style="margin-top:var(--space-3);display:none">
+        <div id="reindex-progress" class="progress-line">
+            <div class="spinner"></div>
+            <span id="reindex-text">Индексация…</span>
+            <span id="reindex-eta" class="progress-eta"></span>
+        </div>
+        <div class="progress-bar" id="reindex-bar" hidden><span id="reindex-fill"></span></div>
+    </div>
+</div>
+
+<script>
+const PROJECT_ID = "{{ project.id }}";
+
+// Человекочитаемые имена фаз индексации — вместо служебных 'bsl' и
+// 'factory_functions', которые ничего не говорят тому, кто смотрит.
+const PHASE_NAMES = {
+    scanning: 'сканирование выгрузки',
+    factory_functions: 'анализ общих модулей',
+    report: 'отчёт по конфигурации',
+    bsl: 'разбор кода BSL',
+    resolving: 'разрешение графа вызовов',
+};
+
+// Первая замеренная точка прогресса — по ней считается скорость и оценка
+// оставшегося времени. Начало прогона знать не нужно: страницу могли
+// открыть в середине (в том числе после перезагрузки), и тогда честнее
+// мерить темп по своему окну наблюдения, чем выдумывать точку старта.
+let rateAnchor = null;
+
+function formatLeft(seconds) {
+    if (!isFinite(seconds) || seconds <= 0) return '';
+    if (seconds < 60) return `≈ ${Math.round(seconds)} с`;
+    const m = Math.floor(seconds / 60), s = Math.round(seconds % 60);
+    if (m < 60) return s ? `≈ ${m} мин ${s} с` : `≈ ${m} мин`;
+    return `≈ ${Math.floor(m / 60)} ч ${m % 60} мин`;
+}
+
+function renderProgress(s) {
+    const text = document.getElementById('reindex-text');
+    const eta = document.getElementById('reindex-eta');
+    const bar = document.getElementById('reindex-bar');
+    const fill = document.getElementById('reindex-fill');
+    const phase = PHASE_NAMES[s.progress_phase] || s.progress_phase || '';
+
+    if (s.progress_total > 0) {
+        const pct = Math.min(100, s.progress_current / s.progress_total * 100);
+        bar.hidden = false;
+        fill.style.width = pct.toFixed(1) + '%';
+        text.textContent = `Индексация — ${pct.toFixed(0)}%`
+            + (phase ? `, ${phase}` : '')
+            + ` (${s.progress_current.toLocaleString('ru')} из ${s.progress_total.toLocaleString('ru')} файлов)`;
+
+        const now = Date.now();
+        if (!rateAnchor || s.progress_current < rateAnchor.done) {
+            // Первая точка — или счётчик поехал назад (начался новый этап).
+            rateAnchor = {t: now, done: s.progress_current};
+        }
+        const dDone = s.progress_current - rateAnchor.done;
+        const dT = (now - rateAnchor.t) / 1000;
+        eta.textContent = (dDone > 0 && dT > 5)
+            ? formatLeft((s.progress_total - s.progress_current) / (dDone / dT))
+            : '';
+    } else {
+        // Фазы без счётчика файлов (сканирование, разрешение графа).
+        bar.hidden = true;
+        eta.textContent = '';
+        text.textContent = 'Индексация' + (phase ? ` — ${phase}…` : '…');
+    }
+}
+
+// Этап 4/D7: reindex now starts in the background and the POST returns
+// immediately (status: 'started' | 'already_running') — actual progress
+// and completion come from polling /status, not from that response.
+async function startReindex() {
+    const btn = document.getElementById('reindex-btn');
+    const statusDiv = document.getElementById('reindex-status');
+    const progress = document.getElementById('reindex-progress');
+    const text = document.getElementById('reindex-text');
+
+    btn.disabled = true;
+    statusDiv.style.display = 'grid';
+    progress.className = 'progress-line loading';
+    text.textContent = 'Индексация запущена…';
+
+    try {
+        const resp = await fetch(`/api/projects/${PROJECT_ID}/reindex`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'},
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            progress.className = 'progress-line error';
+            text.textContent = 'Ошибка: ' + (body.detail || resp.statusText);
+            btn.disabled = false;
+            return;
+        }
+        if (body.status === 'already_running') {
+            text.textContent = 'Индексация уже идёт (запущена ранее)…';
+        }
+        pollReindexStatus(progress, text, btn);
+    } catch (e) {
+        progress.className = 'progress-line error';
+        text.textContent = 'Ошибка: ' + e;
+        btn.disabled = false;
+    }
+}
+
+// Индексацию могли запустить не отсюда: из другой вкладки, из MCP или
+// автоматически после выгрузки из базы. Без этого страница показывала
+// статичный бейдж «Индексация…», ничего не опрашивала и не обновлялась —
+// приходилось жать F5 наугад.
+function attachToRunningReindex() {
+    const btn = document.getElementById('reindex-btn');
+    const statusDiv = document.getElementById('reindex-status');
+    const progress = document.getElementById('reindex-progress');
+    const text = document.getElementById('reindex-text');
+
+    if (btn) btn.disabled = true;
+    statusDiv.style.display = 'grid';
+    progress.className = 'progress-line loading';
+    text.textContent = 'Индексация идёт…';
+    pollReindexStatus(progress, text, btn);
+}
+
+async function pollReindexStatus(progress, text, btn) {
+    try {
+        const resp = await fetch(`/api/projects/${PROJECT_ID}/status`);
+        const s = await resp.json();
+
+        if (s.status === 'indexing') {
+            renderProgress(s);
+            setTimeout(() => pollReindexStatus(progress, text, btn), 1500);
+        } else if (s.status === 'error') {
+            document.getElementById('reindex-bar').hidden = true;
+            document.getElementById('reindex-eta').textContent = '';
+            progress.className = 'progress-line error';
+            text.textContent = 'Индексация завершилась с ошибкой';
+            if (btn) btn.disabled = false;
+        } else {
+            // 'ready' (or anything else terminal)
+            document.getElementById('reindex-bar').hidden = true;
+            document.getElementById('reindex-eta').textContent = '';
+            progress.className = 'progress-line success';
+            text.textContent = 'Индексация завершена. Обновляю страницу…';
+            setTimeout(() => location.reload(), 1000);
+        }
+    } catch (e) {
+        // Transient network hiccup while polling — keep trying rather
+        // than declaring failure.
+        setTimeout(() => pollReindexStatus(progress, text, btn), 2000);
+    }
+}
+
+{% if project.status == 'indexing' %}
+window.addEventListener('DOMContentLoaded', attachToRunningReindex);
+{% endif %}
+
+</script>
+{% endblock %}

@@ -1,0 +1,951 @@
+"""
+ProjectManager: CRUD for 1C projects, source management, DB pool.
+Stores registry in /data/projects.json.
+Each project gets its own SQLite at /data/projects/{id}/index.db.
+"""
+
+import json
+import logging
+import shutil
+import os
+import threading
+import zipfile
+import tarfile
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import BinaryIO
+
+from .db import Database
+from .search import SearchEngine
+
+logger = logging.getLogger('ariadna')
+
+# Этап 4/D7: process-wide, not per-ProjectManager-instance. main.py runs
+# the Web UI and the MCP server as two independent ProjectManager objects
+# in the same process (see main.py:_start_web / _start_mcp) — a lock on
+# self would only stop two reindexes started through the *same* one of
+# those from overlapping, not a web-triggered and an MCP-triggered one on
+# the same project. Keying by (data_dir, project_id) still lets genuinely
+# different projects/data dirs run concurrently.
+_REINDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_REINDEX_LOCKS_GUARD = threading.Lock()
+
+
+@dataclass
+class SourceInfo:
+    id: str
+    label: str
+    source_type: str = 'main'          # 'main' (конфигурация) | 'extension'
+    report_path: str = ''               # relative to project dir
+    xml_path: str = ''                  # relative to project dir
+    indexed_at: str = ''
+
+
+@dataclass
+class IndexStats:
+    total_objects: int = 0
+    total_attributes: int = 0
+    total_forms: int = 0
+    total_modules: int = 0
+    total_procedures: int = 0
+    total_calls: int = 0
+    last_indexed: str = ''
+    duration_sec: float = 0
+
+
+@dataclass
+class ProjectInfo:
+    id: str
+    name: str
+    description: str = ''
+    created_at: str = ''
+    status: str = 'empty'               # empty | indexing | ready | error
+    sources: list[SourceInfo] = field(default_factory=list)
+    index_stats: IndexStats = field(default_factory=IndexStats)
+
+
+class ProjectManager:
+    """
+    Manages multiple 1C configuration projects within one container.
+    
+    File structure:
+        /data/
+        ├── projects.json
+        └── projects/
+            └── {project_id}/
+                ├── index.db
+                └── sources/
+                    └── {source_id}/
+                        ├── report.txt
+                        └── xml/
+    """
+
+    def __init__(self, data_dir: str = '/data'):
+        self.data_dir = Path(data_dir)
+        self.projects_dir = self.data_dir / 'projects'
+        self.registry_path = self.data_dir / 'projects.json'
+        self._db_pool: dict[str, Database] = {}
+        self._registry: dict[str, ProjectInfo] | None = None
+
+        # Ensure directories exist
+        self.projects_dir.mkdir(parents=True, exist_ok=True)
+
+    # ============================================
+    # REGISTRY
+    # ============================================
+
+    def _load_registry(self) -> dict[str, ProjectInfo]:
+        """Load project registry from JSON."""
+        if self._registry is not None:
+            return self._registry
+
+        migrated = False
+        if self.registry_path.exists():
+            try:
+                data = json.loads(self.registry_path.read_text(encoding='utf-8'))
+                projects = {}
+                for pid, pdata in data.get('projects', {}).items():
+                    project, dropped = self._project_from_dict(pdata)
+                    projects[pid] = project
+                    migrated = migrated or dropped
+                self._registry = projects
+            except (json.JSONDecodeError, TypeError):
+                self._registry = {}
+        else:
+            self._registry = {}
+
+        if migrated:
+            # Записать сразу, чтобы отброшенные поля не разбирались заново
+            # при каждой загрузке.
+            try:
+                self._save_registry()
+            except OSError:
+                logger.exception("Не удалось записать обновлённый реестр проектов")
+
+        return self._registry
+
+    @classmethod
+    def _project_from_dict(cls, pdata: dict) -> tuple['ProjectInfo', bool]:
+        """Собрать ProjectInfo из записи реестра, отбросив поля, оставшиеся
+        от выгрузки из информационной базы.
+
+        Выгрузка из информационной базы убрана, но реестры, записанные
+        раньше, могут содержать `dump` у проекта или у источника и
+        `parent_id` у расширения. SourceInfo(**s) на таких
+        ключах упал бы, поэтому они просто выбрасываются; второй элемент
+        результата говорит, было ли что выбрасывать — по нему реестр
+        перезаписывается один раз.
+        """
+        pdata = dict(pdata)
+        raw_sources = pdata.pop('sources', [])
+        stats = IndexStats(**pdata.pop('index_stats', {}))
+        dropped = pdata.pop('dump', None) is not None
+
+        sources: list[SourceInfo] = []
+        for s in raw_sources:
+            s = dict(s)
+            for stale in ('dump', 'parent_id', 'extension'):
+                if s.pop(stale, None) is not None:
+                    dropped = True
+            sources.append(SourceInfo(**s))
+
+        return ProjectInfo(**pdata, sources=sources, index_stats=stats), dropped
+
+    @staticmethod
+    def _project_to_dict(proj: 'ProjectInfo') -> dict:
+        return {
+            'id': proj.id,
+            'name': proj.name,
+            'description': proj.description,
+            'created_at': proj.created_at,
+            'status': proj.status,
+            'sources': [asdict(s) for s in proj.sources],
+            'index_stats': asdict(proj.index_stats),
+        }
+
+    def _save_registry(self):
+        """Save project registry to JSON — the *whole* in-memory registry
+        as this instance currently sees it, including projects it hasn't
+        touched. Fine for CRUD (create/delete/add_source/...), which is
+        synchronous and short, so the in-memory copy this instance is
+        working from is essentially current. NOT used by reindex() — see
+        _save_project_to_disk for why a long background job needs a
+        narrower write."""
+        registry = self._load_registry()
+        data = {'projects': {pid: self._project_to_dict(proj) for pid, proj in registry.items()}}
+        self.registry_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding='utf-8'
+        )
+
+    def _save_project_to_disk(self, project_id: str):
+        """Persist just this one project's current in-memory state,
+        re-reading the registry file first and touching only this
+        project's entry (Этап 4/D7).
+
+        _save_registry() dumps this whole ProjectManager instance's
+        cached registry — fine for a quick CRUD call, but reindex_async()
+        can run for minutes, and main.py runs the Web UI and the MCP
+        server as two independent ProjectManager instances in the same
+        process. If either one saves the full registry while the other's
+        background reindex is still in flight, it clobbers that reindex's
+        eventual status='ready' with whatever stale copy it had cached of
+        that project at its own startup. Reading fresh and touching only
+        one key sidesteps that regardless of who else wrote what.
+        """
+        registry = self._load_registry()
+        project = registry.get(project_id)
+        if project is None:
+            return
+
+        disk: dict = {'projects': {}}
+        if self.registry_path.exists():
+            try:
+                disk = json.loads(self.registry_path.read_text(encoding='utf-8'))
+            except (json.JSONDecodeError, TypeError):
+                disk = {'projects': {}}
+        disk.setdefault('projects', {})[project_id] = self._project_to_dict(project)
+
+        self.registry_path.write_text(
+            json.dumps(disk, ensure_ascii=False, indent=2),
+            encoding='utf-8'
+        )
+
+    # ============================================
+    # PROJECT CRUD
+    # ============================================
+
+    def list_projects(self) -> list[ProjectInfo]:
+        """List all projects."""
+        return list(self._load_registry().values())
+
+    def create_project(self, project_id: str, name: str, description: str = '') -> ProjectInfo:
+        """Create a new project. Returns ProjectInfo."""
+        registry = self._load_registry()
+
+        if project_id in registry:
+            raise ValueError(f"Project '{project_id}' already exists")
+
+        # Validate id: alphanumeric + underscores/hyphens
+        if not project_id or not all(c.isalnum() or c in '-_' for c in project_id):
+            raise ValueError(f"Invalid project_id: '{project_id}'. Use alphanumeric, hyphens, underscores.")
+
+        project = ProjectInfo(
+            id=project_id,
+            name=name,
+            description=description,
+            created_at=datetime.now().isoformat(),
+            status='empty',
+        )
+
+        # Create directories
+        project_dir = self.projects_dir / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / 'sources').mkdir(exist_ok=True)
+
+        registry[project_id] = project
+        self._save_registry()
+        return project
+
+    def get_project(self, project_id: str) -> ProjectInfo:
+        """Get project by ID. Raises KeyError if not found."""
+        registry = self._load_registry()
+        if project_id not in registry:
+            raise KeyError(f"Project '{project_id}' not found")
+        return registry[project_id]
+
+    def update_project(self, project_id: str, **kwargs) -> ProjectInfo:
+        """Update project fields (name, description, status)."""
+        project = self.get_project(project_id)
+        for key, value in kwargs.items():
+            if hasattr(project, key) and key not in ('id', 'created_at', 'sources', 'index_stats'):
+                setattr(project, key, value)
+        self._save_registry()
+        return project
+
+    def delete_project(self, project_id: str):
+        """Delete project and all its data from disk."""
+        registry = self._load_registry()
+        if project_id not in registry:
+            raise KeyError(f"Project '{project_id}' not found")
+        project = registry[project_id]
+
+        # Close DB if open
+        if project_id in self._db_pool:
+            self._db_pool[project_id].close()
+            del self._db_pool[project_id]
+
+        # Remove from disk
+        project_dir = self.projects_dir / project_id
+        if project_dir.exists():
+            shutil.rmtree(project_dir)
+
+        del registry[project_id]
+        self._save_registry()
+
+    # ============================================
+    # SOURCE MANAGEMENT
+    # ============================================
+
+    def add_source(
+        self,
+        project_id: str,
+        source_id: str,
+        label: str,
+        source_type: str = 'main',
+        report_file: BinaryIO | None = None,
+        report_filename: str = '',
+        xml_archive: BinaryIO | None = None,
+        xml_archive_filename: str = '',
+    ) -> SourceInfo:
+        """
+        Add a source to a project.
+
+        report_file: file-like object with report.txt content (upload)
+        xml_archive: file-like object with .zip or .tar.gz of XML dump (upload)
+
+        If files are None, assumes they are already at the expected paths
+        (volume mount scenario).
+        """
+        project = self.get_project(project_id)
+
+        # Check for duplicate source_id
+        if any(s.id == source_id for s in project.sources):
+            raise ValueError(f"Source '{source_id}' already exists in project '{project_id}'")
+
+        source_dir = self.projects_dir / project_id / 'sources' / source_id
+        source_dir.mkdir(parents=True, exist_ok=True)
+
+        report_path = ''
+        xml_path = ''
+
+        # Save report file
+        if report_file is not None:
+            report_dest = source_dir / 'report.txt'
+            with open(report_dest, 'wb') as f:
+                while chunk := report_file.read(8192):
+                    f.write(chunk)
+            report_path = f'sources/{source_id}/report.txt'
+        elif (source_dir / 'report.txt').exists():
+            report_path = f'sources/{source_id}/report.txt'
+
+        # Extract XML archive
+        if xml_archive is not None:
+            xml_dest = source_dir / 'xml'
+            xml_dest.mkdir(exist_ok=True)
+            fname = xml_archive_filename.lower()
+            if fname.endswith('.zip'):
+                self._extract_zip(xml_archive, xml_dest)
+            elif fname.endswith('.tar.gz') or fname.endswith('.tgz'):
+                self._extract_tar(xml_archive, xml_dest)
+            else:
+                # Try zip first, then tar
+                try:
+                    self._extract_zip(xml_archive, xml_dest)
+                except zipfile.BadZipFile:
+                    xml_archive.seek(0)
+                    self._extract_tar(xml_archive, xml_dest)
+            xml_path = f'sources/{source_id}/xml'
+        elif (source_dir / 'xml').exists():
+            xml_path = f'sources/{source_id}/xml'
+
+        source = SourceInfo(
+            id=source_id,
+            label=label,
+            source_type=source_type,
+            report_path=report_path,
+            xml_path=xml_path,
+        )
+        project.sources.append(source)
+        self._save_registry()
+        return source
+
+    def update_source(
+        self,
+        project_id: str,
+        source_id: str,
+        label: str | None = None,
+        source_type: str | None = None,
+        report_file: BinaryIO | None = None,
+        report_filename: str = '',
+        xml_archive: BinaryIO | None = None,
+        xml_archive_filename: str = '',
+    ) -> SourceInfo:
+        """
+        Update an existing source: replace its files and/or change its label/type.
+
+        - If ``report_file`` is given, the old report.txt is replaced.
+        - If ``xml_archive`` is given, the old xml/ folder is wiped and the new
+          archive extracted.
+        - If both files are None, only metadata (label/source_type) is updated.
+
+        Caller must run ``reindex(project_id, source_id=source_id)`` afterwards
+        to refresh the database.
+        """
+        project = self.get_project(project_id)
+        source = next((s for s in project.sources if s.id == source_id), None)
+        if source is None:
+            raise ValueError(f"Source '{source_id}' not found in project '{project_id}'")
+
+        source_dir = self.projects_dir / project_id / 'sources' / source_id
+        source_dir.mkdir(parents=True, exist_ok=True)
+
+        # Replace report file
+        if report_file is not None:
+            report_dest = source_dir / 'report.txt'
+            with open(report_dest, 'wb') as f:
+                while chunk := report_file.read(8192):
+                    f.write(chunk)
+            source.report_path = f'sources/{source_id}/report.txt'
+
+        # Replace XML archive
+        if xml_archive is not None:
+            xml_dest = source_dir / 'xml'
+            # Wipe existing xml/ folder so old files don't linger
+            if xml_dest.exists():
+                shutil.rmtree(xml_dest)
+            xml_dest.mkdir()
+            fname = xml_archive_filename.lower()
+            if fname.endswith('.zip'):
+                self._extract_zip(xml_archive, xml_dest)
+            elif fname.endswith('.tar.gz') or fname.endswith('.tgz'):
+                self._extract_tar(xml_archive, xml_dest)
+            else:
+                try:
+                    self._extract_zip(xml_archive, xml_dest)
+                except zipfile.BadZipFile:
+                    xml_archive.seek(0)
+                    self._extract_tar(xml_archive, xml_dest)
+            source.xml_path = f'sources/{source_id}/xml'
+
+        # Update metadata fields
+        if label is not None:
+            source.label = label
+        if source_type is not None:
+            source.source_type = source_type
+
+        # Reset indexed timestamp so dashboard shows source needs reindex
+        source.indexed_at = ''
+
+        self._save_registry()
+        return source
+
+    def preview_remove_source(self, project_id: str, source_id: str) -> dict:
+        """
+        Count what remove_source(project_id, source_id) would delete,
+        without deleting anything (Этап 6/D13) — backs the "here's what
+        would be removed" summary the MCP tool returns when called
+        without confirm=true.
+        """
+        project = self.get_project(project_id)
+        source = next((s for s in project.sources if s.id == source_id), None)
+        if source is None:
+            raise KeyError(f"Source '{source_id}' not found in project '{project_id}'")
+
+        counts = {'objects': 0, 'attributes': 0, 'forms': 0, 'modules': 0,
+                  'procedures': 0, 'calls': 0}
+        try:
+            conn = self.get_db(project_id).read_conn()
+            obj_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM metadata_objects WHERE source_id=?", (source_id,)).fetchall()]
+            counts['objects'] = len(obj_ids)
+            if obj_ids:
+                placeholders = ','.join('?' * len(obj_ids))
+                counts['attributes'] = conn.execute(
+                    f"SELECT COUNT(*) FROM attributes WHERE object_id IN ({placeholders})",
+                    obj_ids).fetchone()[0]
+                counts['forms'] = conn.execute(
+                    f"SELECT COUNT(*) FROM forms WHERE object_id IN ({placeholders})",
+                    obj_ids).fetchone()[0]
+            counts['modules'] = conn.execute(
+                "SELECT COUNT(*) FROM modules WHERE source_id=?", (source_id,)).fetchone()[0]
+            counts['procedures'] = conn.execute(
+                """SELECT COUNT(*) FROM procedures p JOIN modules m ON m.id = p.module_id
+                   WHERE m.source_id=?""", (source_id,)).fetchone()[0]
+            counts['calls'] = conn.execute(
+                """SELECT COUNT(*) FROM calls c JOIN procedures p ON p.id = c.caller_id
+                   JOIN modules m ON m.id = p.module_id WHERE m.source_id=?""",
+                (source_id,)).fetchone()[0]
+        except Exception:
+            pass  # DB not indexed yet — a files-only preview is still useful
+
+        source_dir = self.projects_dir / project_id / 'sources' / source_id
+        return {
+            'source_id': source_id,
+            'label': source.label,
+            'source_type': source.source_type,
+            'files_exist': source_dir.exists(),
+            **counts,
+        }
+
+    def remove_source(self, project_id: str, source_id: str):
+        """Remove source from project (registry, files, AND indexed DB rows)."""
+        project = self.get_project(project_id)
+        source = next((s for s in project.sources if s.id == source_id), None)
+        if source is None:
+            return  # nothing to do
+
+        # Wipe DB rows for this source first (while DB still references it).
+        # _clear_source_data handles all cascading deletes including the
+        # `sources` row, attributes, modules, procedures, calls, FTS rebuild.
+        try:
+            db = self.get_db(project_id)
+            self._clear_source_data(db, source_id)
+            db.conn.commit()
+        except Exception:
+            # If DB doesn't exist yet (project never indexed), skip — not fatal
+            pass
+
+        # Remove from registry
+        project.sources = [s for s in project.sources if s.id != source_id]
+
+        # Remove source directory
+        source_dir = self.projects_dir / project_id / 'sources' / source_id
+        if source_dir.exists():
+            shutil.rmtree(source_dir)
+
+        self._save_registry()
+
+    def get_source_report_path(self, project_id: str, source_id: str) -> Path | None:
+        """Get absolute path to source's report.txt."""
+        project = self.get_project(project_id)
+        for s in project.sources:
+            if s.id == source_id and s.report_path:
+                return self.projects_dir / project_id / s.report_path
+        return None
+
+    def get_source_xml_path(self, project_id: str, source_id: str) -> Path | None:
+        """Get absolute path to source's XML directory."""
+        project = self.get_project(project_id)
+        for s in project.sources:
+            if s.id == source_id and s.xml_path:
+                return self.projects_dir / project_id / s.xml_path
+        return None
+
+
+
+    # ============================================
+    # DATABASE POOL
+    # ============================================
+
+    def get_db(self, project_id: str) -> Database:
+        """Get or open SQLite connection for project."""
+        if project_id in self._db_pool:
+            db = self._db_pool[project_id]
+            if db.conn:
+                return db
+
+        db_path = str(self.projects_dir / project_id / 'index.db')
+        db = Database(db_path)
+        db.connect()
+        db.init_schema()
+        self._db_pool[project_id] = db
+        return db
+
+    def get_search(self, project_id: str) -> SearchEngine:
+        """Get SearchEngine instance for project."""
+        db = self.get_db(project_id)
+        roots: dict[str, str] = {}
+        try:
+            project = self.get_project(project_id)
+        except KeyError:
+            project = None
+        for src in (project.sources if project else []):
+            if src.xml_path:
+                roots[src.id] = str(self.projects_dir / project_id / src.xml_path)
+        return SearchEngine(db, source_roots=roots)
+
+    # ============================================
+    # INDEXING
+    # ============================================
+
+    def reindex(self, project_id: str, source_id: str | None = None) -> IndexStats:
+        """
+        Run indexing for project, synchronously (blocks until done — use
+        reindex_async() for a large corpus so MCP/HTTP callers don't time
+        out; see IMPROVEMENT_PLAN Этап 4/D7).
+
+        source_id=None → full reindex (all sources)
+        source_id="ext_agro" → reindex only that source
+
+        Этап 4/D7 incrementality: this no longer wipes the DB (or the one
+        source's rows) before indexing — index_report/index_bsl UPSERT and
+        skip-unchanged-by-hash on their own, so a rerun with nothing
+        changed on disk is an order of magnitude faster than a cold index.
+        """
+        from .indexer import Indexer
+        from .xml_walker import XMLWalker
+
+        project = self.get_project(project_id)
+        db = self.get_db(project_id)
+
+        # Narrow, re-read-then-write-one-key save (Этап 4/D7) — not
+        # update_project()/self._save_registry(), which dump this whole
+        # instance's cached registry and would clobber concurrent changes
+        # to OTHER projects from another ProjectManager instance (Web UI
+        # and MCP server each run their own — see main.py) during however
+        # long this reindex takes.
+        project.status = 'indexing'
+        self._save_project_to_disk(project_id)
+        db.update_state(status='indexing', progress_current=0, progress_total=0,
+                         progress_phase='scanning')
+
+        # Этап 4/D7 item 3: durability is not a concern for an index that's
+        # fully rebuildable from source — trade it for write throughput for
+        # the duration of this reindex, then restore.
+        db.conn.execute("PRAGMA synchronous=OFF")
+
+        try:
+            indexer = Indexer(db)
+
+            sources = project.sources if source_id is None else [
+                s for s in project.sources if s.id == source_id]
+            if source_id is not None and not sources:
+                raise KeyError(f"Source '{source_id}' not found in project '{project_id}'")
+
+            # Two-pass indexing, Pass 1 (IMPROVEMENT_PLAN 1.1): scan every
+            # source's XML dump for common-module and metadata-object names
+            # before parsing any BSL for calls, so a call in one source can
+            # be classified against a module defined in another (e.g. an
+            # extension calling into main, or vice versa). Always scans ALL
+            # of the project's sources (not just the one being reindexed),
+            # since a partial reindex of one source still needs to know
+            # about common modules defined in the others.
+            walker = XMLWalker()
+            walked: dict[str, list] = {}
+            for s in project.sources:
+                if s.xml_path:
+                    p = self.projects_dir / project_id / s.xml_path
+                    if p.exists():
+                        walked[s.id] = walker.walk(str(p))
+            known_modules: set[str] = set()
+            known_objects: dict[str, set[str]] = {}
+            common_module_files = []
+            for mfs in walked.values():
+                for mf in mfs:
+                    if mf.object_kind == 'ОбщийМодуль':
+                        known_modules.add(mf.object_name.lower())
+                        common_module_files.append(mf)
+                    elif mf.object_kind != 'Конфигурация':
+                        known_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
+
+            # Этап 7 (cross-module factory-function inference): a second,
+            # full parse of every common module — real extra cost (see
+            # scan_known_factory_functions' own docstring), accepted for
+            # the accuracy gain (fewer bogus common_module edges from
+            # `Var = ОбщегоНазначения.НовыйПустойЛист()`-style calls).
+            db.update_state(progress_phase='factory_functions')
+            known_factory_functions = Indexer.scan_known_factory_functions(common_module_files)
+
+            total_files = sum(len(walked.get(s.id, [])) for s in sources)
+            progress = {'done': 0}
+
+            def progress_cb(current: int, total: int):
+                # `current`/`total` are within one source's own index_bsl
+                # call — translate to a running total across all sources
+                # being (re)indexed in this call.
+                db.update_state(
+                    progress_current=progress['done'] + current,
+                    progress_total=total_files, progress_phase='bsl')
+
+            db.update_state(progress_total=total_files, progress_phase='report')
+
+            # Этап 4/D7: durations sum across sources (real per-call work),
+            # but object/module/procedure/call *counts* do not — index_bsl's
+            # own stats dict only reflects files it actually reparsed this
+            # run, so a rerun that skips everything (incrementality) would
+            # report near-zero counts despite the DB being fully populated.
+            # _calc_stats_from_db (an actual COUNT(*) over the tables)
+            # always reflects reality regardless of what got skipped.
+            duration_sec = 0.0
+            for source in sources:
+                stats = self._index_source(indexer, project_id, source,
+                                            known_modules, known_objects,
+                                            known_factory_functions,
+                                            progress_cb=progress_cb)
+                duration_sec += stats.get('duration_sec', 0)
+                source.indexed_at = datetime.now().isoformat()
+                progress['done'] += len(walked.get(source.id, []))
+
+            total_stats = self._calc_stats_from_db(db)
+            total_stats.duration_sec = duration_sec
+
+            # Resolve the call graph (1.2) — recomputed in full every time,
+            # regardless of full vs. partial reindex: it's cheap (table
+            # scans + dict joins, no per-call queries) and a partial reindex
+            # of one source can change how other sources' calls resolve
+            # (e.g. an extension now overriding a main-config procedure).
+            db.update_state(progress_phase='resolving')
+            indexer.resolve_calls()
+
+            total_stats.last_indexed = datetime.now().isoformat()
+            total_stats.duration_sec = round(total_stats.duration_sec, 2)
+            project.index_stats = total_stats
+            project.status = 'ready'
+            db.update_state(status='ready', progress_phase='', progress_current=0,
+                             progress_total=0, index_duration_sec=total_stats.duration_sec)
+            self._save_project_to_disk(project_id)
+
+            return total_stats
+
+        except Exception as e:
+            project.status = 'error'
+            self._save_project_to_disk(project_id)
+            db.update_state(status='error', progress_phase='')
+            raise
+        finally:
+            db.conn.execute("PRAGMA synchronous=NORMAL")
+            db.conn.commit()
+
+    def reindex_async(self, project_id: str, source_id: str | None = None) -> dict:
+        """
+        Start reindex() in a background thread and return immediately
+        (IMPROVEMENT_PLAN Этап 4/D7) — for MCP/HTTP callers, so indexing a
+        large corpus never risks a client timeout. Progress is polled via
+        get_db(project_id).get_stats() (status/progress_current/
+        progress_total/progress_phase), same as a synchronous reindex in
+        progress looks like from another thread.
+
+        Only one reindex per project may run at a time — a second call
+        while one is in flight returns status='already_running' instead of
+        starting a concurrent one (which would corrupt the walk/UPSERT
+        bookkeeping index_bsl relies on).
+        """
+        lock = self._reindex_lock(project_id)
+        if not lock.acquire(blocking=False):
+            return {'status': 'already_running', 'project_id': project_id}
+
+        def _run():
+            try:
+                self.reindex(project_id, source_id=source_id)
+            except Exception:
+                pass  # reindex() already records status='error' in the registry
+            finally:
+                lock.release()
+
+        threading.Thread(target=_run, daemon=True, name=f'reindex-{project_id}').start()
+        return {'status': 'started', 'project_id': project_id}
+
+    def reset_stale_indexing(self) -> list[str]:
+        """Снять статус 'indexing' с проектов, у которых он остался от
+        прерванного запуска (Этап U0).
+
+        Переиндексация — фоновый поток внутри процесса: если процесс
+        перезапустили или уронили посреди прогона, поток умирает, а
+        status='indexing' остаётся в реестре навсегда. Дашборд после этого
+        показывает вечный спиннер и прячет статистику, а кнопка
+        «Переиндексировать» выглядит заблокированной — при том, что не
+        индексируется ничего.
+
+        Вызывать ОДИН раз при старте процесса, до запуска рабочих потоков:
+        в этот момент ни один прогон идти не может по определению, поэтому
+        любой 'indexing' заведомо протухший. Прежний индекс на диске цел и
+        пригоден (индексация инкрементальная, UPSERT), поэтому проект
+        возвращается в 'ready', если он хоть раз успешно индексировался, и
+        в 'empty', если нет. Возвращает id тронутых проектов.
+        """
+        reset: list[str] = []
+        for project in self._load_registry().values():
+            if project.status != 'indexing':
+                continue
+            project.status = 'ready' if project.index_stats.last_indexed else 'empty'
+            reset.append(project.id)
+            try:
+                db = self.get_db(project.id)
+                db.update_state(status=project.status, progress_phase='',
+                                 progress_current=0, progress_total=0)
+            except Exception:
+                logger.exception("Не удалось сбросить index_state проекта %s", project.id)
+        if reset:
+            self._save_registry()
+            logger.warning(
+                "Статус 'indexing' был протухшим (прогон не пережил перезапуск) "
+                "и сброшен у проектов: %s", ', '.join(reset))
+        return reset
+
+    # Сколько задание может числиться «выполняется», прежде чем считать,
+    # что агент до него не дошёл. Выгрузка ERP занимает минуты; шесть часов
+    # — заведомо с запасом, чтобы не убить настоящую долгую выгрузку, если
+    # сервер успел перезапуститься, пока агент работал.
+    DUMP_RUNNING_TIMEOUT_HOURS = 6
+
+
+
+
+    def _reindex_soon(self, project_id: str, source_id: str | None = None) -> dict:
+        """reindex_async(), but never dropped when one is already running
+        (Этап U0/U3).
+
+Переиндексация одного источника, запрошенная, пока идёт другая, с
+        обычным reindex_async() просто терялась бы: вызов вернул бы
+        'already_running', и источник остался бы непроиндексированным.
+        Здесь ждущий поток блокируется на той же блокировке проекта и
+        повторяет попытку, когда текущий прогон закончится.
+        """
+        result = self.reindex_async(project_id, source_id=source_id)
+        if result['status'] != 'already_running':
+            return result
+
+        def _wait_and_run():
+            lock = self._reindex_lock(project_id)
+            for _ in range(20):
+                lock.acquire()   # blocks until the in-flight reindex is done
+                lock.release()
+                if self.reindex_async(project_id, source_id=source_id)['status'] != 'already_running':
+                    return
+            logger.warning("Не дождались очереди на переиндексацию %s/%s",
+                           project_id, source_id)
+
+        threading.Thread(target=_wait_and_run, daemon=True,
+                          name=f'reindex-wait-{project_id}').start()
+        return {'status': 'queued', 'project_id': project_id}
+
+    def _reindex_lock(self, project_id: str) -> threading.Lock:
+        """Process-wide reindex lock for this (data_dir, project_id) — see
+        the module-level _REINDEX_LOCKS comment for why it can't be a
+        plain instance attribute (Этап 4/D7)."""
+        key = (str(self.data_dir), project_id)
+        with _REINDEX_LOCKS_GUARD:
+            lock = _REINDEX_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                _REINDEX_LOCKS[key] = lock
+            return lock
+
+    def _index_source(self, indexer, project_id: str, source: SourceInfo,
+                       known_modules: set[str] | None = None,
+                       known_objects: dict[str, set[str]] | None = None,
+                       known_factory_functions: dict[str, set[str]] | None = None,
+                       progress_cb=None) -> dict:
+        """Index one source (report + optionally BSL from XML dump)."""
+        stats = {'objects': 0, 'attributes': 0, 'forms': 0,
+                 'modules': 0, 'procedures': 0, 'calls': 0, 'duration_sec': 0}
+
+        xml_path = None
+        if source.xml_path:
+            xml_path = self.projects_dir / project_id / source.xml_path
+
+        # 1. Index report (metadata)
+        report_path = None
+        if source.report_path:
+            report_path = self.projects_dir / project_id / source.report_path
+
+        # Этап 5/вариант A: отчёт Конфигуратора больше не обязательный
+        # ручной шаг — если у источника есть только XML-выгрузка, генерируем
+        # report.txt из неё (src/core/report_generator.py). Срабатывает один
+        # раз: как только report.txt появится на диске, source.report_path
+        # больше не пуст, и это условие для него больше не выполняется.
+        if (report_path is None or not report_path.exists()) and xml_path and xml_path.exists():
+            from .report_generator import generate_report
+            source_dir = self.projects_dir / project_id / 'sources' / source.id
+            generated_path = source_dir / 'report.txt'
+            if generate_report(xml_path, generated_path):
+                report_path = generated_path
+                source.report_path = f'sources/{source.id}/report.txt'
+
+        if report_path and report_path.exists():
+            report_stats = indexer.index_report(str(report_path), source_id=source.id,
+                                                 source_label=source.label,
+                                                 source_type=source.source_type)
+            for k in ('objects', 'attributes', 'forms', 'modules', 'duration_sec'):
+                stats[k] = report_stats.get(k, 0)
+
+        # 2. Index BSL code (from XML dump)
+        if xml_path and xml_path.exists():
+            bsl_stats = indexer.index_bsl(str(xml_path), source_id=source.id,
+                                           known_modules=known_modules,
+                                           known_objects=known_objects,
+                                           known_factory_functions=known_factory_functions,
+                                           source_label=source.label,
+                                           source_type=source.source_type,
+                                           progress_cb=progress_cb)
+            stats['modules'] += bsl_stats.get('modules', 0)
+            stats['procedures'] = bsl_stats.get('procedures', 0)
+            stats['calls'] = bsl_stats.get('calls', 0)
+            stats['duration_sec'] += bsl_stats.get('duration_sec', 0)
+
+        return stats
+
+    def _clear_source_data(self, db: Database, source_id: str):
+        """Remove all data for a specific source from the DB."""
+        conn = db.conn
+        if not conn:
+            return
+        # Get object IDs for this source
+        obj_ids = [r[0] for r in conn.execute(
+            "SELECT id FROM metadata_objects WHERE source_id=?", (source_id,)
+        ).fetchall()]
+
+        if obj_ids:
+            placeholders = ','.join('?' * len(obj_ids))
+            conn.execute(f"DELETE FROM forms WHERE object_id IN ({placeholders})", obj_ids)
+            conn.execute(f"DELETE FROM attributes WHERE object_id IN ({placeholders})", obj_ids)
+            conn.execute(f"DELETE FROM subsystem_content WHERE subsystem_id IN ({placeholders})", obj_ids)
+
+        # module_text_fts has no FK to modules (FTS5 virtual tables can't
+        # carry one) — its rowid mirrors modules.id, so remove those rows
+        # explicitly before the cascade-deleted modules disappear.
+        mod_ids = [r[0] for r in conn.execute(
+            "SELECT id FROM modules WHERE source_id=?", (source_id,)
+        ).fetchall()]
+        if mod_ids:
+            placeholders = ','.join('?' * len(mod_ids))
+            conn.execute(f"DELETE FROM module_text_fts WHERE rowid IN ({placeholders})", mod_ids)
+
+        conn.execute("DELETE FROM modules WHERE source_id=?", (source_id,))
+        conn.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
+        conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+
+        # Rebuild FTS
+        conn.execute("INSERT INTO metadata_fts(metadata_fts) VALUES('rebuild')")
+        conn.execute("INSERT INTO attributes_fts(attributes_fts) VALUES('rebuild')")
+        conn.commit()
+
+    def _calc_stats_from_db(self, db: Database) -> IndexStats:
+        """Calculate stats by counting rows in DB."""
+        conn = db.conn
+        return IndexStats(
+            total_objects=conn.execute("SELECT COUNT(*) FROM metadata_objects").fetchone()[0],
+            total_attributes=conn.execute("SELECT COUNT(*) FROM attributes").fetchone()[0],
+            total_forms=conn.execute("SELECT COUNT(*) FROM forms").fetchone()[0],
+            total_modules=conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0],
+            total_procedures=conn.execute("SELECT COUNT(*) FROM procedures").fetchone()[0],
+            total_calls=conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0],
+        )
+
+    # ============================================
+    # HELPERS
+    # ============================================
+
+    def _extract_zip(self, fileobj: BinaryIO, dest: Path):
+        """Extract zip archive to destination."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
+            while chunk := fileobj.read(8192):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+        try:
+            with zipfile.ZipFile(tmp_path, 'r') as zf:
+                zf.extractall(dest)
+        finally:
+            os.unlink(tmp_path)
+
+    def _extract_tar(self, fileobj: BinaryIO, dest: Path):
+        """Extract tar.gz archive to destination."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:
+            while chunk := fileobj.read(8192):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+        try:
+            with tarfile.open(tmp_path, 'r:*') as tf:
+                tf.extractall(dest)
+        finally:
+            os.unlink(tmp_path)
+
+    def close_all(self):
+        """Close all open database connections."""
+        for db in self._db_pool.values():
+            db.close()
+        self._db_pool.clear()

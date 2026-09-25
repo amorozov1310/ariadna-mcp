@@ -1,0 +1,321 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<PredefinedData xmlns="http://v8.1c.ru/8.3/xcf/predef" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CatalogPredefinedItems" version="2.20">
+	<Item id="dff9951a-9539-4139-889b-a7ba7a9759f6">
+		<Name>Болезнь</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Болезнь</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="ea563f0e-6ec5-4b6a-b45c-7c73a8eb4d1e">
+		<Name>БолезньБезОплаты</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Болезнь без оплаты</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="84aee59b-e149-48a8-829a-518ffd0e9f4a">
+		<Name>Вахта</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Вахта</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="494aa419-aa30-4f5a-a0d3-321e660d3ba6">
+		<Name>ВынужденныйПрогул</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Вынужденный прогул</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="8bb93ca4-68fe-4c2e-9267-eb857e7d64b9">
+		<Name>ВыходныеДни</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Выходные дни</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="b165a582-ede7-4d29-b7d2-c76138068fe6">
+		<Name>ГосударственныеОбязанности</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Государственные обязанности</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="51e6474b-3edf-41a8-9578-96ea732dfa0d">
+		<Name>ДниВПутиВахта</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Дни в пути (вахта)</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="7e6d5726-06fe-49fa-b82b-bc344611fc60">
+		<Name>ДополнительныеВыходныеДниНеОплачиваемые</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Дополнительные выходные дни не оплачиваемые</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="f01731e9-53a9-4ffc-b6f6-0ae30edb3ac2">
+		<Name>ДополнительныеВыходныеДниОплачиваемые</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Дополнительные выходные дни оплачиваемые</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="6157007b-ce16-4044-a89b-03ce8c388dfd">
+		<Name>ДополнительныйОтпуск</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Дополнительный отпуск</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="7ece5ba1-12d0-4462-b9ba-ed2d23b05d65">
+		<Name>Забастовка</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Забастовка</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="fdc1bd69-cfff-4bfe-9125-3d66182cfe58">
+		<Name>ЗадержкаВыплатыЗаработнойПлаты</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Задержка выплаты заработной платы</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="d53a5ac3-0e00-4845-9688-2fbe6bf85488">
+		<Name>Командировка</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Командировка</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="9312378a-c50e-481c-9468-728c37926b6f">
+		<Name>КормлениеРебенка</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Кормление ребенка</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="45e9b34c-8c12-40ff-b916-a138c9af34ff">
+		<Name>МеждувахтовыйОтдых</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Междувахтовый отдых</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="677734c6-cd69-4253-b119-3b5c09c331de">
+		<Name>НеоплачиваемыйДополнительныйОтпуск</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Неоплачиваемый дополнительный отпуск</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="94cbc9f0-2762-4d24-9514-6341e1ae3437">
+		<Name>НеоплачиваемыйОтпускПоЗаконодательству</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Неоплачиваемый отпуск по законодательству</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="0897ef1a-77f8-4278-a280-bcdc5d41c048">
+		<Name>НеоплачиваемыйОтпускПоРазрешениюРаботодателя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Неоплачиваемый отпуск по разрешению работодателя</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="0ba78a53-cf42-48bd-a2bc-22b628a8477d">
+		<Name>НеявкиПоНевыясненнымПричинам</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Неявки по невыясненным причинам</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="dd88af26-9d82-427d-86ca-acf666d45c19">
+		<Name>ОплачиваемыеНерабочиеДни</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Оплачиваемые нерабочие дни</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="f3724b4c-74c8-4468-9fe5-22fd70111425">
+		<Name>ОсновнойОтпуск</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Основной отпуск</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="b6dda95a-e7e7-44a2-9ec1-432bcb712476">
+		<Name>ОтпускНаОбучение</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Отпуск на обучение</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="81371216-0818-45a6-b8d8-d20a7272d414">
+		<Name>ОтпускНаОбучениеНеоплачиваемый</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Отпуск на обучение неоплачиваемый</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="b2d57f61-d9a4-4866-879a-938dc8429dcb">
+		<Name>ОтпускПоБеременностиИРодам</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Отпуск по беременности и родам</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="4be3ed2c-f0fc-4589-a584-ea23ea36414e">
+		<Name>ОтпускПоУходуЗаРебенком</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Отпуск по уходу за ребенком</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="915163f9-94b4-46dc-9be7-ea2eb7ed5bfb">
+		<Name>ОтстранениеОтРаботыБезОплаты</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Отстранение от работы без оплаты</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="206ba59a-032e-4033-90a0-112cd3321d8a">
+		<Name>ОтстранениеОтРаботыСОплатой</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Отстранение от работы с оплатой</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="abd7a3e0-37f6-456e-8841-b3ee6469a800">
+		<Name>ПовышениеКвалификации</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Повышение квалификации</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="b66c1292-fd9a-4edb-80df-a733d4c29480">
+		<Name>ПовышениеКвалификацииВДругойМестности</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Повышение квалификации в другой местности</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="1cb61730-bcb4-4de5-9762-e615ac483c41">
+		<Name>Праздники</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Праздники</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="ba1c84a2-4b6c-4ec7-bc33-4cc57e25661c">
+		<Name>ПраздникиБезПовышеннойОплаты</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Праздники без повышенной оплаты</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="9fac048b-94fe-4733-9b8b-075f3ba83e56">
+		<Name>ПраздникиБезПовышеннойОплатыВечернееВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Праздники без повышенной оплаты вечернее время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="10568d3c-7b3c-42ac-bd69-d7dfd8a659a4">
+		<Name>ПраздникиБезПовышеннойОплатыНочноеВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Праздники без повышенной оплаты ночное время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="7f1b95cf-fcfe-4c27-95d4-11ecf3ea9ea1">
+		<Name>ПраздникиВечернееВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Праздники вечернее время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="75dc1e4a-02bb-4ff5-9b52-36278f877c9d">
+		<Name>ПраздникиНочноеВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Праздники ночное время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="5fd1968f-f189-49db-b0e9-d7d7950ae7bd">
+		<Name>ПриостановлениеТрудовогоДоговора</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Приостановление трудового договора</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="628afdfa-f3f3-4db3-a247-1ae87af4890b">
+		<Name>Прогулы</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Прогулы</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="61e45031-6a7c-4f73-9258-522e64f2c3fd">
+		<Name>Простой</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Простой</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="a7890a70-cb47-4339-823e-0980e3e1771d">
+		<Name>ПростойПоВинеРаботника</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Простой по вине работника</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="1d692908-8255-44ae-bfb4-607ac97612ce">
+		<Name>ПростойПоВинеРаботодателя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Простой по вине работодателя</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="a1109c72-d176-49e3-877a-04d651fbd728">
+		<Name>РаботаВРежимеНеполногоВремени</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Работа в режиме неполного времени</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="6fd20c4b-0365-4e7f-be62-b766591af975">
+		<Name>РаботаВечерниеЧасы</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Работа вечерние часы</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="c8317f97-c69b-423c-9f99-faa1550ce302">
+		<Name>РаботаНочныеЧасы</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Работа ночные часы</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="4db837e7-b066-4805-a1b7-864a298bf0b7">
+		<Name>РабочееВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Рабочее время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="e4d194b2-44ee-4e00-8957-5534cadeab99">
+		<Name>Сверхурочные</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сверхурочные</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="da3d9ac3-2470-4bc3-929e-29bda0510b82">
+		<Name>СверхурочныеБезПовышеннойОплаты</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сверхурочные без повышенной оплаты</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="42ead52e-24f3-4653-b453-a723aab8f761">
+		<Name>СверхурочныеБезПовышеннойОплатыВечернееВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сверхурочные без повышенной оплаты вечернее время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="1c7f6f6e-255c-4469-a9ea-a8f3c3161579">
+		<Name>СверхурочныеБезПовышеннойОплатыНочноеВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сверхурочные без повышенной оплаты ночное время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="50fc527a-c05a-4130-948e-2cd1aa03db20">
+		<Name>СверхурочныеВечернееВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сверхурочные вечернее время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="6fdf90ee-c2c6-4b84-b329-82ef22c349cd">
+		<Name>СверхурочныеНочноеВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сверхурочные ночное время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="f106ceec-a28c-462b-999c-b40475106620">
+		<Name>СокращенноеВремяОбучающихся</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сокращенное время обучающихся</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="888f88fe-10bd-496e-9a50-0f207ebe1c50">
+		<Name>СокращенноеРабочееВремя</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Сокращенное рабочее время</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+	<Item id="4981b9be-25c0-4fd6-bad4-1acc99e2372a">
+		<Name>Явка</Name>
+		<Code xsi:type="xs:decimal">0</Code>
+		<Description>Явка</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+</PredefinedData>

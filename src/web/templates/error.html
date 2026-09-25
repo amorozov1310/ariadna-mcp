@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} — {{ title }}{% endblock %}
+
+{% block content %}
+{#
+  Этап U0/U13: раньше любой сбой отдавал голое «Internal Server Error» без
+  навигации. Здесь ошибка живёт в обычной оболочке проекта: понятный текст,
+  путь назад, технические детали — под <details>, а не в лицо.
+#}
+<div class="card">
+    <div class="error-page">
+        <div class="error-code">{{ status }}</div>
+        <h1 class="error-title">{{ title }}</h1>
+        <p class="error-message">{{ message }}</p>
+
+        <div class="btn-row" style="justify-content:center">
+            {% if project %}
+            <a href="/projects/{{ project.id }}" class="btn btn-primary">
+                <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#arrow-left"/></svg>
+                К проекту «{{ project.name }}»
+            </a>
+            {% endif %}
+            <a href="/" class="btn btn-secondary">
+                <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#folder"/></svg> Все проекты
+            </a>
+            <button type="button" class="btn btn-secondary" onclick="history.back()">Назад</button>
+        </div>
+
+        {% if detail %}
+        <details class="error-detail">
+            <summary>Технические детали</summary>
+            <pre>{{ detail }}</pre>
+        </details>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

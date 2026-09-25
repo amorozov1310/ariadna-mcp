@@ -1,0 +1,44 @@
+[project]
+name = "ariadna"
+version = "0.1.0"
+description = "MCP server for fast 1C configuration metadata search and BSL code analysis"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Этап 6: migrated off the low-level Server API (list_tools()/call_tool()
+    # decorators, gone in 2.x) onto mcp.server.mcpserver.MCPServer — see
+    # src/mcp_server/server.py. The <2 pin was a 2026-09-03 hotfix for a
+    # container crash when pip resolved an unpinned 2.1.1 against 1.x code.
+    "mcp>=2,<3",
+    "pydantic>=2",
+    "fastapi>=0.110",
+    "uvicorn[standard]",
+    "jinja2",
+    "aiosqlite",
+    "python-multipart",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+# Этап 5 (вариант A, IMPROVEMENT_PLAN.md): генерация report.txt из XML-
+# выгрузки, когда у источника нет отчёта Конфигуратора. Не входит в
+# основные зависимости — без него авто-генерация просто не выполняется
+# (src/core/report_generator.py) и источники без report.txt индексируются
+# как раньше (BSL-граф без метаданных).
+xml-report = [
+    "generate-config-report @ git+https://github.com/norkins/metadata.git",
+]
+
+[project.scripts]
+"ariadna-index" = "src.core.indexer:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-m", "not slow"]
+markers = [
+    "slow: full-corpus indexing tests (bshp, 1idm2); run with -m slow",
+]

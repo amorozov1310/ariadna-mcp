@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Новый проект — Ариадна{% endblock %}
+
+{% block active_nav %}projects{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs"><a href="/">← Проекты</a></div>
+<div class="card">
+    <h2>Новый проект</h2>
+    <form action="/api/projects" method="post" style="margin-top:16px">
+        <div class="form-row">
+            <div class="form-group">
+                <label>ID проекта (латиница, без пробелов)</label>
+                <input name="project_id" required pattern="[a-zA-Z0-9_-]+" placeholder="напр. bp30">
+                <div class="form-hint">Латиница, цифры, дефис. Потом не меняется — попадёт в пути на диске.</div>
+            </div>
+            <div class="form-group">
+                <label>Название</label>
+                <input name="name" required placeholder="напр. Бухгалтерия 3.0">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Описание — необязательно</label>
+            <input name="description" placeholder="напр. Типовая БП + расширение для сельхоза">
+            <div class="form-hint">Необязательно. Видно в списке проектов.</div>
+        </div>
+        <div class="btn-row">
+            <button type="submit" class="btn btn-primary">Создать</button>
+            <a href="/" class="btn btn-secondary">Отмена</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

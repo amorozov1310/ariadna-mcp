@@ -1,0 +1,110 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<WindowOpeningMode>LockOwnerWindow</WindowOpeningMode>
+	<VerticalScroll>useIfNecessary</VerticalScroll>
+	<UseForFoldersAndItems>Items</UseForFoldersAndItems>
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<Events>
+		<Event name="AfterWrite">ПослеЗаписи</Event>
+		<Event name="OnReadAtServer">ПриЧтенииНаСервере</Event>
+		<Event name="OnCreateAtServer">ПриСозданииНаСервере</Event>
+	</Events>
+	<ChildItems>
+		<InputField name="Наименование" id="1">
+			<DataPath>Объект.Description</DataPath>
+			<EditMode>EnterOnInput</EditMode>
+			<ContextMenu name="НаименованиеКонтекстноеМеню" id="2"/>
+			<ExtendedTooltip name="НаименованиеExtendedTooltip" id="16"/>
+		</InputField>
+		<InputField name="БуквенныйКод" id="3">
+			<DataPath>Объект.БуквенныйКод</DataPath>
+			<EditMode>EnterOnInput</EditMode>
+			<ContextMenu name="БуквенныйКодКонтекстноеМеню" id="4"/>
+			<ExtendedTooltip name="БуквенныйКодExtendedTooltip" id="18"/>
+		</InputField>
+		<UsualGroup name="БуквКодБюджетный" id="29">
+			<Visible>false</Visible>
+			<Title>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Букв код бюджетный</v8:content>
+				</v8:item>
+			</Title>
+			<Group>Horizontal</Group>
+			<Behavior>Usual</Behavior>
+			<Representation>None</Representation>
+			<ShowTitle>false</ShowTitle>
+			<ExtendedTooltip name="БуквКодБюджетныйРасширеннаяПодсказка" id="30"/>
+			<ChildItems>
+				<InputField name="БуквенныйКодБюджетный" id="23">
+					<DataPath>Объект.БуквенныйКодБюджетный</DataPath>
+					<ContextMenu name="БуквенныйКодБюджетныйКонтекстноеМеню" id="24"/>
+					<ExtendedTooltip name="БуквенныйКодБюджетныйРасширеннаяПодсказка" id="25"/>
+				</InputField>
+				<InputField name="БуквенныйКодБюджетный2009" id="26">
+					<DataPath>Объект.БуквенныйКодБюджетный2009</DataPath>
+					<Title>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>...до 2010 г.</v8:content>
+						</v8:item>
+					</Title>
+					<ContextMenu name="БуквенныйКодБюджетный2009КонтекстноеМеню" id="27"/>
+					<ExtendedTooltip name="БуквенныйКодБюджетный2009РасширеннаяПодсказка" id="28"/>
+				</InputField>
+			</ChildItems>
+		</UsualGroup>
+		<InputField name="ЦифровойКод" id="5">
+			<DataPath>Объект.ЦифровойКод</DataPath>
+			<EditMode>EnterOnInput</EditMode>
+			<ContextMenu name="ЦифровойКодКонтекстноеМеню" id="6"/>
+			<ExtendedTooltip name="ЦифровойКодExtendedTooltip" id="19"/>
+		</InputField>
+		<InputField name="ПолноеНаименование" id="7">
+			<DataPath>Объект.ПолноеНаименование</DataPath>
+			<EditMode>EnterOnInput</EditMode>
+			<Height>2</Height>
+			<ExtendedEdit>true</ExtendedEdit>
+			<ContextMenu name="ПолноеНаименованиеКонтекстноеМеню" id="8"/>
+			<ExtendedTooltip name="ПолноеНаименованиеExtendedTooltip" id="20"/>
+		</InputField>
+		<InputField name="ОсновноеВремя" id="11">
+			<DataPath>Объект.ОсновноеВремя</DataPath>
+			<Visible>false</Visible>
+			<ToolTip>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Укажите один из видов времени, уточнением которого является данный вид времени.
+Например:
+"Работа на линии" - основное время «Явка»
+"Особая командировка" - основное время "командировка" и т.п.
+</v8:content>
+				</v8:item>
+			</ToolTip>
+			<ToolTipRepresentation>Button</ToolTipRepresentation>
+			<EditMode>EnterOnInput</EditMode>
+			<HorizontalStretch>false</HorizontalStretch>
+			<ContextMenu name="ОсновноеВремяКонтекстноеМеню" id="12"/>
+			<ExtendedTooltip name="ОсновноеВремяExtendedTooltip" id="17"/>
+			<Events>
+				<Event name="OnChange">ОсновноеВремяПриИзменении</Event>
+			</Events>
+		</InputField>
+		<CheckBoxField name="НеИспользуется" id="13">
+			<DataPath>Объект.НеИспользуется</DataPath>
+			<TitleLocation>Right</TitleLocation>
+			<CheckBoxType>Auto</CheckBoxType>
+			<ContextMenu name="НеИспользуетсяКонтекстноеМеню" id="14"/>
+			<ExtendedTooltip name="НеИспользуетсяExtendedTooltip" id="22"/>
+		</CheckBoxField>
+	</ChildItems>
+	<Attributes>
+		<Attribute name="Объект" id="1">
+			<Type>
+				<v8:Type>cfg:CatalogObject.ВидыИспользованияРабочегоВремени</v8:Type>
+			</Type>
+			<MainAttribute>true</MainAttribute>
+			<SavedData>true</SavedData>
+		</Attribute>
+	</Attributes>
+</Form>

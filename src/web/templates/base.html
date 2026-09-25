@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Ариадна{% endblock %}</title>
+    {# Версия обязательна и здесь: иконку вкладки браузеры кэшируют
+       упорнее всего остального и без смены URL держат старую неделями. #}
+    <link rel="icon" href="/static/favicon.svg?v={{ asset_v }}" type="image/svg+xml">
+    {#
+      Страховка на случай, когда style.css не применился (кэш, офлайн,
+      опечатка в пути): SVG без размеров разворачивается на всю ширину
+      родителя, и страница превращается в один гигантский значок. Здесь
+      только размеры — идёт ДО <link>, поэтому обычные правила из
+      style.css (в том числе .icon-lg / .icon-sm) перекрывают эти.
+    #}
+    <style>
+        .brand-mark { width: 26px; height: 26px; }
+        .icon { width: 16px; height: 16px; }
+    </style>
+    {# Шрифты — отдельным файлом и ПЕРЕД style.css: правила @font-face
+       должны быть известны браузеру к моменту, когда он встретит
+       font-family в токенах. #}
+    <link rel="stylesheet" href="/static/fonts.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/style.css?v={{ asset_v }}">
+    <script>
+        // Тема ставится ДО отрисовки — иначе при сохранённой тёмной теме
+        // страница успевает мигнуть светлым фоном. Скрипт синхронный и
+        // крошечный намеренно: любая асинхронность возвращает вспышку.
+        // Ничего не выбрано — атрибут не ставим вовсе, тогда работает
+        // системная настройка через prefers-color-scheme.
+        try {
+            var saved = localStorage.getItem('theme');
+            if (saved === 'dark' || saved === 'light') {
+                document.documentElement.setAttribute('data-theme', saved);
+            }
+        } catch (e) { /* приватный режим, запрет на хранилище — не беда */ }
+    </script>
+</head>
+<body>
+{#
+  Этап U0/U6-U8: одна оболочка на все страницы. Раньше набор пунктов в
+  шапке был свой на каждой из шести страниц, активный раздел не
+  подсвечивался, а проект менялся только через «/». Здесь: слева логотип и
+  селектор проекта, по центру постоянный набор разделов с подсветкой через
+  {% block active_nav %}, справа — глобальный поиск.
+
+  «Дерево вызовов» и «Граф» объединены в один раздел «Граф»: это две
+  страницы под одну задачу, переключатель текст/визуал живёт внутри.
+#}
+{% set nav_section = self.active_nav()|trim %}
+{% set section_paths = {
+    'overview': '', 'search': '/search', 'graph': '/graph',
+    'playground': '/playground', 'settings': '/settings'} %}
+{% macro theme_toggle() %}
+<button type="button" class="theme-toggle" onclick="toggleTheme()"
+        title="Переключить тему" aria-label="Переключить светлую и тёмную тему">
+    <svg class="icon icon-to-dark"><use href="/static/icons.svg?v={{ asset_v }}#moon"/></svg>
+    <svg class="icon icon-to-light"><use href="/static/icons.svg?v={{ asset_v }}#sun"/></svg>
+</button>
+{% endmacro %}
+<header class="appbar">
+    <a href="/" class="brand" title="Ариадна — все проекты">
+        {#
+          Размеры и цвета заданы атрибутами, а не только через CSS: если
+          таблица стилей не доехала (кэш, офлайн, опечатка в пути), логотип
+          обязан остаться логотипом 26×26, а не развернуться во весь экран.
+          Цвет марки к тому же фиксированный — это бренд, он не должен
+          меняться вместе с токеном темы.
+        #}
+        <svg class="brand-mark" width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="8" fill="#0f766e"/>
+            <path d="M16 20.5a4.5 4.5 0 1 0-4.5-4.5v0A8.5 8.5 0 1 0 24.5 16"
+                  fill="none" stroke="#FBBF24" stroke-width="2.6" stroke-linecap="round"/>
+            <circle cx="16" cy="16" r="1.6" fill="#fff"/>
+        </svg>
+        <span class="brand-text">Ариадна</span>
+    </a>
+
+    {% if project is defined and project %}
+    {% set projects_all = all_projects() %}
+    <details class="switcher">
+        <summary title="Сменить проект">
+            <span style="overflow:hidden;text-overflow:ellipsis">{{ project.name }}</span>
+            <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#chevron-down"/></svg>
+        </summary>
+        <div class="switcher-menu">
+            {% for p in projects_all %}
+            {# Смена проекта сохраняет текущий раздел (U8). #}
+            <a href="/projects/{{ p.id }}{{ section_paths.get(nav_section, '') }}"
+               {% if p.id == project.id %}aria-current="true"{% endif %}>{{ p.name }}</a>
+            {% endfor %}
+            <hr>
+            <a href="/projects/new">+ Создать проект</a>
+        </div>
+    </details>
+
+    <nav class="mainnav" aria-label="Разделы проекта">
+        <a class="navlink" href="/projects/{{ project.id }}"
+           {% if nav_section == 'overview' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#layers"/></svg> Обзор</a>
+        <a class="navlink" href="/projects/{{ project.id }}/search"
+           {% if nav_section == 'search' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#search"/></svg> Поиск</a>
+        <a class="navlink" href="/projects/{{ project.id }}/graph"
+           {% if nav_section == 'graph' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg> Граф</a>
+        <a class="navlink" href="/projects/{{ project.id }}/playground"
+           {% if nav_section == 'playground' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg> Playground</a>
+        <a class="navlink" href="/projects/{{ project.id }}/settings"
+           {% if nav_section == 'settings' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#settings"/></svg> Настройки</a>
+    </nav>
+
+    <div class="appbar-right">
+        <form class="appsearch" method="get" action="/projects/{{ project.id }}/search" role="search">
+            <label class="appsearch-field">
+                <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#search"/></svg>
+                <input type="search" name="q" placeholder="Поиск по конфигурации"
+                       aria-label="Поиск по конфигурации" value="{{ query|default('', true) }}">
+            </label>
+        </form>
+        {{ theme_toggle() }}
+    </div>
+    {% else %}
+    <nav class="mainnav" aria-label="Разделы">
+        <a class="navlink" href="/" {% if nav_section == 'projects' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#folder"/></svg> Проекты</a>
+    </nav>
+    <div class="appbar-right">
+        <a href="/projects/new" class="btn btn-primary btn-sm">
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg> Создать проект</a>
+        {{ theme_toggle() }}
+    </div>
+    {% endif %}
+</header>
+
+<main class="{% block container_class %}container{% endblock %}">
+    {% block content %}{% endblock %}
+</main>
+
+{# Каждая страница объявляет свой раздел: overview | search | graph |
+   playground | settings | projects. Объявление блока обязано быть в
+   родителе, чтобы дочерние шаблоны могли его переопределить, поэтому оно
+   спрятано в HTML-комментарий — читается только через self.active_nav()
+   в шапке. #}
+<script>
+// Переключение всегда ставит явный выбор — от системной темы к
+// противоположной тому, что человек видит сейчас. Сохраняем в
+// localStorage: это удобство одного браузера, а не общее состояние.
+function toggleTheme() {
+    var root = document.documentElement;
+    var current = root.getAttribute('data-theme');
+    if (!current) {
+        current = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    var next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('theme', next); } catch (e) { /* хранилище недоступно */ }
+}
+</script>
+
+<!-- раздел: {% block active_nav %}{% endblock %} -->
+</body>
+</html>

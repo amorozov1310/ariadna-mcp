@@ -1,0 +1,170 @@
+"""
+Regression tests for IMPROVEMENT_PLAN Этап 3 (D6 — real full-text code search).
+
+search_code used to grep only calls.context (recognized call sites), so an
+assignment, a query's SELECT text, or a comment was invisible even though
+the string is right there in the source. It now searches the full text of
+every indexed module via module_text_fts.
+
+Acceptance criterion: a query for text inside a 1C query ("SELECT"), an
+attribute name in an assignment, or comment text finds the module and line.
+"""
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.core.db import Database
+from src.core.indexer import Indexer
+from src.core.search import SearchEngine
+
+FIXTURES = Path(__file__).parent / 'fixtures'
+
+
+def _build_engine(tmpdir: str, xml_dir: Path, report: Path | None = None) -> SearchEngine:
+    db = Database(os.path.join(tmpdir, 'index.db'))
+    db.connect()
+    db.init_schema()
+    indexer = Indexer(db)
+    if report:
+        indexer.index_report(str(report), source_id='main')
+    known_modules, known_objects = Indexer.scan_known_names([str(xml_dir)])
+    indexer.index_bsl(str(xml_dir), source_id='main',
+                       known_modules=known_modules, known_objects=known_objects)
+    return SearchEngine(db)
+
+
+def test_finds_comment_not_just_call():
+    """Real acceptance-criterion example: OTelSettings appears in comments
+    and an assignment in AgentDataUtils, never as a recognized call target
+    named exactly 'OTelSettings' — the old calls.context grep found nothing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = _build_engine(tmpdir, FIXTURES / 'xml_en')
+        results = engine.search_code('OTelSettings')
+        assert results, "Expected matches for OTelSettings"
+        assert any('AgentDataUtils' in r['module_name'] for r in results)
+        # Comment lines must be reachable, not just the assignment line
+        comment_hits = [r for r in results if '//' in r['context']]
+        assert comment_hits, f"Expected at least one comment-line match, got contexts: {[r['context'] for r in results]}"
+        engine.db.close()
+
+
+def test_finds_assignment_line():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = _build_engine(tmpdir, FIXTURES / 'xml_en')
+        results = engine.search_code('SessionParameters')
+        assert results
+        assert any('OTelSettings = SessionParameters' in r['context'] for r in results), \
+            f"Expected the assignment line, got: {[r['context'] for r in results]}"
+        engine.db.close()
+
+
+def test_finds_sql_query_text_ru():
+    """bshp-style example from the checklist: text inside a 1C query
+    ("ВЫБРАТЬ ПЕРВЫЕ") is findable, matching tests/fixtures/xml_ru's real
+    ВидыИспользованияРабочегоВремени/Ext/ObjectModule.bsl."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = _build_engine(tmpdir, FIXTURES / 'xml_ru')
+        results = engine.search_code('ВЫБРАТЬ ПЕРВЫЕ')
+        assert results, "Expected a match for query text 'ВЫБРАТЬ ПЕРВЫЕ'"
+        assert any('ВидыИспользованияРабочегоВремени' in r['module_name'] for r in results)
+        engine.db.close()
+
+
+def test_line_number_and_context_are_correct():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = _build_engine(tmpdir, FIXTURES / 'xml_en')
+        results = engine.search_code('SessionParameters')
+        hit = next(r for r in results if 'OTelSettings = SessionParameters' in r['context'])
+        # Cross-check against the real file directly
+        real_file = FIXTURES / 'xml_en' / 'CommonModules' / 'AgentDataUtils' / 'Ext' / 'Module.bsl'
+        lines = real_file.read_text(encoding='utf-8-sig').replace('\r\n', '\n').split('\n')
+        assert 'OTelSettings = SessionParameters' in lines[hit['line'] - 1], \
+            f"line {hit['line']} in real file is: {lines[hit['line'] - 1]!r}"
+        # ±1 context includes the matched line plus a neighbor
+        assert len(hit['context'].split('\n')) >= 2
+        engine.db.close()
+
+
+def test_case_insensitive_query():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = _build_engine(tmpdir, FIXTURES / 'xml_en')
+        lower = engine.search_code('otelsettings')
+        upper = engine.search_code('OTELSETTINGS')
+        assert lower and upper
+        assert len(lower) == len(upper)
+        engine.db.close()
+
+
+def test_source_id_and_file_pattern_filters():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = _build_engine(tmpdir, FIXTURES / 'xml_en')
+        by_source = engine.search_code('OTelSettings', source_id='main')
+        assert by_source
+        assert all(r['source_id'] == 'main' for r in by_source)
+
+        by_source_none = engine.search_code('OTelSettings', source_id='nonexistent')
+        assert by_source_none == []
+
+        by_file = engine.search_code('OTelSettings', file_pattern='AgentDataUtils')
+        assert by_file
+        assert all('AgentDataUtils' in r['file_path'] for r in by_file)
+        engine.db.close()
+
+
+def test_no_results_for_absent_text():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        engine = _build_engine(tmpdir, FIXTURES / 'xml_en')
+        assert engine.search_code('ThisStringDefinitelyDoesNotExistAnywhere123') == []
+        engine.db.close()
+
+
+def test_module_text_fts_removed_on_source_clear():
+    """_clear_source_data must also drop module_text_fts rows (no FK
+    cascade on FTS5 virtual tables) so a removed source's code doesn't
+    keep showing up in search_code."""
+    from src.core.project_manager import ProjectManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        pm.create_project('proj', 'Test')
+        import shutil
+        src_dir = Path(tmpdir) / 'projects' / 'proj' / 'sources' / 'main' / 'xml'
+        shutil.copytree(FIXTURES / 'xml_en', src_dir)
+        pm.add_source('proj', 'main', 'Main')
+        pm.reindex('proj')
+
+        engine = pm.get_search('proj')
+        assert engine.search_code('OTelSettings')
+
+        pm.remove_source('proj', 'main')
+        db = pm.get_db('proj')
+        remaining = db.conn.execute("SELECT COUNT(*) FROM module_text_fts").fetchone()[0]
+        assert remaining == 0, f"Expected module_text_fts to be emptied, found {remaining} rows"
+        pm.close_all()
+
+
+if __name__ == '__main__':
+    tests = [
+        test_finds_comment_not_just_call,
+        test_finds_assignment_line,
+        test_finds_sql_query_text_ru,
+        test_line_number_and_context_are_correct,
+        test_case_insensitive_query,
+        test_source_id_and_file_pattern_filters,
+        test_no_results_for_absent_text,
+        test_module_text_fts_removed_on_source_clear,
+    ]
+    passed = failed = 0
+    for t in tests:
+        try:
+            t()
+            print(f'  ✅ {t.__name__}')
+            passed += 1
+        except Exception as e:
+            import traceback
+            print(f'  ❌ {t.__name__}: {e}')
+            traceback.print_exc()
+            failed += 1
+    print(f'\n{passed} passed, {failed} failed')
