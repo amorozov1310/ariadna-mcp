@@ -365,6 +365,27 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                 for u in g['top_unresolved']:
                     mod = f"{u['module']}." if u['module'] else ''
                     lines.append(f"  {mod}{u['name']}  x{u['freq']}")
+            b = g.get('unresolved_breakdown')
+            if b and b['total']:
+                lines.append(f"\nUnresolved common_module/manager calls by cause: {b['total']}")
+                titles = {
+                    'module_missing': 'модуль отсутствует в выгрузке',
+                    'method_missing': 'модуль есть, метода в нём нет',
+                    'other': 'прочее (кандидаты на баг парсера/резолвера)',
+                }
+                for group, title in titles.items():
+                    grp = b[group]
+                    lines.append(f"  [{group}] {title}: {grp['count']} ({grp['pct']}%)")
+                    for u in grp['top']:
+                        note = ''
+                        if u.get('defined_in'):
+                            homes = ', '.join(
+                                d['module'] + (f" @{d['source_id']}" if d['source_id'] else '')
+                                for d in u['defined_in'])
+                            note = f"  — определена в {homes}"
+                        elif u.get('reason'):
+                            note = f"  [{u['reason']}]"
+                        lines.append(f"    {u['module']}.{u['name']}  x{u['freq']}{note}")
             return '\n'.join(lines)
 
         case _:

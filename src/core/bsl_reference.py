@@ -425,3 +425,32 @@ PLATFORM_FUNCTIONS_EXTRA = {s.lower() for s in [
     # a huge chunk of real cross-module calls.
 ]}
 
+
+
+# Идентификаторы, которые в `Имя.Метод(` обозначают встроенный объект
+# платформы, а не общий модуль. В отличие от PLATFORM_FUNCTIONS_EXTRA, в
+# стоп-лист голых вызовов не входят (`Элементы(` не бывает), а в парсере
+# проверяются только если имени нет в known_modules: настоящий общий модуль
+# с таким именем (если конфигурация его всё же завела) важнее списка.
+#
+# Свойства управляемой формы, доступные в её модуле без «ЭтаФорма.».
+# В модулях других видов эти имена — обычные локальные переменные, тоже не
+# модули. Окно/Window сознательно не включено — не подтверждено.
+FORM_CONTEXT_IDENTIFIERS_RU = {s.lower() for s in [
+    'Элементы', 'Параметры', 'ВладелецФормы', 'Команды',
+    'КоманднаяПанель', 'КомандныйИнтерфейс',
+]}
+FORM_CONTEXT_IDENTIFIERS_EN = {s.lower() for s in [
+    'Items', 'Parameters', 'FormOwner', 'Commands',
+    'CommandBar', 'CommandInterface',
+]}
+
+# Объекты глобального контекста, у которых вызывают методы через точку.
+# ОбработкаОшибок/ErrorProcessing — с платформы 8.3.17 (найдено в фикстуре
+# xml_en: ErrorProcessing.DetailErrorDescription писалось вызовом модуля).
+GLOBAL_CONTEXT_OBJECTS_RU = {s.lower() for s in [
+    'ОбработкаОшибок',
+]}
+GLOBAL_CONTEXT_OBJECTS_EN = {s.lower() for s in [
+    'ErrorProcessing',
+]}

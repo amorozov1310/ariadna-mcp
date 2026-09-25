@@ -704,6 +704,95 @@ def format_object_details(details: dict, detail: str = 'brief') -> str:
 # DIAGNOSTICS
 # ============================================
 
+_UNRESOLVED_GROUPS = ('module_missing', 'method_missing', 'other')
+
+
+def _module_short_name(name_cf: str) -> str:
+    """Имя объекта из имени модуля: 'общиймодуль.x.модуль' / 'справочник.x.…'
+    → 'x'; голое имя общего модуля (строка из отчёта) — само имя."""
+    parts = name_cf.split('.')
+    return parts[1] if len(parts) > 1 else parts[0]
+
+
+def _unresolved_breakdown(conn, top_limit: int = 20, hints_limit: int = 3) -> dict:
+    """
+    Нерезолвленные вызовы common_module/manager по причинам:
+      module_missing — модуля с кодом нет в индексе и имя не совпадает ни с
+                       одним объектом индекса (внешняя БСП, не выгруженная
+                       подсистема);
+      method_missing — модуль есть, процедуры с таким именем в нём нет;
+                       defined_in подсказывает, в каких ДРУГИХ модулях она есть;
+      other          — всё остальное, с причиной reason: 'resolvable' (и
+                       модуль, и процедура есть — устаревший calls_resolved
+                       или баг резолвера), 'name_matches' (имя совпадает с
+                       объектом другого вида — вероятно, переменная, которую
+                       парсер принял за модуль), 'no_module_name'.
+
+    Модуль ищется тем же ключом, что в Indexer.resolve_calls (по всем
+    источникам, без учёта регистра), иначе группы расходились бы с тем, что
+    резолвер реально мог найти. «Есть» = есть хотя бы одна процедура: строка
+    modules из report.txt без BSL-кода для резолвера всё равно пуста.
+    """
+    # name_cf модуля -> {name_cf процедуры}; только модули с кодом.
+    module_procs: dict[str, set[str]] = {}
+    # name_cf процедуры -> [(имя модуля, source_id)] — для подсказок.
+    proc_homes: dict[str, list[tuple[str, str]]] = {}
+    short_names: set[str] = set()
+    for r in conn.execute(
+            """SELECT m.name AS mname, m.name_cf AS mcf, m.source_id AS src,
+                      p.name AS pname, p.name_cf AS pcf
+               FROM procedures p JOIN modules m ON m.id = p.module_id"""):
+        mcf = r['mcf'] or r['mname'].casefold()
+        pcf = r['pcf'] or r['pname'].casefold()
+        module_procs.setdefault(mcf, set()).add(pcf)
+        if '.' not in mcf:
+            module_procs.setdefault(f'общиймодуль.{mcf}.модуль', set()).add(pcf)
+        proc_homes.setdefault(pcf, []).append((r['mname'], r['src'] or ''))
+        short_names.add(_module_short_name(mcf))
+
+    groups = {g: {'count': 0, 'items': []} for g in _UNRESOLVED_GROUPS}
+    total = 0
+    for r in conn.execute("""
+            SELECT c.callee_kind AS kind, c.callee_module AS module,
+                   c.callee_proc AS name, COUNT(*) AS freq
+            FROM calls c
+            LEFT JOIN calls_resolved cr ON cr.call_id = c.id
+            WHERE cr.call_id IS NULL AND c.callee_kind IN ('common_module', 'manager')
+            GROUP BY c.callee_kind, c.callee_module, c.callee_proc"""):
+        module_cf = (r['module'] or '').casefold()
+        proc_cf = (r['name'] or '').casefold()
+        key = f'общиймодуль.{module_cf}.модуль' if r['kind'] == 'common_module' else module_cf
+        item = {'kind': r['kind'], 'module': r['module'] or '', 'name': r['name'] or '',
+                'freq': r['freq']}
+        procs = module_procs.get(key)
+        if not module_cf:
+            group, item['reason'] = 'other', 'no_module_name'
+        elif procs is not None and proc_cf in procs:
+            group, item['reason'] = 'other', 'resolvable'
+        elif procs is not None:
+            group = 'method_missing'
+            homes = sorted(set(proc_homes.get(proc_cf, [])))
+            item['defined_in'] = [{'module': m, 'source_id': src}
+                                  for m, src in homes[:hints_limit]]
+        elif _module_short_name(module_cf) in short_names:
+            group, item['reason'] = 'other', 'name_matches'
+        else:
+            group = 'module_missing'
+        total += r['freq']
+        groups[group]['count'] += r['freq']
+        groups[group]['items'].append(item)
+
+    result = {'total': total}
+    for g, data in groups.items():
+        data['items'].sort(key=lambda i: (-i['freq'], i['module'], i['name']))
+        result[g] = {
+            'count': data['count'],
+            'pct': round(100.0 * data['count'] / total, 1) if total else 0.0,
+            'top': data['items'][:top_limit],
+        }
+    return result
+
+
 def call_graph_resolution_stats(conn, worst_modules_limit: int = 20,
                                  unresolved_names_limit: int = 20,
                                  min_calls_for_module: int = 5) -> dict:
@@ -781,6 +870,7 @@ def call_graph_resolution_stats(conn, worst_modules_limit: int = 20,
         'worst_modules': worst_modules,
         'top_unresolved': top_unresolved,
         'override_procedures_count': override_count,
+        'unresolved_breakdown': _unresolved_breakdown(conn, unresolved_names_limit),
     }
 
 
