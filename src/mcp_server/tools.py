@@ -165,6 +165,9 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     f"Progress: {stats.get('progress_current', 0)}/{stats['progress_total']} "
                     f"({stats.get('progress_phase', '')})"
                 )
+                if stats.get('progress_phase') == 'bsl_full':
+                    lines.append("Полный перепарс BSL: изменилась версия парсера "
+                                 "(файлы выгрузки не менялись)")
             if stats.get('updated_at'):
                 lines.append(f"Updated: {stats['updated_at'][:19]}")
             lines.append(f"Objects: {stats.get('metadata_objects', 0)}")
@@ -345,6 +348,22 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     lines.append(f"  ⚠ {e['module']}.{e['name']}")
             if not result['missing'] and not result['extra']:
                 lines.append("\n✅ Index is complete — all procedures accounted for.")
+
+            ps = result.get('parser')
+            if ps:
+                lines.append(f"\n--- Parser fingerprint ---")
+                lines.append(f"Current: {ps['current'] or '(не вычислен — нет исходников)'}")
+                for sid, st in ps['sources'].items():
+                    if st['up_to_date']:
+                        mark = 'актуален'
+                    elif st['fingerprint']:
+                        mark = 'устарел — следующий reindex переразберёт BSL полностью'
+                    else:
+                        mark = 'нет отпечатка — следующий reindex переразберёт BSL полностью'
+                    lines.append(f"  {sid}: {st['fingerprint'] or '—'} ({mark})")
+                    if st['last_full_reparse_reason']:
+                        lines.append(f"    последний полный перепарс {st['last_full_reparse_at'][:19]}: "
+                                     f"{st['last_full_reparse_reason']}")
 
             # Этап 7: call-graph resolution quality
             g = result['graph']
