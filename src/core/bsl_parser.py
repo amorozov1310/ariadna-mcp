@@ -343,6 +343,68 @@ _RE_DYNAMIC_MODULE_LOAD = re.compile(
     re.IGNORECASE
 )
 
+# Общее правило «присвоено не-модуль» (Этап 7, остаток). В 1С переменная
+# хранит ссылку на общий модуль, только если ей присвоено голое имя модуля
+# или результат загрузчика (ОбщийМодуль("..."), Вычислить("...")). Любое
+# другое присваивание — результат вызова, цепочка свойств, литерал,
+# выражение — делает её значением, и Var.Метод( уже не вызов модуля.
+# Регулярки выше ловят частные формы; это правило — все остальные.
+#
+# Почему это не может «съесть» настоящий вызов: переменная с именем из
+# known_modules правилом не помечается никогда (см. вызывающий код), а
+# вызов X.Метод( с X вне known_modules и сейчас не резолвится — known_modules
+# это полный список общих модулей проекта (по всем источникам), тот же, из
+# которого наполняется таблица modules. Правило убирает только фантомы.
+#
+# Только начало оператора (начало строки, после ";" или после ключевого
+# слова, за которым начинается оператор): "=" в 1С — это и сравнение, и
+# `Если А = Б Тогда` присваиванием не является. Правая часть берётся до
+# ";" или конца строки и классифицируется в _classify_assign_rhs().
+_RE_VALUE_ASSIGN = re.compile(
+    r'(?:^|;|(?<![А-Яа-яA-Za-z0-9_])'
+    r'(?:Тогда|Иначе|Цикл|Попытка|Исключение|Then|Else|Do|Try|Except)'
+    r'(?![А-Яа-яA-Za-z0-9_]))\s*'
+    r'([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)'
+    r'\s*=\s*([^;]*)',
+    re.IGNORECASE
+)
+
+# Загрузчики модулей в правой части: такое присваивание может дать ссылку
+# на модуль (в т.ч. через локальную обёртку `ОбщийМодуль("...")` или при
+# переносе аргумента на следующую строку, когда _RE_DYNAMIC_MODULE_LOAD
+# строку не видит), поэтому правило его не трогает.
+_RE_MODULE_LOADER_CALL = re.compile(
+    r'(?<![А-Яа-яA-Za-z0-9_])(?:ОбщийМодуль|CommonModule|Вычислить|Eval)\s*\(',
+    re.IGNORECASE
+)
+
+# Голый идентификатор в выражении — не после точки (свойство) и не перед
+# ".", "(" или "[" (обращение к члену, вызов, индекс). Только такое
+# вхождение имени модуля может быть самим модулем как значением:
+# `М = ?(Условие, МодульА, МодульБ)`.
+_RE_BARE_OPERAND = re.compile(
+    r'(?<![.А-Яа-яA-Za-z0-9_])([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)'
+    r'(?![А-Яа-яA-Za-z0-9_])(?!\s*[.(\[])'
+)
+
+_RE_IDENTIFIER = re.compile(r'[А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*')
+
+# Хвост строки, после которого выражение явно продолжается на следующей.
+_RE_DANGLING_TAIL = re.compile(
+    r'(?:[,+\-*/(<>=?]|(?<![А-Яа-яA-Za-z0-9_])(?:И|Или|Не|And|Or|Not))\s*$',
+    re.IGNORECASE
+)
+
+# Переменная цикла — всегда значение: `Для Каждого X Из ...` /
+# `For Each X In ...` и `Для X = 1 По ...` / `For X = 1 To ...`.
+_RE_LOOP_VAR = re.compile(
+    r'(?<![А-Яа-яA-Za-z0-9_])(?:Для|For)\s+'
+    r'(?:(?:Каждого|Each)\s+([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)\s+(?:Из|In)'
+    r'(?![А-Яа-яA-Za-z0-9_])'
+    r'|([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)\s*=)',
+    re.IGNORECASE
+)
+
 # ============================================
 # PLATFORM BUILT-IN FUNCTIONS (skip as calls)
 # ============================================
@@ -609,6 +671,43 @@ def _parse_param_names(params: str) -> set[str]:
         if m:
             names.add(m.group(1).lower())
     return names
+
+
+def _classify_assign_rhs(rhs: str, known_modules: set[str],
+                          aliases: dict[str, str], known_vars: set[str]):
+    """Что присвоено в `Var = rhs` (rhs — со снятыми строками и
+    комментариями, до ";"). Возвращает None — не трогать; ('value', None) —
+    значение; ('alias', ИмяМодуля) — копия алиаса модуля.
+
+    Голое имя вне known_modules — значение: это переменная, параметр,
+    реквизит/элемент формы, свойство глобального контекста или литерал, но
+    не общий модуль (known_modules полон по проекту). Если known_modules
+    пуст — фактов нет (парсер вызван без Pass 1), и значением считается
+    только уже известная переменная.
+    """
+    rhs = rhs.strip()
+    # Пустая или оборванная правая часть — перенос на следующую строку,
+    # по одной строке судить нельзя.
+    if not rhs or _RE_DANGLING_TAIL.search(rhs):
+        return None
+    if rhs.count('(') != rhs.count(')') or rhs.count('[') != rhs.count(']'):
+        return None
+    if _RE_MODULE_LOADER_CALL.search(rhs):
+        return None
+    if _RE_IDENTIFIER.fullmatch(rhs):
+        low = rhs.lower()
+        if low in known_modules:
+            return None   # алиас — _RE_BARE_ALIAS_ASSIGN
+        if low in aliases:
+            return ('alias', aliases[low])
+        if known_modules or low in known_vars:
+            return ('value', None)
+        return None
+    for m in _RE_BARE_OPERAND.finditer(rhs):
+        low = m.group(1).lower()
+        if low in known_modules or low in aliases:
+            return None
+    return ('value', None)
 
 
 def _form_context_vars(directive: str, form_attributes: set[str]) -> set[str]:
@@ -933,6 +1032,37 @@ class BSLParser:
                         proc_aliases[var_name] = target
                         if var_name in module_level_var_names:
                             module_level_aliases[var_name] = target
+
+                # Общее правило «присвоено не-модуль» — после алиасов: у них
+                # приоритет и в _extract_calls. Имя из known_modules не
+                # помечается никогда (см. _RE_VALUE_ASSIGN).
+                known_vars = proc_vars | module_level_constructed
+                for assign_m in _RE_VALUE_ASSIGN.finditer(clean_for_ctor):
+                    var_name = assign_m.group(1).lower()
+                    if var_name in self.known_modules:
+                        continue
+                    verdict = _classify_assign_rhs(
+                        assign_m.group(2), self.known_modules,
+                        {**module_level_aliases, **proc_aliases}, known_vars)
+                    if verdict is None:
+                        continue
+                    kind, target = verdict
+                    if kind == 'alias':
+                        proc_aliases[var_name] = target
+                        if var_name in module_level_var_names:
+                            module_level_aliases[var_name] = target
+                    else:
+                        proc_vars.add(var_name)
+                        known_vars.add(var_name)
+                        if var_name in module_level_var_names:
+                            module_level_constructed.add(var_name)
+                for loop_m in _RE_LOOP_VAR.finditer(clean_for_ctor):
+                    var_name = (loop_m.group(1) or loop_m.group(2)).lower()
+                    if var_name in self.known_modules:
+                        continue
+                    proc_vars.add(var_name)
+                    if var_name in module_level_var_names:
+                        module_level_constructed.add(var_name)
 
         if current_proc:
             current_proc.end_line = len(lines)

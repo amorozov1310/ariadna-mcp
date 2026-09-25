@@ -264,9 +264,14 @@ def test_bare_alias_ignored_when_rhs_is_not_a_known_module():
 '''
     result = BSLParser(known_modules={'общегоназначения'}).parse(code)
     call_pairs = {(c.callee_module, c.callee_proc) for c in result.calls}
-    assert ('Копия', 'ЧтоТоДелает') in call_pairs, (
-        "an ordinary variable copy is not an alias — the call should "
-        f"still be attempted/classified normally, got {call_pairs}")
+    assert not any(m == 'ОбщегоНазначения' for m, _ in call_pairs), (
+        f"an ordinary variable copy is not an alias — got {call_pairs}")
+    # Общее правило «присвоено не-модуль»: Оригинал не в known_modules,
+    # значит Копия — значение, и фантомного вызова модуля «Копия» тоже нет.
+    assert ('Копия', 'ЧтоТоДелает') not in call_pairs, call_pairs
+    # Без фактов Pass 1 (known_modules пуст) судить не о чем — вызов остаётся.
+    no_facts = {(c.callee_module, c.callee_proc) for c in BSLParser().parse(code).calls}
+    assert ('Копия', 'ЧтоТоДелает') in no_facts, no_facts
 
 
 def test_bsp_dynamic_module_loader_resolves_as_the_real_module():
@@ -434,7 +439,8 @@ def test_local_var_same_name_as_module_level_var_not_confused():
 
 Процедура ОтдельнаяОбработка() Экспорт
 	Кэш = Новый Массив;
-	КэшДругой = ОбщегоНазначения.ПолучитьЗначение();
+	// КэшДругой здесь не присваивается (иначе его пометило бы общее
+	// правило «присвоено не-модуль», а не модульный трекинг).
 	КэшДругой.ЧтоТоДелает();
 КонецПроцедуры
 '''
