@@ -984,4 +984,24 @@ def diagnose_index(project_manager, project_id: str) -> dict:
         'extra_count': len(extra),
         'extra': extra,
         'graph': call_graph_resolution_stats(conn),
+        'parser': _parser_state_report(db, conn, project),
     }
+
+
+def _parser_state_report(db, conn, project) -> dict:
+    """Каким отпечатком парсера разобран каждый источник — чтобы было видно,
+    что после правки парсера индекс ещё не переразобран (или уже был)."""
+    from .parser_fingerprint import parser_fingerprint
+    current = parser_fingerprint()
+    states = db.get_parser_states(conn)
+    sources = {}
+    for s in project.sources:
+        st = states.get(s.id) or {}
+        sources[s.id] = {
+            'fingerprint': st.get('fingerprint', ''),
+            'up_to_date': bool(current) and st.get('fingerprint') == current,
+            'updated_at': st.get('updated_at', ''),
+            'last_full_reparse_at': st.get('last_full_reparse_at', ''),
+            'last_full_reparse_reason': st.get('last_full_reparse_reason', ''),
+        }
+    return {'current': current, 'sources': sources}

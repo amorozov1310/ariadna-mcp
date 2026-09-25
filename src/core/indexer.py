@@ -222,15 +222,25 @@ class Indexer:
         """
         from .xml_walker import XMLWalker
         walker = XMLWalker()
+        module_files = [mf for xp in xml_paths for mf in walker.walk(xp)]
+        known_modules, known_objects, _ = Indexer.collect_known_facts(module_files)
+        return known_modules, known_objects
+
+    @staticmethod
+    def collect_known_facts(module_files) -> tuple[set[str], dict[str, set[str]], list]:
+        """known_modules, known_objects и список файлов общих модулей из уже
+        обойдённых ModuleFile — общая часть Pass 1 для scan_known_names,
+        index_bsl и ProjectManager.reindex (входит в отпечаток парсера)."""
         known_modules: set[str] = set()
         known_objects: dict[str, set[str]] = {}
-        for xp in xml_paths:
-            for mf in walker.walk(xp):
-                if mf.object_kind == 'ОбщийМодуль':
-                    known_modules.add(mf.object_name.lower())
-                elif mf.object_kind != 'Конфигурация':
-                    known_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
-        return known_modules, known_objects
+        common_module_files = []
+        for mf in module_files:
+            if mf.object_kind == 'ОбщийМодуль':
+                known_modules.add(mf.object_name.lower())
+                common_module_files.append(mf)
+            elif mf.object_kind != 'Конфигурация':
+                known_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
+        return known_modules, known_objects, common_module_files
 
     @staticmethod
     def scan_known_factory_functions(common_module_files: list) -> dict[str, set[str]]:
@@ -274,7 +284,8 @@ class Indexer:
                   known_objects: dict[str, set[str]] | None = None,
                   known_factory_functions: dict[str, set[str]] | None = None,
                   source_label: str = '', source_type: str = 'main',
-                  progress_cb=None, commit_every: int = 200) -> dict:
+                  progress_cb=None, commit_every: int = 200,
+                  force_reparse: bool = False) -> dict:
         """
         Index BSL code from XML config dump.
         Walks the XML directory, parses .bsl files, populates modules/procedures/calls.
@@ -298,6 +309,9 @@ class Indexer:
         progress_cb(current, total), when given, is called periodically
         (every `commit_every` files) — each call coincides with a commit,
         satisfying "one transaction per file-batch" for free.
+
+        force_reparse — переразобрать все файлы, не глядя на хеш: результат
+        разбора устарел из-за смены самого парсера (см. parser_fingerprint).
         """
         import hashlib
         from .xml_walker import XMLWalker, read_form_attributes
@@ -325,13 +339,7 @@ class Indexer:
         total_files = len(module_files)
 
         if known_modules is None or known_objects is None:
-            self_modules: set[str] = set()
-            self_objects: dict[str, set[str]] = {}
-            for mf in module_files:
-                if mf.object_kind == 'ОбщийМодуль':
-                    self_modules.add(mf.object_name.lower())
-                elif mf.object_kind != 'Конфигурация':
-                    self_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
+            self_modules, self_objects, _ = Indexer.collect_known_facts(module_files)
             if known_modules is None:
                 known_modules = self_modules
             if known_objects is None:
@@ -370,7 +378,8 @@ class Indexer:
                 file_hash = ''
 
             prior = existing_modules.get(mf.full_name)
-            if prior is not None and file_hash and prior['file_hash'] == file_hash:
+            if (not force_reparse and prior is not None and file_hash
+                    and prior['file_hash'] == file_hash):
                 stats['files_skipped'] += 1
             else:
                 form_attributes = (read_form_attributes(mf.form_xml_path)

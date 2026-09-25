@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
 
+from . import parser_fingerprint
 from .db import Database
 from .search import SearchEngine
 
@@ -619,16 +620,8 @@ class ProjectManager:
                     p = self.projects_dir / project_id / s.xml_path
                     if p.exists():
                         walked[s.id] = walker.walk(str(p))
-            known_modules: set[str] = set()
-            known_objects: dict[str, set[str]] = {}
-            common_module_files = []
-            for mfs in walked.values():
-                for mf in mfs:
-                    if mf.object_kind == 'ОбщийМодуль':
-                        known_modules.add(mf.object_name.lower())
-                        common_module_files.append(mf)
-                    elif mf.object_kind != 'Конфигурация':
-                        known_objects.setdefault(mf.object_kind, set()).add(mf.object_name.lower())
+            known_modules, known_objects, common_module_files = Indexer.collect_known_facts(
+                [mf for mfs in walked.values() for mf in mfs])
 
             # Этап 7 (cross-module factory-function inference): a second,
             # full parse of every common module — real extra cost (see
@@ -639,7 +632,9 @@ class ProjectManager:
             known_factory_functions = Indexer.scan_known_factory_functions(common_module_files)
 
             total_files = sum(len(walked.get(s.id, [])) for s in sources)
-            progress = {'done': 0}
+            progress = {'done': 0, 'phase': 'bsl'}
+            current_fp = parser_fingerprint.parser_fingerprint()
+            parser_states = db.get_parser_states()
 
             def progress_cb(current: int, total: int):
                 # `current`/`total` are within one source's own index_bsl
@@ -647,7 +642,7 @@ class ProjectManager:
                 # being (re)indexed in this call.
                 db.update_state(
                     progress_current=progress['done'] + current,
-                    progress_total=total_files, progress_phase='bsl')
+                    progress_total=total_files, progress_phase=progress['phase'])
 
             db.update_state(progress_total=total_files, progress_phase='report')
 
@@ -660,10 +655,19 @@ class ProjectManager:
             # always reflects reality regardless of what got skipped.
             duration_sec = 0.0
             for source in sources:
+                reason = self._full_reparse_reason(db, source.id, parser_states.get(source.id),
+                                                   current_fp)
+                if reason:
+                    logger.info("Проект %s, источник %s: полный перепарс BSL — %s",
+                                project_id, source.id, reason)
+                progress['phase'] = 'bsl_full' if reason else 'bsl'
                 stats = self._index_source(indexer, project_id, source,
                                             known_modules, known_objects,
                                             known_factory_functions,
-                                            progress_cb=progress_cb)
+                                            progress_cb=progress_cb,
+                                            force_reparse=bool(reason))
+                if current_fp and source.id in walked:
+                    db.set_parser_fingerprint(source.id, current_fp, reason)
                 duration_sec += stats.get('duration_sec', 0)
                 source.indexed_at = datetime.now().isoformat()
                 progress['done'] += len(walked.get(source.id, []))
@@ -813,11 +817,28 @@ class ProjectManager:
                 _REINDEX_LOCKS[key] = lock
             return lock
 
+    @staticmethod
+    def _full_reparse_reason(db: Database, source_id: str, state: dict | None,
+                             current_fp: str) -> str:
+        """Почему BSL источника надо переразобрать целиком, не глядя на хеши
+        файлов; '' — не надо. Источник без разобранного кода (новый) не в
+        счёт: переразбирать нечего, отпечаток просто запишется после."""
+        if not current_fp or (state and state['fingerprint'] == current_fp):
+            return ''
+        has_parsed_code = db.conn.execute(
+            "SELECT 1 FROM modules WHERE source_id=? AND file_hash != '' LIMIT 1",
+            (source_id,)).fetchone()
+        if not has_parsed_code:
+            return ''
+        if state is None or not state['fingerprint']:
+            return 'в индексе нет отпечатка парсера (индекс старого формата)'
+        return f"изменилась версия парсера ({state['fingerprint']} → {current_fp})"
+
     def _index_source(self, indexer, project_id: str, source: SourceInfo,
                        known_modules: set[str] | None = None,
                        known_objects: dict[str, set[str]] | None = None,
                        known_factory_functions: dict[str, set[str]] | None = None,
-                       progress_cb=None) -> dict:
+                       progress_cb=None, force_reparse: bool = False) -> dict:
         """Index one source (report + optionally BSL from XML dump)."""
         stats = {'objects': 0, 'attributes': 0, 'forms': 0,
                  'modules': 0, 'procedures': 0, 'calls': 0, 'duration_sec': 0}
@@ -859,6 +880,7 @@ class ProjectManager:
                                            known_factory_functions=known_factory_functions,
                                            source_label=source.label,
                                            source_type=source.source_type,
+                                           force_reparse=force_reparse,
                                            progress_cb=progress_cb)
             stats['modules'] += bsl_stats.get('modules', 0)
             stats['procedures'] = bsl_stats.get('procedures', 0)
@@ -882,6 +904,8 @@ class ProjectManager:
             conn.execute(f"DELETE FROM forms WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM attributes WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM subsystem_content WHERE subsystem_id IN ({placeholders})", obj_ids)
+
+        conn.execute("DELETE FROM parser_state WHERE source_id=?", (source_id,))
 
         # module_text_fts has no FK to modules (FTS5 virtual tables can't
         # carry one) — its rowid mirrors modules.id, so remove those rows
