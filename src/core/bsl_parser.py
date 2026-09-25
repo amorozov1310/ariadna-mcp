@@ -19,6 +19,10 @@ from .bsl_reference import (
     SYSTEM_ENUMERATIONS_RU,
     SYSTEM_ENUMERATIONS_EN,
     PLATFORM_FUNCTIONS_EXTRA,
+    FORM_CONTEXT_IDENTIFIERS_RU,
+    FORM_CONTEXT_IDENTIFIERS_EN,
+    GLOBAL_CONTEXT_OBJECTS_RU,
+    GLOBAL_CONTEXT_OBJECTS_EN,
 )
 
 
@@ -168,6 +172,15 @@ _METADATA_MANAGERS = {
     'бизнеспроцессы': 'БизнесПроцесс', 'businessprocesses': 'БизнесПроцесс',  # D11
     'задачи': 'Задача', 'tasks': 'Задача',  # D11
 }
+
+# Левая часть двухчастного `Имя.Метод(`, которая не может быть общим
+# модулем: менеджер-коллекция (`Документы.ТипВсеСсылки()` — метод самой
+# коллекции; трёхчастный `Справочники.Имя.Метод(` разбирается отдельно,
+# _RE_MANAGER_CALL) и встроенные объекты формы/глобального контекста
+# (bsl_reference). Проверяется только для имён вне known_modules.
+_NON_MODULE_PREFIXES = (set(_METADATA_MANAGERS)
+                        | FORM_CONTEXT_IDENTIFIERS_RU | FORM_CONTEXT_IDENTIFIERS_EN
+                        | GLOBAL_CONTEXT_OBJECTS_RU | GLOBAL_CONTEXT_OBJECTS_EN)
 
 # Standard platform methods on manager objects — NOT user code
 _PLATFORM_MANAGER_METHODS = {
@@ -1261,6 +1274,10 @@ class BSLParser:
             # _RE_CONSTRUCTOR_ASSIGN; checked first since it's a stronger
             # signal than the name-based heuristics below).
             if module_name.lower() in constructed_vars:
+                continue
+
+            if (module_name.lower() in _NON_MODULE_PREFIXES
+                    and module_name.lower() not in self.known_modules):
                 continue
 
             # Skip if method is a known object method
