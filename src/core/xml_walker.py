@@ -7,6 +7,7 @@ Structure:
     ├── CommonModules/#U041e#U0431#U0449.../Ext/Module.bsl
     ├── Catalogs/#U041d#U043e#U043c.../Ext/ObjectModule.bsl
     ├── Catalogs/#U041d#U043e#U043c.../Forms/#U0424.../Ext/Form/Module.bsl
+    ├── CommonForms/#U0412.../Ext/Form/Module.bsl   (общая форма, без Forms/)
     ├── Documents/#U041f.../Ext/ObjectModule.bsl
     ├── Ext/ManagedApplicationModule.bsl
     └── Ext/SessionModule.bsl
@@ -159,6 +160,24 @@ class XMLWalker:
                             object_name=obj_name,
                             module_type=module_type,
                             full_name=full_name,
+                        ))
+
+                # Common form module: CommonForms/{Name}/Ext/Form/Module.bsl —
+                # the object itself is the form, there's no Forms/ subdir.
+                # full_name matches report_parser's object name (ОбщаяФорма.X).
+                if kind == 'ОбщаяФорма':
+                    form_bsl = obj_ext / 'Form' / 'Module.bsl'
+                    if form_bsl.exists():
+                        form_xml = obj_ext / 'Form.xml'
+                        modules.append(ModuleFile(
+                            file_path=str(form_bsl),
+                            relative_path=form_bsl.relative_to(root).as_posix(),
+                            object_kind=kind,
+                            object_name=obj_name,
+                            module_type='МодульФормы',
+                            form_name=obj_name,
+                            full_name=f'{kind}.{obj_name}',
+                            form_xml_path=str(form_xml) if form_xml.exists() else '',
                         ))
 
                 # Form modules: Forms/{EncodedFormName}/Ext/Form/Module.bsl
