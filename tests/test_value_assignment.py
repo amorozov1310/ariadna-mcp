@@ -335,3 +335,16 @@ def test_indexer_keeps_real_calls_resolved_and_drops_phantoms():
             ]), module_calls
         finally:
             db.close()
+
+
+def test_english_val_parameter_is_a_variable():
+    """Ключевое слово 1С — `Val` (не `ByVal`): такой параметр с умолчанием
+    раньше не распознавался и давал фантом `MethodParams.UBound`
+    (фикстура xml_en, CommonAtServer)."""
+    code = '''
+Procedure Run(Val MethodName, Val MethodParams = Undefined) Export
+	For i = 0 To MethodParams.UBound() Do
+	EndDo;
+EndProcedure
+'''
+    assert ('MethodParams', 'UBound') not in _calls(code, known_modules=set())

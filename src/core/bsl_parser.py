@@ -665,7 +665,7 @@ def _parse_param_names(params: str) -> set[str]:
         part = part.strip()
         if not part:
             continue
-        part = re.sub(r'^(?:Знач|ByVal)\s+', '', part, flags=re.IGNORECASE)
+        part = re.sub(r'^(?:Знач|Val|ByVal)\s+', '', part, flags=re.IGNORECASE)
         name = part.split('=')[0].strip()
         m = re.match(r'^([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)$', name)
         if m:
