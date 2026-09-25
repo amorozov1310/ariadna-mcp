@@ -284,7 +284,8 @@ class Indexer:
                   known_objects: dict[str, set[str]] | None = None,
                   known_factory_functions: dict[str, set[str]] | None = None,
                   source_label: str = '', source_type: str = 'main',
-                  progress_cb=None, commit_every: int = 200) -> dict:
+                  progress_cb=None, commit_every: int = 200,
+                  force_reparse: bool = False) -> dict:
         """
         Index BSL code from XML config dump.
         Walks the XML directory, parses .bsl files, populates modules/procedures/calls.
@@ -308,6 +309,9 @@ class Indexer:
         progress_cb(current, total), when given, is called periodically
         (every `commit_every` files) — each call coincides with a commit,
         satisfying "one transaction per file-batch" for free.
+
+        force_reparse — переразобрать все файлы, не глядя на хеш: результат
+        разбора устарел из-за смены самого парсера (см. parser_fingerprint).
         """
         import hashlib
         from .xml_walker import XMLWalker, read_form_attributes
@@ -374,7 +378,8 @@ class Indexer:
                 file_hash = ''
 
             prior = existing_modules.get(mf.full_name)
-            if prior is not None and file_hash and prior['file_hash'] == file_hash:
+            if (not force_reparse and prior is not None and file_hash
+                    and prior['file_hash'] == file_hash):
                 stats['files_skipped'] += 1
             else:
                 form_attributes = (read_form_attributes(mf.form_xml_path)
