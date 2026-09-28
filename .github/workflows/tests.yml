@@ -1,0 +1,24 @@
+name: Тесты
+
+# Быстрые тесты (см. CLAUDE.md): не зависят от data/ — собирают индекс из
+# tests/fixtures во временном каталоге. Не запускаем `-m slow` — те тесты
+# требуют реальных корпусов заказчика (data/projects/), которых в этом
+# репозитории нет и не будет (см. .gitignore).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -e ".[dev]"
+
+      - run: python -m pytest tests -q

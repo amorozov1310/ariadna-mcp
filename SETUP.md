@@ -30,12 +30,12 @@ docker run --rm -v "$PWD/docker-wheels:/wheels" python:3.12-slim sh /wheels/fetc
 ### Шаг 3. Собрать и запустить
 
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 curl http://localhost:19878/health     # {"status":"ok"}
 ```
 
 Проверяйте, что образ действительно пересобрался (`docker images ariadna`
-— свежая дата): если сборка упала, `docker-compose up` молча поднимет
+— свежая дата): если сборка упала, `docker compose up` молча поднимет
 старый образ.
 
 ### Шаг 4. Создать проект и загрузить данные
@@ -69,7 +69,7 @@ Cursor, `.mcp.json` в репозитории и legacy SSE — в README, ра�
 ### Свои порты (если 19877/19878/19879 заняты)
 
 ```bash
-MCP_HOST_PORT=33000 MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker-compose up -d --build
+MCP_HOST_PORT=33000 MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d --build
 # Web UI:                http://localhost:33001
 # MCP (streamable HTTP): http://localhost:33002/mcp
 # MCP (SSE, legacy):     http://localhost:33000/sse
@@ -146,7 +146,7 @@ cp -r /путь/к/выгрузке_расширения/*    data/projects/bp30
 ### Шаг 2. Запустить и зарегистрировать
 
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 1. http://localhost:19878 → **«Создать проект»**, ID `bp30`.
@@ -174,11 +174,11 @@ Slow-тесты переиндексируют `data/projects` на месте �
 ## Полезные команды
 
 ```bash
-docker-compose logs -f               # логи
-docker-compose stop                  # остановить
-docker-compose up -d --build         # пересобрать после изменений
+docker compose logs -f               # логи
+docker compose stop                  # остановить
+docker compose up -d --build         # пересобрать после изменений
 docker restart ariadna               # если MCP/Web UI отвечают «unable to open database file»
-docker-compose exec ariadna bash     # зайти внутрь
+docker compose exec ariadna bash     # зайти внутрь
 curl http://localhost:19878/health   # здоровье
 ```
 
