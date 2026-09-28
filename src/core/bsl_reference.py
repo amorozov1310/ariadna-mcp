@@ -474,3 +474,62 @@ MODULE_CONTEXT_VARS = {
 
 def module_context_vars(object_kind: str, module_type: str) -> set[str]:
     return MODULE_CONTEXT_VARS.get((object_kind, module_type), set())
+
+
+# Методы менеджера объекта, которые в его СОБСТВЕННОМ модуле менеджера
+# (Ext/ManagerModule.bsl) вызываются без точки: контекст модуля менеджера —
+# сам менеджер (`ПустаяСсылка().Метаданные()` на bshp). Это другой набор,
+# чем _PLATFORM_MANAGER_METHODS в bsl_parser (методы для трёхчастного
+# `Справочники.Х.Метод(`), хотя имена частично совпадают. ПолучитьФорму/
+# ПолучитьМакет здесь нет — они уже в общем стоп-листе голых вызовов.
+# Только методы, в которых есть уверенность; сомнительные не добавлены
+# (ПолучитьИменаПредопределенных, Индекс у перечисления, Остатки/Обороты у
+# бухгалтерских регистров и регистров расчёта).
+def _names(*pairs: str) -> set[str]:
+    return {s.lower() for s in pairs}
+
+
+_REF_MANAGER = _names('ПустаяСсылка', 'EmptyRef')
+_OBJECT_MANAGER = _REF_MANAGER | _names(
+    'ПолучитьСсылку', 'GetRef', 'Выбрать', 'Select',
+    'НайтиПоРеквизиту', 'FindByAttribute')
+_CODED = _names('НайтиПоКоду', 'FindByCode', 'НайтиПоНаименованию', 'FindByDescription')
+_NUMBERED = _names('НайтиПоНомеру', 'FindByNumber')
+_REGISTER = _names('СоздатьНаборЗаписей', 'CreateRecordSet', 'Выбрать', 'Select')
+_CREATABLE = _names('Создать', 'Create')
+
+_MANAGER_METHODS_BY_KIND = {
+    'Справочник': _OBJECT_MANAGER | _CODED | _names(
+        'СоздатьЭлемент', 'CreateItem', 'СоздатьГруппу', 'CreateFolder'),
+    'ПланВидовХарактеристик': _OBJECT_MANAGER | _CODED | _names(
+        'СоздатьЭлемент', 'CreateItem', 'СоздатьГруппу', 'CreateFolder'),
+    'ПланСчетов': _OBJECT_MANAGER | _CODED | _names('СоздатьСчет', 'CreateAccount'),
+    'ПланОбмена': _OBJECT_MANAGER | _CODED | _names(
+        'СоздатьУзел', 'CreateNode', 'ЭтотУзел', 'ThisNode'),
+    'Документ': _OBJECT_MANAGER | _NUMBERED | _names('СоздатьДокумент', 'CreateDocument'),
+    'БизнесПроцесс': _OBJECT_MANAGER | _NUMBERED | _names(
+        'СоздатьБизнесПроцесс', 'CreateBusinessProcess'),
+    'Задача': _OBJECT_MANAGER | _NUMBERED | _names(
+        'НайтиПоНаименованию', 'FindByDescription', 'СоздатьЗадачу', 'CreateTask'),
+    'Перечисление': _REF_MANAGER,
+    'РегистрСведений': _REGISTER | _names(
+        'СоздатьМенеджерЗаписи', 'CreateRecordManager',
+        'СрезПоследних', 'SliceLast', 'СрезПервых', 'SliceFirst',
+        'ПолучитьПоследнее', 'GetLast', 'ПолучитьПервое', 'GetFirst'),
+    'РегистрНакопления': _REGISTER | _names(
+        'Остатки', 'Balance', 'Обороты', 'Turnovers',
+        'ОстаткиИОбороты', 'BalanceAndTurnovers',
+        'ВыбратьПоРегистратору', 'SelectByRecorder'),
+    'РегистрБухгалтерии': _REGISTER,
+    'РегистрРасчета': _REGISTER,
+    'Отчет': _CREATABLE,
+    'Обработка': _CREATABLE,
+}
+
+MODULE_CONTEXT_METHODS = {
+    (kind, 'МодульМенеджера'): names for kind, names in _MANAGER_METHODS_BY_KIND.items()
+}
+
+
+def module_context_methods(object_kind: str, module_type: str) -> set[str]:
+    return MODULE_CONTEXT_METHODS.get((object_kind, module_type), set())
