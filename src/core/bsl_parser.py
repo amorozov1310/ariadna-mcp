@@ -402,6 +402,15 @@ _RE_BARE_OPERAND = re.compile(
 
 _RE_IDENTIFIER = re.compile(r'[А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*')
 
+# Правая часть начинается с вызова: `Функция(` или `Объект.Метод(` (цепочка).
+# Если скобка этого вызова на строке не закрылась (аргументы перенесены,
+# `ФормаВыгрузки = ПолучитьФорму(⏎"Документ...", ...);`), справа уже по факту
+# результат вызова, а не голое имя модуля — аргументы разбирать не нужно.
+_RE_CALL_HEAD = re.compile(
+    r'^[А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*'
+    r'(?:\s*\.\s*[А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)*\s*\('
+)
+
 # Хвост строки, после которого выражение явно продолжается на следующей.
 _RE_DANGLING_TAIL = re.compile(
     r'(?:[,+\-*/(<>=?]|(?<![А-Яа-яA-Za-z0-9_])(?:И|Или|Не|And|Or|Not))\s*$',
@@ -699,13 +708,18 @@ def _classify_assign_rhs(rhs: str, known_modules: set[str],
     только уже известная переменная.
     """
     rhs = rhs.strip()
-    # Пустая или оборванная правая часть — перенос на следующую строку,
-    # по одной строке судить нельзя.
-    if not rhs or _RE_DANGLING_TAIL.search(rhs):
+    if not rhs:
+        return None
+    # Загрузчик — до всего остального: `ОбщийМодуль(⏎"Имя")` тоже оборван.
+    if _RE_MODULE_LOADER_CALL.search(rhs):
+        return None
+    if _RE_CALL_HEAD.match(rhs) and rhs.count('(') > rhs.count(')'):
+        return ('value', None)
+    # Иначе оборванная правая часть — перенос на следующую строку, по одной
+    # строке судить нельзя (тернарный `?(У,⏎ МодульА, МодульБ)` и т.п.).
+    if _RE_DANGLING_TAIL.search(rhs):
         return None
     if rhs.count('(') != rhs.count(')') or rhs.count('[') != rhs.count(']'):
-        return None
-    if _RE_MODULE_LOADER_CALL.search(rhs):
         return None
     if _RE_IDENTIFIER.fullmatch(rhs):
         low = rhs.lower()
