@@ -454,3 +454,23 @@ GLOBAL_CONTEXT_OBJECTS_RU = {s.lower() for s in [
 GLOBAL_CONTEXT_OBJECTS_EN = {s.lower() for s in [
     'ErrorProcessing',
 ]}
+
+
+# Неявные свойства объекта, доступные в его СОБСТВЕННОМ модуле без
+# «ЭтотОбъект.» — источник факта здесь тип модуля, а не метаданные.
+# Ключ — (object_kind, module_type) из xml_walker.ModuleFile.
+#
+# ОтчетОбъект.КомпоновщикНастроек (КомпоновщикНастроекКомпоновкиДанных) —
+# платформенное свойство любого отчёта, в модуле объекта отчёта пишется
+# просто `КомпоновщикНастроек.ПолучитьНастройки()`.
+# Обработка сюда не входит: у ОбработкаОбъект нет платформенных свойств,
+# кроме её реквизитов/табличных частей из метаданных.
+MODULE_CONTEXT_VARS = {
+    ('Отчет', 'МодульОбъекта'): {s.lower() for s in [
+        'КомпоновщикНастроек', 'SettingsComposer',
+    ]},
+}
+
+
+def module_context_vars(object_kind: str, module_type: str) -> set[str]:
+    return MODULE_CONTEXT_VARS.get((object_kind, module_type), set())
