@@ -772,15 +772,18 @@ class BSLParser:
 
     def parse_file(self, file_path: str, encoding: str = 'utf-8-sig',
                    form_attributes: set[str] | None = None,
-                   context_vars: set[str] | None = None) -> ParseResult:
+                   context_vars: set[str] | None = None,
+                   context_methods: set[str] | None = None) -> ParseResult:
         """Parse a .bsl file."""
         content = read_bsl_text(file_path, encoding)
         if content is None:
             return ParseResult(has_errors=True)
-        return self.parse(content, form_attributes=form_attributes, context_vars=context_vars)
+        return self.parse(content, form_attributes=form_attributes, context_vars=context_vars,
+                          context_methods=context_methods)
 
     def parse(self, content: str, form_attributes: set[str] | None = None,
-              context_vars: set[str] | None = None) -> ParseResult:
+              context_vars: set[str] | None = None,
+              context_methods: set[str] | None = None) -> ParseResult:
         """Parse BSL source code string.
 
         form_attributes — lower-case имена реквизитов формы из её Form.xml
@@ -799,9 +802,15 @@ class BSLParser:
         КомпоновщикНастроек в модуле объекта отчёта). Видны во всех
         процедурах модуля и, как реквизиты формы, перекрывают одноимённый
         общий модуль: контекст объекта приоритетнее глобального.
+
+        context_methods — методы контекста, вызываемые без точки
+        (bsl_reference.module_context_methods: ПустаяСсылка() и т.п. в модуле
+        менеджера). Такой голый вызов — не вызов процедуры, если процедура с
+        этим именем не объявлена в самом модуле (как стоп-лист, D2).
         """
         form_attributes = form_attributes or set()
         context_vars = context_vars or set()
+        context_methods = context_methods or set()
         lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         result = ParseResult(line_count=len(lines), content=content)
 
@@ -1186,7 +1195,7 @@ class BSLParser:
             if module_level_aliases:
                 proc_aliases = {**module_level_aliases, **proc_aliases}
             calls.extend(self._extract_calls(stripped, line_num, proc, local_proc_names,
-                                              proc_vars, proc_aliases))
+                                              proc_vars, proc_aliases, context_methods))
 
         result.procedures = procedures
         result.calls = calls
@@ -1222,7 +1231,8 @@ class BSLParser:
                         current_proc: ProcedureInfo,
                         local_proc_names: set[str],
                         constructed_vars: set[str] | None = None,
-                        module_aliases: dict[str, str] | None = None) -> list[CallInfo]:
+                        module_aliases: dict[str, str] | None = None,
+                        context_methods: set[str] | None = None) -> list[CallInfo]:
         """Extract meaningful calls from a line (excluding noise).
 
         constructed_vars: lowercased names this procedure assigned via
@@ -1367,6 +1377,8 @@ class BSLParser:
             # stoplist name like ПроверитьЗаполнение is legitimately a
             # user-defined procedure in plenty of BSP/ERP modules.
             if low in _PLATFORM_FUNCTIONS and low not in local_proc_names:
+                continue
+            if context_methods and low in context_methods and low not in local_proc_names:
                 continue
 
             # Skip current procedure (self-call)

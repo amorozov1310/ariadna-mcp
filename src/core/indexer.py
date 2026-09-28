@@ -315,7 +315,7 @@ class Indexer:
         """
         import hashlib
         from .xml_walker import XMLWalker, read_form_attributes
-        from .bsl_reference import module_context_vars
+        from .bsl_reference import module_context_vars, module_context_methods
         from .bsl_parser import BSLParser
 
         start = time.time()
@@ -387,7 +387,8 @@ class Indexer:
                                    if mf.form_xml_path else None)
                 result = parser.parse_file(
                     mf.file_path, form_attributes=form_attributes,
-                    context_vars=module_context_vars(mf.object_kind, mf.module_type))
+                    context_vars=module_context_vars(mf.object_kind, mf.module_type),
+                    context_methods=module_context_methods(mf.object_kind, mf.module_type))
                 if not result.has_errors:
                     stats['files'] += 1
                     stats['lines'] += result.line_count
