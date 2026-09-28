@@ -63,8 +63,9 @@ claude mcp add --transport http --scope user ariadna http://localhost:19879/mcp
 ```
 
 В Claude Code `/mcp` должен показать `ariadna` в статусе connected.
-Cursor, `.mcp.json` в репозитории и legacy SSE — в README, раздел
-«Подключение MCP к агенту».
+Cursor, Codex CLI, `.mcp.json` в репозитории и legacy SSE — в README,
+раздел «Подключение MCP к агенту». Без агента тоже можно — см. в README
+раздел «Web UI».
 
 ### Свои порты (если 19877/19878/19879 заняты)
 
