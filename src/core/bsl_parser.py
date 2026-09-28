@@ -771,14 +771,16 @@ class BSLParser:
         self.known_factory_functions = known_factory_functions or {}
 
     def parse_file(self, file_path: str, encoding: str = 'utf-8-sig',
-                   form_attributes: set[str] | None = None) -> ParseResult:
+                   form_attributes: set[str] | None = None,
+                   context_vars: set[str] | None = None) -> ParseResult:
         """Parse a .bsl file."""
         content = read_bsl_text(file_path, encoding)
         if content is None:
             return ParseResult(has_errors=True)
-        return self.parse(content, form_attributes=form_attributes)
+        return self.parse(content, form_attributes=form_attributes, context_vars=context_vars)
 
-    def parse(self, content: str, form_attributes: set[str] | None = None) -> ParseResult:
+    def parse(self, content: str, form_attributes: set[str] | None = None,
+              context_vars: set[str] | None = None) -> ParseResult:
         """Parse BSL source code string.
 
         form_attributes — lower-case имена реквизитов формы из её Form.xml
@@ -791,8 +793,15 @@ class BSLParser:
         `Имя.Метод(` не станет вызовом модуля, даже если такой модуль есть
         в known_modules. В процедурах &НаСервереБезКонтекста контекста
         формы нет — там имя по-прежнему может быть только модулем.
+
+        context_vars — неявные свойства объекта в его собственном модуле
+        (bsl_reference.module_context_vars по типу модуля, например
+        КомпоновщикНастроек в модуле объекта отчёта). Видны во всех
+        процедурах модуля и, как реквизиты формы, перекрывают одноимённый
+        общий модуль: контекст объекта приоритетнее глобального.
         """
         form_attributes = form_attributes or set()
+        context_vars = context_vars or set()
         lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         result = ParseResult(line_count=len(lines), content=content)
 
@@ -938,7 +947,8 @@ class BSLParser:
                     intercepts=intercepts, is_async=is_async,
                 )
                 constructed_vars[id(current_proc)] = (
-                    _parse_param_names(params) | _form_context_vars(directive_str, form_attributes))
+                    _parse_param_names(params) | _form_context_vars(directive_str, form_attributes)
+                    | context_vars)
                 current_directive = ''
                 current_intercept_keyword = ''
                 current_intercept_target = ''
@@ -987,7 +997,8 @@ class BSLParser:
                             intercepts=intercepts, is_async=is_async,
                         )
                         constructed_vars[id(current_proc)] = (
-                            _parse_param_names(params) | _form_context_vars(directive_str, form_attributes))
+                            _parse_param_names(params) | _form_context_vars(directive_str, form_attributes)
+                            | context_vars)
                         current_directive = ''
                         current_intercept_keyword = ''
                         current_intercept_target = ''
