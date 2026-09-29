@@ -4,6 +4,7 @@
 """
 
 import sys
+import logging
 import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -130,21 +131,50 @@ def test_mcp_allowed_hosts_env_lets_remote_host_in(monkeypatch):
             pm.close_all()
 
 
-def test_mcp_sse_rejects_foreign_host(monkeypatch):
+def test_mcp_sse_rejects_foreign_host_without_traceback(monkeypatch, caplog):
+    """SDK 2.2 после ответа 421/403 на /sse бросает ValueError — uvicorn
+    писал трассировку на каждый такой запрос. main._sse_app проверяет Host и
+    Origin до SDK: те же коды, в логе одна строка WARNING, ни одной ERROR.
+    TestClient по умолчанию пробрасывает исключения приложения — без обёртки
+    тест упал бы на ValueError."""
+    from fastapi.testclient import TestClient
+    from src import main as main_module
+    monkeypatch.delenv('MCP_ALLOWED_HOSTS', raising=False)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm, mcp = _mcp_server(tmpdir)
+        try:
+            with caplog.at_level(logging.WARNING), TestClient(main_module._sse_app(mcp)) as client:
+                bad = client.get('/sse', headers={'Host': 'evil.example:19877'})
+                assert bad.status_code == 421, bad.text
+                bad_origin = client.get('/sse', headers={
+                    'Host': '127.0.0.1:19877', 'Origin': 'http://evil.example'})
+                assert bad_origin.status_code == 403, bad_origin.text
+                # Свой Host проходит обёртку — дальше ошибка уже про сессию, не про хост.
+                own = client.post('/messages/', json={}, headers={'Host': '127.0.0.1:19877'})
+                assert own.status_code not in (421, 403), own.text
+            assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+            warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+            # По одной строке на каждый отказ (третья — про отсутствие session_id).
+            assert warnings[:2] == ['Invalid Host header: evil.example:19877',
+                                    'Invalid Origin header: http://evil.example'], warnings
+        finally:
+            pm.close_all()
+
+
+def test_mcp_streamable_http_rejection_does_not_raise(monkeypatch, caplog):
+    """На streamable HTTP SDK отказ просто возвращает, без исключения, —
+    обёртка там не нужна."""
     from fastapi.testclient import TestClient
     from src.security import mcp_transport_security
     monkeypatch.delenv('MCP_ALLOWED_HOSTS', raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
         pm, mcp = _mcp_server(tmpdir)
         try:
-            app = mcp.sse_app(host='0.0.0.0', transport_security=mcp_transport_security())
-            # SDK отвечает 421 и затем бросает ValueError внутри обработчика SSE —
-            # для клиента это просто ответ 421.
-            with TestClient(app, raise_server_exceptions=False) as client:
-                assert client.get('/sse', headers={'Host': 'evil.example:19877'}).status_code == 421
-                # Свой Host проходит проверку — дальше ошибка уже про сессию, не про хост.
-                own = client.post('/messages/', json={}, headers={'Host': '127.0.0.1:19877'})
-                assert own.status_code not in (421, 403), own.text
+            app = mcp.streamable_http_app(host='0.0.0.0', transport_security=mcp_transport_security())
+            with caplog.at_level(logging.WARNING), TestClient(app) as client:
+                bad = client.post('/mcp', json=_INIT, headers={**_MCP_HEADERS, 'Host': 'evil.example:19879'})
+                assert bad.status_code == 421
+            assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
         finally:
             pm.close_all()
 

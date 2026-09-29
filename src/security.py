@@ -66,3 +66,31 @@ def mcp_transport_security(env: Mapping[str, str] | None = None):
         allowed_hosts=hosts,
         allowed_origins=allowed_origins(hosts),
     )
+
+
+class HostOriginGuard:
+    """ASGI-обёртка: проверка Host и Origin до приложения SDK.
+
+    Нужна для SSE: mcp SDK (2.2) в connect_sse, отправив 421/403, бросает
+    ValueError("Request validation failed"), и uvicorn пишет полную
+    трассировку «Exception in ASGI application» на каждый отклонённый запрос.
+    Здесь такой запрос получает тот же ответ, а в лог попадает одна строка
+    WARNING (её пишет сама проверка SDK) — до SDK он не доходит. Проверка —
+    тот же TransportSecurityMiddleware SDK с теми же списками, поэтому
+    разрешённый здесь запрос SDK не отклонит. Content-Type POST-запросов
+    по-прежнему проверяет SDK.
+    """
+
+    def __init__(self, app, settings):
+        from mcp.server.transport_security import TransportSecurityMiddleware
+        self.app = app
+        self._security = TransportSecurityMiddleware(settings)
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http':
+            from starlette.requests import Request
+            error = await self._security.validate_request(Request(scope, receive), is_post=False)
+            if error is not None:
+                await error(scope, receive, send)
+                return
+        await self.app(scope, receive, send)

@@ -119,11 +119,7 @@ def _start_mcp_sse(data_dir: str, port: int):
         pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
-        # Внутри контейнера слушаем 0.0.0.0 (проброс портов) — SDK тогда сам
-        # не включает защиту от DNS rebinding, передаём её явно.
-        from .security import mcp_transport_security
-        app = mcp.sse_app(host="0.0.0.0", transport_security=mcp_transport_security())
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+        uvicorn.run(_sse_app(mcp), host="0.0.0.0", port=port, log_level="warning")
 
     except ImportError as e:
         logger.warning(f"MCP dependencies missing ({e}) — running Web UI only")
@@ -131,6 +127,19 @@ def _start_mcp_sse(data_dir: str, port: int):
     except Exception as e:
         logger.error(f"MCP SSE server failed: {e}")
         raise
+
+
+def _sse_app(mcp):
+    """SSE-приложение SDK за проверкой Host/Origin (HostOriginGuard).
+
+    Внутри контейнера слушаем 0.0.0.0 (проброс портов) — SDK тогда сам не
+    включает защиту от DNS rebinding, передаём её явно. Обёртка отвечает
+    421/403 до SDK: иначе SDK после ответа бросает исключение, и каждый
+    отклонённый запрос оставляет в логе трассировку. Streamable HTTP в
+    обёртке не нуждается — там SDK просто возвращает ответ."""
+    from .security import HostOriginGuard, mcp_transport_security
+    settings = mcp_transport_security()
+    return HostOriginGuard(mcp.sse_app(host="0.0.0.0", transport_security=settings), settings)
 
 
 def _start_mcp_streamable_http(data_dir: str, port: int):
