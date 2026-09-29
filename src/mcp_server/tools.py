@@ -9,7 +9,7 @@ removed — it never actually persisted anything, so every tool required
 project_id anyway; a single-project registry now just defaults to it).
 """
 
-from ..core.project_manager import ProjectManager
+from ..core.project_manager import ProjectManager, ReindexInProgressError
 from ..core.search import format_search_results, format_object_details
 
 
@@ -263,7 +263,7 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             try:
                 pm.remove_source(project_id, target)
                 return f"Source '{target}' removed (files + indexed data wiped)."
-            except (ValueError, KeyError) as e:
+            except (ReindexInProgressError, ValueError, KeyError) as e:
                 return f"Error: {e}"
 
         # Phase 2: BSL code analysis tools

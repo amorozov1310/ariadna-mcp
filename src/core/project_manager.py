@@ -14,6 +14,7 @@ import os
 import threading
 import zipfile
 import tarfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,15 @@ logger = logging.getLogger('ariadna')
 # different projects/data dirs run concurrently.
 _REINDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _REINDEX_LOCKS_GUARD = threading.Lock()
+
+
+class ReindexInProgressError(RuntimeError):
+    """Удаление отклонено: у проекта идёт переиндексация."""
+
+    def __init__(self, project_id: str):
+        super().__init__(f"идёт переиндексация проекта '{project_id}' — повторите после "
+                         f"её завершения (get_index_status)")
+        self.project_id = project_id
 
 
 def _copy_sqlite(src: Path, dst: Path) -> None:
@@ -341,8 +351,29 @@ class ProjectManager:
         self._save_registry()
         return project
 
+    @contextmanager
+    def _no_reindex(self, project_id: str):
+        """Блокировка переиндексации проекта на время удаления, без ожидания.
+
+        Удаление чистит строки тем же writer'ом, которым пишет индексатор: во
+        время прогона оно могло оставить в индексе строки уже удалённого
+        источника (индексатор дописал их после чистки). Ждать прогон нельзя —
+        он идёт минутами, поэтому отказ с ReindexInProgressError."""
+        lock = self._reindex_lock(project_id)
+        if not lock.acquire(blocking=False):
+            raise ReindexInProgressError(project_id)
+        try:
+            yield
+        finally:
+            lock.release()
+
     def delete_project(self, project_id: str):
-        """Delete project and all its data from disk."""
+        """Delete project and all its data from disk. Во время переиндексации
+        проекта — ReindexInProgressError, ничего не удаляется."""
+        with self._no_reindex(project_id):
+            self._delete_project(project_id)
+
+    def _delete_project(self, project_id: str):
         registry = self._load_registry()
         if project_id not in registry:
             raise KeyError(f"Project '{project_id}' not found")
@@ -560,7 +591,13 @@ class ProjectManager:
         }
 
     def remove_source(self, project_id: str, source_id: str):
-        """Remove source from project (registry, files, AND indexed DB rows)."""
+        """Remove source from project (registry, files, AND indexed DB rows).
+        Во время переиндексации проекта — ReindexInProgressError, ничего не
+        удаляется (см. _no_reindex)."""
+        with self._no_reindex(project_id):
+            self._remove_source(project_id, source_id)
+
+    def _remove_source(self, project_id: str, source_id: str):
         project = self.get_project(project_id)
         source = next((s for s in project.sources if s.id == source_id), None)
         if source is None:
