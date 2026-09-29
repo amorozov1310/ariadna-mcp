@@ -16,6 +16,9 @@ dependencies = [
     "mcp>=2,<3",
     "pydantic>=2",
     "fastapi>=0.110",
+    # 1.7: TrustedHostMiddleware разбирает Host с IPv6 ([::1]:19878); в более
+    # старых он резал заголовок по первому «:», и разрешённый [::1] получал 400.
+    "starlette>=1.7",
     "uvicorn[standard]",
     "jinja2",
     "aiosqlite",

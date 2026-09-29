@@ -63,6 +63,9 @@ jobs:
           for path in ('/', '/static/style.css', '/static/fonts/golos-text-400-cyrillic.woff2'):
               r = client.get(path)
               assert r.status_code == 200, (path, r.status_code, r.text[:300])
+          # Разрешённый IPv6-адрес с портом: со Starlette < 1.7 здесь был 400.
+          r = TestClient(app, headers={'Host': '[::1]:19878'}).get('/health')
+          assert r.status_code == 200, ('[::1]', r.status_code)
           print('Web UI из установленного пакета: шаблоны и статика на месте')
           PY
           /tmp/wheel-venv/bin/ariadna-index --help

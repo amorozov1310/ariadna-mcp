@@ -95,3 +95,15 @@ def test_ariadna_index_reindexes_project(capsys):
             assert pm.get_search('p1').search_procedures('РассчитатьЦену')
         finally:
             pm.close_all()
+
+
+def test_starlette_1_7_required_everywhere():
+    """Проверка Host в Web UI разрешает [::1]:порт только со Starlette >= 1.7
+    (раньше TrustedHostMiddleware резал Host по первому «:»). Требование
+    должно стоять и в пакете, и в офлайн-сборке образа."""
+    import starlette
+    major, minor = (int(x) for x in starlette.__version__.split('.')[:2])
+    assert (major, minor) >= (1, 7), starlette.__version__
+    assert '"starlette>=1.7"' in (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
+    assert '"starlette>=1.7"' in (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+    assert '"starlette>=1.7"' in (ROOT / 'docker-wheels' / 'fetch.sh').read_text(encoding='utf-8')
