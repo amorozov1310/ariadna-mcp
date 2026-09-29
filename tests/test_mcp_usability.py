@@ -137,6 +137,26 @@ def test_search_procedures_exact_name_first():
             pm.close_all()
 
 
+def test_search_procedures_uppercase_cyrillic_query_finds_mixed_case():
+    """Защита при переносе casefold параметра из SQL в Python (Б3): запрос
+    в ВЕРХНЕМ регистре и фильтр модуля в нижнем находят процедуру в
+    смешанном регистре, точное совпадение по-прежнему первое."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_project(tmpdir)
+        try:
+            out = execute_tool(pm, 'search_procedures', {
+                'query': 'ЗНАЧЕНИЕРЕКВИЗИТАОБЪЕКТА', 'module_filter': 'общегоназначения'})
+            hits = [line.strip().split('(')[0] for line in out.splitlines()[1:-1]]
+            assert set(hits) == {
+                'ОбщийМодуль.ОбщегоНазначения.Модуль.ЗначениеРеквизитаОбъекта',
+                'ОбщийМодуль.МеждународныйУчетОбщегоНазначения.Модуль.ЗначениеРеквизитаОбъекта',
+            }, out
+            meta = execute_tool(pm, 'search_metadata', {'query': 'ВИДЫИСПОЛЬЗОВАНИЯ'})
+            assert not meta.startswith('Error'), meta
+        finally:
+            pm.close_all()
+
+
 def test_attribute_results_include_attribute_name():
     report = FIXTURES / 'report_en.txt'
     with tempfile.TemporaryDirectory() as tmpdir:

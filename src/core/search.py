@@ -10,12 +10,17 @@ distinguish objects with identical ``full_name`` coming from different
 sources (main config vs extensions).
 """
 
+import logging
 import os
 import re
+import sqlite3
 from pathlib import Path
+from typing import NamedTuple
 
 from .db import Database
 from .report_parser import canonicalize_kind
+
+logger = logging.getLogger('ariadna')
 
 
 # Пределы search_code: каждый модуль-кандидат перечитывается с диска (FTS
@@ -25,6 +30,28 @@ from .report_parser import canonicalize_kind
 SEARCH_CODE_FTS_MODULES = 50         # модулей-кандидатов из FTS
 SEARCH_CODE_FALLBACK_MODULES = 300   # модулей в резервном просмотре без FTS
 SEARCH_CODE_MAX_PER_MODULE = 5       # вхождений из одного модуля
+
+
+class CodeSearchResult(NamedTuple):
+    """Результат search_code_limited: вхождения и оговорки к ним."""
+    results: list[dict]
+    truncated: bool       # сработал один из пределов SEARCH_CODE_*
+    unreadable: int       # модулей-кандидатов, чей файл не удалось прочитать
+    readable: int         # модулей-кандидатов, прочитанных с диска
+
+
+def _fts_rows(conn, sql: str, params) -> list:
+    """Выполнить запрос с FTS5 MATCH. Ошибку разбора выражения fts5 не
+    выпускать наружу: вызывающий получает пустой список и идёт своим
+    резервным путём (LIKE / просмотр модулей). Прочие ошибки SQLite —
+    как есть."""
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as e:
+        if 'fts5' not in str(e):
+            raise
+        logger.warning("Ошибка FTS5, используется резервный поиск: %s", e)
+        return []
 
 
 def resolve_module_ids(conn, module_name: str, source_id: str | None = None) -> list[int]:
@@ -147,12 +174,13 @@ class SearchEngine:
         where = ' AND '.join(conditions)
         params.extend([limit, offset])
 
-        rows = conn.execute(
+        rows = _fts_rows(
+            conn,
             f"""SELECT m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id
                 FROM metadata_fts f JOIN metadata_objects m ON m.id = f.rowid
                 WHERE {where}
                 ORDER BY rank LIMIT ? OFFSET ?""",
-            params).fetchall()
+            params)
 
         # LIKE fallback: progressively shorter prefixes (helps with inflection,
         # primarily Russian endings, but works language-agnostically). D5:
@@ -160,10 +188,11 @@ class SearchEngine:
         # doesn't matter — SQLite's built-in NOCASE only folds ASCII.
         if not rows:
             for q in self._like_variants(query):
-                conds = ["(name_cf LIKE '%' || casefold(?) || '%' OR "
-                         "full_name_cf LIKE '%' || casefold(?) || '%' OR "
-                         "synonym_cf LIKE '%' || casefold(?) || '%')"]
-                p: list = [q, q, q]
+                q_cf = q.casefold()
+                conds = ["(name_cf LIKE '%' || ? || '%' OR "
+                         "full_name_cf LIKE '%' || ? || '%' OR "
+                         "synonym_cf LIKE '%' || ? || '%')"]
+                p: list = [q_cf, q_cf, q_cf]
                 if kind:
                     conds.append("kind = ?")
                     p.append(kind)
@@ -209,10 +238,10 @@ class SearchEngine:
                 """SELECT m.*, s.label as source_label, s.source_type
                    FROM metadata_objects m
                    LEFT JOIN sources s ON s.id = m.source_id
-                   WHERE m.full_name_cf LIKE '%' || casefold(?) || '%'
+                   WHERE m.full_name_cf LIKE '%' || ? || '%'
                    ORDER BY CASE s.source_type WHEN 'main' THEN 0 ELSE 1 END,
                             s.label""",
-                (full_name,)).fetchall()
+                (full_name.casefold(),)).fetchall()
 
         if not matches:
             return None
@@ -293,21 +322,22 @@ class SearchEngine:
         where = ' AND '.join(conds)
         params.extend([limit, offset])
 
-        rows = conn.execute(
+        rows = _fts_rows(
+            conn,
             f"""SELECT a.name, a.kind, a.type_desc, a.synonym,
                       m.full_name as object_full_name, m.source_id
                FROM attributes_fts f
                JOIN attributes a ON a.id = f.rowid
                JOIN metadata_objects m ON m.id = a.object_id
                WHERE {where}
-               ORDER BY rank LIMIT ? OFFSET ?""", params).fetchall()
+               ORDER BY rank LIMIT ? OFFSET ?""", params)
 
         # LIKE fallback (D5: case-insensitive)
         if not rows:
-            conds = ["(a.name_cf LIKE '%' || casefold(?) || '%' OR "
+            conds = ["(a.name_cf LIKE '%' || ? || '%' OR "
                      "casefold(a.synonym) LIKE '%' || casefold(?) || '%' OR "
                      "casefold(a.type_desc) LIKE '%' || casefold(?) || '%')"]
-            p: list = [query, query, query]
+            p: list = [query.casefold(), query, query]
             if source_id:
                 conds.append("m.source_id = ?")
                 p.append(source_id)
@@ -389,14 +419,20 @@ class SearchEngine:
     def search_procedures(self, query: str, module_filter: str | None = None,
                           export_only: bool = False, source_id: str | None = None,
                           limit: int = 30, offset: int = 0) -> list[dict]:
-        """Search procedures/functions by name (D5: case-insensitive)."""
+        """Search procedures/functions by name (D5: case-insensitive).
+
+        Параметры приводятся через casefold в Python до SQL: casefold(?) в
+        запросе вызывал Python-функцию на каждой из ~500 тыс. строк и
+        утраивал время вызова на ERP-размере (scripts/bench_search_procedures.py).
+        """
         conn = self.db.read_conn()
-        conditions = ["p.name_cf LIKE '%' || casefold(?) || '%'"]
-        params: list = [query]
+        query_cf = query.casefold()
+        conditions = ["p.name_cf LIKE '%' || ? || '%'"]
+        params: list = [query_cf]
 
         if module_filter:
-            conditions.append("m.name_cf LIKE '%' || casefold(?) || '%'")
-            params.append(module_filter)
+            conditions.append("m.name_cf LIKE '%' || ? || '%'")
+            params.append(module_filter.casefold())
         if export_only:
             conditions.append("p.is_export = 1")
         if source_id:
@@ -404,7 +440,7 @@ class SearchEngine:
             params.append(source_id)
 
         where = ' AND '.join(conditions)
-        params.extend([query, limit, offset])
+        params.extend([query_cf, limit, offset])
 
         rows = conn.execute(f"""
             SELECT p.name, p.kind, p.is_export, p.directive, p.start_line, p.end_line,
@@ -412,7 +448,7 @@ class SearchEngine:
                    m.source_id
             FROM procedures p JOIN modules m ON m.id = p.module_id
             WHERE {where}
-            ORDER BY CASE WHEN p.name_cf = casefold(?) THEN 0 ELSE 1 END,
+            ORDER BY CASE WHEN p.name_cf = ? THEN 0 ELSE 1 END,
                      m.name, p.name LIMIT ? OFFSET ?""", params).fetchall()
         return self._attach_source_labels([dict(r) for r in rows])
 
@@ -449,11 +485,11 @@ class SearchEngine:
         """Вхождения query в тексте модулей — см. search_code_limited(); здесь
         только результаты, без признака сработавшего предела (Web UI)."""
         return self.search_code_limited(query, file_pattern=file_pattern, source_id=source_id,
-                                        limit=limit, offset=offset)[0]
+                                        limit=limit, offset=offset).results
 
     def search_code_limited(self, query: str, file_pattern: str | None = None,
                             source_id: str | None = None, limit: int = 30,
-                            offset: int = 0) -> tuple[list[dict], bool]:
+                            offset: int = 0) -> CodeSearchResult:
         """
         Full-text search over the raw source of every indexed BSL module
         (Этап 3 / D6) — finds assignments, query text (SELECT ...),
@@ -464,14 +500,17 @@ class SearchEngine:
         ±1 line of context, computed from where the match actually sits in
         the module's text (module_text_fts stores the whole file).
 
-        Второй элемент — сработал ли один из пределов SEARCH_CODE_*: тогда
+        truncated — сработал ли один из пределов SEARCH_CODE_*: тогда
         вхождения за пределами просмотренных модулей (или сверх
         SEARCH_CODE_MAX_PER_MODULE в одном модуле) не показаны.
+        unreadable/readable — сколько модулей-кандидатов не удалось и
+        удалось прочитать с диска: пустой результат при недоступной
+        выгрузке — это не «ничего не найдено».
         """
         conn = self.db.read_conn()
         query = query.strip()
         if not query:
-            return [], False
+            return CodeSearchResult([], False, 0, 0)
 
         fts_query = self._fts_query(query)
         conds = ["module_text_fts MATCH ?"]
@@ -488,16 +527,17 @@ class SearchEngine:
         # contingency — see db.py), which doesn't support bm25()/rank.
         # На одну строку больше предела — чтобы знать, что он сработал.
         cap = SEARCH_CODE_FTS_MODULES
-        rows = conn.execute(f"""
+        rows = _fts_rows(conn, f"""
             SELECT f.rowid as module_id, m.name as module_name,
                    m.file_path, m.abs_path, m.source_id
             FROM module_text_fts f
             JOIN modules m ON m.id = f.rowid
             WHERE {where}
-            ORDER BY m.name LIMIT ?""", params + [cap + 1]).fetchall()
+            ORDER BY m.name LIMIT ?""", params + [cap + 1])
         fts_capped = len(rows) > cap
 
-        results, per_module_capped = self._extract_code_matches(rows[:cap], query, limit, offset=offset)
+        results, per_module_capped, unreadable, readable = self._extract_code_matches(
+            rows[:cap], query, limit, offset=offset)
         truncated = fts_capped or per_module_capped
 
         # Fallback (D5: case-insensitive) — covers queries FTS5's unicode61
@@ -519,18 +559,22 @@ class SearchEngine:
             rows = conn.execute(f"""
                 SELECT id as module_id, name as module_name, file_path, abs_path, source_id
                 FROM modules WHERE {w} LIMIT ?""", p + [cap + 1]).fetchall()
-            results, per_module_capped = self._extract_code_matches(
+            results, per_module_capped, fb_unreadable, fb_readable = self._extract_code_matches(
                 rows[:cap], query, limit, offset=offset)
             fallback_truncated = len(rows) > cap or per_module_capped
             # Пустой ответ при сработавшем пределе любого из путей — тоже
             # неполный: вхождение может быть в непросмотренном модуле.
             truncated = fallback_truncated if results else (truncated or fallback_truncated)
+            # Резервный путь просматривает модули шире FTS-кандидатов, поэтому
+            # его счётчики и описывают итог.
+            unreadable, readable = fb_unreadable, fb_readable
 
-        return self._attach_source_labels(results), truncated
+        return CodeSearchResult(self._attach_source_labels(results), truncated,
+                                unreadable, readable)
 
     def _extract_code_matches(self, rows, query: str, limit: int,
                                max_per_module: int | None = None,
-                               offset: int = 0) -> tuple[list[dict], bool]:
+                               offset: int = 0) -> tuple[list[dict], bool, int, int]:
         """Locate each occurrence of ``query`` (case-insensitive) inside the
         matched modules' text and build a module:line + ±1 line context
         result for it — the line number is computed from the match's
@@ -543,8 +587,10 @@ class SearchEngine:
         there's no SQL LIMIT/OFFSET here since matches are found by
         scanning file text, not a query.
 
-        Второй элемент — в каком-то модуле вхождений больше max_per_module
-        (по умолчанию SEARCH_CODE_MAX_PER_MODULE) и лишние пропущены.
+        Возвращает (вхождения, в каком-то модуле вхождений больше
+        max_per_module — по умолчанию SEARCH_CODE_MAX_PER_MODULE — и лишние
+        пропущены, модулей не прочитано, модулей прочитано). Считаются только
+        модули, до которых дошёл просмотр.
         """
         from .bsl_parser import read_bsl_text
 
@@ -552,16 +598,19 @@ class SearchEngine:
             max_per_module = SEARCH_CODE_MAX_PER_MODULE
         needle = query.casefold()
         if not needle:
-            return [], False
+            return [], False, 0, 0
 
         results = []
         skipped = 0
         capped = False
+        unreadable = readable = 0
         for row in rows:
             path = self.module_file_path(row)
             content = read_bsl_text(path) if path else None
             if content is None:
+                unreadable += 1
                 continue
+            readable += 1
             hay = content.casefold()
             lines = content.split('\n')
 
@@ -591,23 +640,26 @@ class SearchEngine:
                 capped = True
             if len(results) >= limit:
                 break
-        return results, capped
+        return results, capped, unreadable, readable
 
     # ============================================
     # FTS HELPERS
     # ============================================
 
     def _fts_query(self, query: str) -> str:
-        """Prepare FTS5 query with prefix matching."""
-        terms = query.strip().split()
-        if not terms:
+        """Запрос FTS5: каждое слово — строка в кавычках с префиксом.
+
+        Слова выделяются так же, как их режет токенизатор unicode61 (\\w+ с
+        Unicode), остальное — разделители. Голая пунктуация в MATCH — это
+        синтаксическая ошибка fts5 («Справочник.Номенклатура» падала на
+        точке), а в кавычках fts5 не разбирает операторы (NOT, NEAR, `:`).
+        Точное совпадение подстроки там, где оно важно (search_code), всё
+        равно проверяется по исходному запросу целиком.
+        """
+        words = re.findall(r'\w+', query)
+        if not words:
             return '""'
-        safe = []
-        for t in terms:
-            t = re.sub(r'["\'\(\)\*\-\+\~\^]', '', t)
-            if t:
-                safe.append(f'{t}*')
-        return ' '.join(safe) if safe else '""'
+        return ' '.join(f'"{w}"*' for w in words)
 
     def _like_variants(self, query: str) -> list[str]:
         """
