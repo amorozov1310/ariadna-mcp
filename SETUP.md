@@ -20,12 +20,21 @@ Python-зависимости ставятся в образ офлайн из �
 обычного контейнера, а не из сборки:
 
 ```bash
-docker run --rm -v "$PWD/docker-wheels:/wheels" python:3.12-slim sh /wheels/fetch.sh
+docker run --rm -v "$PWD:/repo" -w /repo python:3.12-slim sh docker-wheels/fetch.sh
 ```
 
-На Windows — из PowerShell с полным путём:
-`docker run --rm -v D:\путь\до\ariadna\docker-wheels:/wheels python:3.12-slim sh /wheels/fetch.sh`
-(Git Bash искажает пути монтирования, файлы не попадут на диск).
+Запускать из корня репозитория: монтируется весь репозиторий, потому что
+список зависимостей берётся из `pyproject.toml` (своего списка нет ни в
+`fetch.sh`, ни в `Dockerfile`).
+
+**На Windows — только из PowerShell**, с полным путём:
+`docker run --rm -v D:\путь\до\ariadna:/repo -w /repo python:3.12-slim sh docker-wheels/fetch.sh`.
+Git Bash искажает пути в `-v`, и колёса не попадут на диск.
+
+Повторяйте команду после изменения зависимостей в `pyproject.toml` (и после
+обновления с версии, где они изменились). Колёса сначала скачиваются во
+временный каталог и только потом заменяют прежние — при сбое сети старый
+набор остаётся, а устаревшие версии не копятся рядом с новыми.
 
 ### Шаг 3. Собрать и запустить
 

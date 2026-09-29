@@ -6,27 +6,19 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Python deps installed OFFLINE from pre-downloaded wheels: BuildKit's network
-# is broken on this host (pip in RUN steps can't reach PyPI), while runtime
-# containers CAN. Refresh the wheels when deps change:
-#   docker run --rm -v <repo>/docker-wheels:/wheels python:3.12-slim \
-#     pip download --dest /wheels "mcp>=2,<3" "pydantic>=2" "fastapi>=0.110" \
-#     "uvicorn[standard]" jinja2 aiosqlite python-multipart "starlette>=1.7"
-# generate_config_report*.whl (Этап 5, optional xml-report extra) is built from
-# git+https://github.com/norkins/metadata.git the same way (needs git + --no-deps).
+# Python-зависимости ставятся ОФЛАЙН из заранее скачанных колёс: сеть в
+# RUN-шагах BuildKit на этом хосте нестабильна, а из обычного контейнера
+# работает. Список — из pyproject.toml ([project].dependencies и extra
+# xml-report) через scripts/docker_requirements.py, своего списка здесь нет.
+# Колёса обновляются при изменении зависимостей (из корня репозитория):
+#   docker run --rm -v "$PWD:/repo" -w /repo python:3.12-slim sh docker-wheels/fetch.sh
 COPY pyproject.toml .
+COPY scripts/docker_requirements.py scripts/
 COPY docker-wheels/ /tmp/wheels/
-RUN pip install --no-cache-dir --no-index --find-links=/tmp/wheels \
-    "mcp>=2,<3" \
-    "pydantic>=2" \
-    "fastapi>=0.110" \
-    "uvicorn[standard]" \
-    "jinja2" \
-    "aiosqlite" \
-    "python-multipart" \
-    "starlette>=1.7" \
-    "generate-config-report" && \
-    rm -rf /tmp/wheels
+RUN python scripts/docker_requirements.py install > /tmp/requirements.txt && \
+    pip install --no-cache-dir --no-index --find-links=/tmp/wheels \
+        -r /tmp/requirements.txt && \
+    rm -rf /tmp/wheels /tmp/requirements.txt
 
 # App code
 COPY src/ src/

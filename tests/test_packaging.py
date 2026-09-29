@@ -100,13 +100,48 @@ def test_ariadna_index_reindexes_project(capsys):
 def test_starlette_1_7_required_everywhere():
     """Проверка Host в Web UI разрешает [::1]:порт только со Starlette >= 1.7
     (раньше TrustedHostMiddleware резал Host по первому «:»). Требование
-    должно стоять и в пакете, и в офлайн-сборке образа."""
+    должно стоять и в пакете, и в офлайн-сборке образа — она берёт список из
+    pyproject (см. test_docker_dependencies_come_from_pyproject)."""
     import starlette
     major, minor = (int(x) for x in starlette.__version__.split('.')[:2])
     assert (major, minor) >= (1, 7), starlette.__version__
     assert '"starlette>=1.7"' in (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
-    assert '"starlette>=1.7"' in (ROOT / 'Dockerfile').read_text(encoding='utf-8')
-    assert '"starlette>=1.7"' in (ROOT / 'docker-wheels' / 'fetch.sh').read_text(encoding='utf-8')
+    for mode in ('download', 'install'):
+        assert 'starlette>=1.7' in _docker_requirements(mode)
+
+
+def _docker_requirements(mode: str) -> list[str]:
+    import subprocess
+    r = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'docker_requirements.py'), mode],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.splitlines()
+
+
+def test_docker_dependencies_come_from_pyproject():
+    """Единственный список зависимостей — pyproject.toml. Раньше их было три
+    (pyproject, Dockerfile, fetch.sh), и они расходились."""
+    import re
+    import tomllib
+    project = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))['project']
+    deps = project['dependencies'] + project['optional-dependencies']['xml-report']
+    names = [re.match(r'[A-Za-z0-9_.-]+', d).group(0) for d in deps]
+
+    # Dockerfile и fetch.sh не перечисляют пакеты сами…
+    for path in (ROOT / 'Dockerfile', ROOT / 'docker-wheels' / 'fetch.sh'):
+        text = path.read_text(encoding='utf-8')
+        for name in names:
+            assert not re.search(rf'(?<![\w-]){re.escape(name)}(?![\w-])', text), \
+                f"{path.name}: зависимость {name} перечислена вручную"
+        # …а берут их из pyproject.
+        assert 'scripts/docker_requirements.py' in text, path.name
+
+    # Скрипт отдаёт ровно зависимости pyproject: для pip download — без
+    # git-ссылок, для офлайн-установки — у git-зависимостей только имя.
+    download, git, install = (_docker_requirements(m) for m in ('download', 'git', 'install'))
+    assert download == [d for d in deps if '@' not in d]
+    assert git == ['git+https://github.com/norkins/metadata.git']
+    assert install == [d.split('@')[0].strip() for d in deps]
 
 
 def test_python_m_src_core_indexer_runs_cli():
