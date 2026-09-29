@@ -179,6 +179,22 @@ ID источника должен совпадать с именем катал
 
 ## Тесты
 
+Тесты запускаются в окружении, собранном по `pyproject.toml`, — в `.venv`
+из «Варианта 2», а не в глобальном Python:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate      # Linux/macOS
+# .venv\Scripts\activate       # Windows
+pip install -e ".[dev]"
+```
+
+Перед запуском `tests/conftest.py` сверяет установленные версии с
+`[project].dependencies` и extra `dev`. Если что-то не подходит (например,
+в глобальном Python Starlette 0.52 и mcp 1.x), сессия сразу прерывается со
+списком пакетов и этими командами — вместо «400 != 200» в тесте Host и
+молча пропущенных тестов SDK.
+
 ```bash
 python -m pytest tests -q            # быстрые, ~10 с
 python -m pytest tests -q -m slow    # полные корпуса из data/projects (bshp, 1idm2)
