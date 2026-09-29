@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir --no-index --find-links=/tmp/wheels \
 COPY src/ src/
 
 # Create data directory
-RUN mkdir -p /data/projects
+RUN mkdir -p /data/projects /index
 
 # Environment
 ENV DATA_DIR=/data

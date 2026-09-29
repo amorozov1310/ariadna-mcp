@@ -174,3 +174,15 @@ def test_startup_migrates_before_resetting_stale_indexing(monkeypatch):
             assert 'РассчитатьЦену' in _procedures(pm)
         finally:
             pm.close_all()
+
+
+def test_docker_compose_puts_indexes_on_named_volume():
+    """Код читает INDEX_DIR, compose должен задать его и смонтировать туда
+    именованный том с явным именем (на него ссылается документация)."""
+    root = Path(__file__).parent.parent
+    compose = (root / 'docker-compose.yml').read_text(encoding='utf-8')
+    assert '- INDEX_DIR=/index' in compose
+    assert '- ariadna-index:/index' in compose
+    assert '- ./data:/data' in compose
+    assert 'name: ariadna-index' in compose
+    assert '/index' in (root / 'Dockerfile').read_text(encoding='utf-8')
