@@ -80,8 +80,10 @@ MCP_HOST_PORT=33000 MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose 
 
 ## Вариант 2: Без Docker (Python напрямую)
 
-Для разработки и отладки. **Не запускайте на тех же `data/`, пока работает
-контейнер** — см. README, «Индекс и Docker на Windows».
+Для разработки и отладки. Нативный запуск без `INDEX_DIR` держит индексы в
+`data/projects/{id}/index.db`, а контейнер — на томе `ariadna-index`, так что
+индексы у них разные. Выгрузки и `projects.json` общие — **не запускайте
+на тех же `data/`, пока работает контейнер**. См. README, «Индексы в Docker».
 
 ### Требования
 
@@ -167,8 +169,9 @@ python -m pytest tests -q            # быстрые, ~10 с
 python -m pytest tests -q -m slow    # полные корпуса из data/projects (bshp, 1idm2)
 ```
 
-Slow-тесты переиндексируют `data/projects` на месте — остановите
-контейнер перед запуском.
+Slow-тесты при нативном запуске работают с `data/projects`, как раньше:
+переиндексируют его на месте (индексы — `data/projects/*/index.db`, не том
+Docker) и пишут `projects.json` — остановите контейнер перед запуском.
 
 ---
 
@@ -178,7 +181,8 @@ Slow-тесты переиндексируют `data/projects` на месте �
 docker compose logs -f               # логи
 docker compose stop                  # остановить
 docker compose up -d --build         # пересобрать после изменений
-docker restart ariadna               # если MCP/Web UI отвечают «unable to open database file»
+docker restart ariadna               # если MCP/Web UI отвечают «unable to open database file» (индексы в ./data, без INDEX_DIR)
+docker compose down && docker volume rm ariadna-index   # удалить индексы Docker; затем up -d и reindex проектов
 docker compose exec ariadna bash     # зайти внутрь
 curl http://localhost:19878/health   # здоровье
 ```
@@ -192,7 +196,7 @@ data/
 ├── projects.json                   ← реестр проектов
 └── projects/
     └── bp30/
-        ├── index.db                ← SQLite-индекс (FTS5)
+        ├── index.db                ← SQLite-индекс (FTS5), только без Docker
         └── sources/
             ├── main/
             │   ├── xml/            ← XML-выгрузка конфигурации
@@ -201,3 +205,11 @@ data/
                 ├── xml/
                 └── report.txt
 ```
+
+В Docker индексы лежат на именованном томе `ariadna-index`
+(`/index/{проект}/index.db` в контейнере, `INDEX_DIR=/index` в
+`docker-compose.yml`). При первом старте после обновления существующие
+`data/projects/*/index.db` один раз копируются на том — ход переноса виден
+в `docker compose logs`; старые файлы после этого можно удалить вручную.
+Индекс с нуля — `reindex` проекта или `docker volume rm ariadna-index`
+(при остановленном контейнере). Подробнее — README, «Индексы в Docker».
