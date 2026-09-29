@@ -30,6 +30,10 @@ services:
       - TZ=${TZ:-Europe/Moscow}
       - DATA_DIR=/data
       - INDEX_DIR=/index
+      # Имена/адреса, под которыми к серверу обращаются с других машин (при
+      # BIND_ADDR=0.0.0.0), через запятую; без них чужой Host отклоняется —
+      # защита от DNS rebinding (src/security.py).
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-}
       - MCP_PORT=9877
       - MCP_HTTP_PORT=9879
       - WEB_PORT=9878

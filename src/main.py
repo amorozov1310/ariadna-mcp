@@ -119,7 +119,10 @@ def _start_mcp_sse(data_dir: str, port: int):
         pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
-        app = mcp.sse_app(host="0.0.0.0")
+        # Внутри контейнера слушаем 0.0.0.0 (проброс портов) — SDK тогда сам
+        # не включает защиту от DNS rebinding, передаём её явно.
+        from .security import mcp_transport_security
+        app = mcp.sse_app(host="0.0.0.0", transport_security=mcp_transport_security())
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
     except ImportError as e:
@@ -143,7 +146,8 @@ def _start_mcp_streamable_http(data_dir: str, port: int):
         pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
-        app = mcp.streamable_http_app(host="0.0.0.0")
+        from .security import mcp_transport_security
+        app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
     except ImportError as e:
