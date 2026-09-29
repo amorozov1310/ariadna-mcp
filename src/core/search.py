@@ -188,10 +188,11 @@ class SearchEngine:
         # doesn't matter — SQLite's built-in NOCASE only folds ASCII.
         if not rows:
             for q in self._like_variants(query):
-                conds = ["(name_cf LIKE '%' || casefold(?) || '%' OR "
-                         "full_name_cf LIKE '%' || casefold(?) || '%' OR "
-                         "synonym_cf LIKE '%' || casefold(?) || '%')"]
-                p: list = [q, q, q]
+                q_cf = q.casefold()
+                conds = ["(name_cf LIKE '%' || ? || '%' OR "
+                         "full_name_cf LIKE '%' || ? || '%' OR "
+                         "synonym_cf LIKE '%' || ? || '%')"]
+                p: list = [q_cf, q_cf, q_cf]
                 if kind:
                     conds.append("kind = ?")
                     p.append(kind)
@@ -237,10 +238,10 @@ class SearchEngine:
                 """SELECT m.*, s.label as source_label, s.source_type
                    FROM metadata_objects m
                    LEFT JOIN sources s ON s.id = m.source_id
-                   WHERE m.full_name_cf LIKE '%' || casefold(?) || '%'
+                   WHERE m.full_name_cf LIKE '%' || ? || '%'
                    ORDER BY CASE s.source_type WHEN 'main' THEN 0 ELSE 1 END,
                             s.label""",
-                (full_name,)).fetchall()
+                (full_name.casefold(),)).fetchall()
 
         if not matches:
             return None
@@ -333,10 +334,10 @@ class SearchEngine:
 
         # LIKE fallback (D5: case-insensitive)
         if not rows:
-            conds = ["(a.name_cf LIKE '%' || casefold(?) || '%' OR "
+            conds = ["(a.name_cf LIKE '%' || ? || '%' OR "
                      "casefold(a.synonym) LIKE '%' || casefold(?) || '%' OR "
                      "casefold(a.type_desc) LIKE '%' || casefold(?) || '%')"]
-            p: list = [query, query, query]
+            p: list = [query.casefold(), query, query]
             if source_id:
                 conds.append("m.source_id = ?")
                 p.append(source_id)
@@ -418,14 +419,20 @@ class SearchEngine:
     def search_procedures(self, query: str, module_filter: str | None = None,
                           export_only: bool = False, source_id: str | None = None,
                           limit: int = 30, offset: int = 0) -> list[dict]:
-        """Search procedures/functions by name (D5: case-insensitive)."""
+        """Search procedures/functions by name (D5: case-insensitive).
+
+        Параметры приводятся через casefold в Python до SQL: casefold(?) в
+        запросе вызывал Python-функцию на каждой из ~500 тыс. строк и
+        утраивал время вызова на ERP-размере (scripts/bench_search_procedures.py).
+        """
         conn = self.db.read_conn()
-        conditions = ["p.name_cf LIKE '%' || casefold(?) || '%'"]
-        params: list = [query]
+        query_cf = query.casefold()
+        conditions = ["p.name_cf LIKE '%' || ? || '%'"]
+        params: list = [query_cf]
 
         if module_filter:
-            conditions.append("m.name_cf LIKE '%' || casefold(?) || '%'")
-            params.append(module_filter)
+            conditions.append("m.name_cf LIKE '%' || ? || '%'")
+            params.append(module_filter.casefold())
         if export_only:
             conditions.append("p.is_export = 1")
         if source_id:
@@ -433,7 +440,7 @@ class SearchEngine:
             params.append(source_id)
 
         where = ' AND '.join(conditions)
-        params.extend([query, limit, offset])
+        params.extend([query_cf, limit, offset])
 
         rows = conn.execute(f"""
             SELECT p.name, p.kind, p.is_export, p.directive, p.start_line, p.end_line,
@@ -441,7 +448,7 @@ class SearchEngine:
                    m.source_id
             FROM procedures p JOIN modules m ON m.id = p.module_id
             WHERE {where}
-            ORDER BY CASE WHEN p.name_cf = casefold(?) THEN 0 ELSE 1 END,
+            ORDER BY CASE WHEN p.name_cf = ? THEN 0 ELSE 1 END,
                      m.name, p.name LIMIT ? OFFSET ?""", params).fetchall()
         return self._attach_source_labels([dict(r) for r in rows])
 

@@ -265,10 +265,14 @@ class Database:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         # D5: str.casefold does full Unicode case folding (unlike SQLite's
-        # built-in NOCASE, which is ASCII-only) — used in LIKE queries as
-        # `col_cf LIKE '%' || casefold(?) || '%'` against the *_cf columns
-        # below, which are filled with str.casefold() at insert time.
-        conn.create_function('casefold', 1, lambda s: s.casefold() if s is not None else None)
+        # built-in NOCASE, which is ASCII-only). *_cf columns are filled with
+        # str.casefold() at insert time; параметр для сравнения с ними
+        # приводится в Python до SQL (casefold(?) на каждой строке стоил
+        # втрое больше времени). Функция в SQL остаётся для колонок без _cf
+        # (casefold(a.type_desc)); deterministic=True позволяет SQLite
+        # вычислить casefold(?) от параметра один раз на запрос.
+        conn.create_function('casefold', 1, lambda s: s.casefold() if s is not None else None,
+                             deterministic=True)
         return conn
 
     def connect(self) -> sqlite3.Connection:

@@ -66,8 +66,8 @@ class CallAnalyzer:
         conn = self.db.read_conn()
 
         # Find ALL matching procedures (with source info)
-        conds = ["p.name_cf = casefold(?)"]
-        params: list = [procedure_name.strip()]
+        conds = ["p.name_cf = ?"]
+        params: list = [procedure_name.strip().casefold()]
         if module_name:
             from .search import resolve_module_ids
             module_ids = resolve_module_ids(conn, module_name, source_id)
