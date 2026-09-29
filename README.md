@@ -6,7 +6,9 @@ AI-агенты (Claude Code, Cursor, Codex) находят нужный объ�
 
 ## Возможности
 
-- **Поиск по метаданным** — объекты, реквизиты, типы, формы (< 1мс)
+- **Поиск по метаданным** — объекты, реквизиты, типы, формы. Типичный вызов
+  любого инструмента — доли секунды (замер: `search_procedures` на ERP,
+  около 550 тыс. процедур, — 0,1–0,15 с)
 - **Граф вызовов BSL** — кто вызывает / что вызывает процедура, с резолвингом
   рёбер по факту (включая перехваты `&Вместо`/`&Around` из расширений)
 - **Полнотекстовый поиск по коду** — FTS5 по всему тексту модулей, а не только по вызовам
@@ -45,9 +47,14 @@ docker run --rm -v "$PWD/docker-wheels:/wheels" python:3.12-slim sh /wheels/fetc
 (`-v D:\путь\до\ariadna\docker-wheels:/wheels`) — Git Bash искажает пути
 монтирования. Повторять при изменении зависимостей в Dockerfile.
 
-Web UI: http://localhost:19878
-MCP (streamable HTTP): http://localhost:19879/mcp
-MCP (SSE, для старых клиентов): http://localhost:19877/sse
+Web UI: http://127.0.0.1:19878
+MCP (streamable HTTP): http://127.0.0.1:19879/mcp
+MCP (SSE, для старых клиентов): http://127.0.0.1:19877/sse
+
+Адреса — именно `127.0.0.1`, а не `localhost`: на Docker Desktop под
+Windows каждое новое HTTP-соединение к `localhost` стоит около 0,26 с
+(против ~4 мс к `127.0.0.1`), а streamable HTTP открывает соединение на
+каждый вызов инструмента.
 
 ### 2. Создание проекта
 
@@ -100,12 +107,12 @@ cp -r ВыгрузкаРасширения/* data/projects/bp30/sources/ext_agro
 Этот шаг — только если нужен доступ из Claude Code, Cursor, Codex и т.п.
 
 Сервер должен быть запущен (`docker compose up -d`), проверка —
-`curl http://localhost:19878/health`.
+`curl http://127.0.0.1:19878/health`.
 
 **Claude Code** — одной командой, для всех проектов на машине:
 
 ```bash
-claude mcp add --transport http --scope user ariadna http://localhost:19879/mcp
+claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp
 ```
 
 Без `--scope user` сервер подключится только в текущем каталоге. Чтобы
@@ -118,7 +125,7 @@ claude mcp add --transport http --scope user ariadna http://localhost:19879/mcp
   "mcpServers": {
     "ariadna": {
       "type": "http",
-      "url": "http://localhost:19879/mcp"
+      "url": "http://127.0.0.1:19879/mcp"
     }
   }
 }
@@ -135,7 +142,7 @@ connected и 16 инструментами.
 ```json
 {
   "mcpServers": {
-    "ariadna": { "url": "http://localhost:19879/mcp" }
+    "ariadna": { "url": "http://127.0.0.1:19879/mcp" }
   }
 }
 ```
@@ -143,7 +150,7 @@ connected и 16 инструментами.
 **Codex CLI** — одной командой:
 
 ```bash
-codex mcp add ariadna --url http://localhost:19879/mcp
+codex mcp add ariadna --url http://127.0.0.1:19879/mcp
 ```
 
 Или вручную в `~/.codex/config.toml` (либо `.codex/config.toml` в
@@ -151,14 +158,14 @@ codex mcp add ariadna --url http://localhost:19879/mcp
 
 ```toml
 [mcp_servers.ariadna]
-url = "http://localhost:19879/mcp"
+url = "http://127.0.0.1:19879/mcp"
 ```
 
 Проверка: в composer Codex команда `/mcp` показывает `ariadna` со
 статусом connected.
 
 **Клиент без streamable HTTP** — legacy SSE:
-`claude mcp add --transport sse ariadna http://localhost:19877/sse`
+`claude mcp add --transport sse ariadna http://127.0.0.1:19877/sse`
 (в JSON — `"type": "sse"`).
 
 **Сервер на другой машине.** По умолчанию порты публикуются только на
@@ -197,7 +204,7 @@ BIND_ADDR=0.0.0.0 MCP_ALLOWED_HOSTS=192.168.1.10,ariadna.lan docker compose up -
 
 ## Web UI
 
-http://localhost:19878 — работает сразу после `docker compose up -d`,
+http://127.0.0.1:19878 — работает сразу после `docker compose up -d`,
 агент не нужен. Здесь же выполняются шаги 2–4 быстрого старта:
 
 - **Проекты** — создание, добавление источников (upload .zip или volume),
