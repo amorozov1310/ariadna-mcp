@@ -84,6 +84,28 @@ def _format_page(page: list[dict], offset: int, limit: int, has_more: bool) -> s
     return f"{text}\n{_page_trailer(len(page), offset, limit, has_more)}"
 
 
+def _stale_module_warning(path: str, mod: dict) -> str:
+    """Предупреждение, если файл модуля изменился после индексации.
+
+    get_procedure_code режет текущий файл по номерам строк из индекса: после
+    «обновить источник» без reindex под заголовком процедуры оказались бы
+    чужие строки. Хеш считается так же, как в индексаторе; пустой
+    file_hash (индексатор не смог прочитать файл) — не повод для тревоги."""
+    from ..core.indexer import form_xml_for_module, module_file_hash
+    stored = mod.get('file_hash') or ''
+    if not stored:
+        return ''
+    try:
+        current = module_file_hash(path, form_xml_for_module(path, mod.get('module_type') or ''))
+    except OSError:
+        return ''
+    if current == stored:
+        return ''
+    return ("// ВНИМАНИЕ: файл модуля изменён после индексации — границы процедуры "
+            "могут быть неверны, код ниже может быть чужим. Переиндексируйте проект "
+            "(reindex).\n")
+
+
 # ============================================
 # TOOL EXECUTION
 # ============================================
@@ -290,7 +312,8 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             lines = content.split('\n')
             code = '\n'.join(lines[proc['start_line'] - 1:proc['end_line']])
             src = f"  @{outline['source_label']}" if outline.get('source_label') else ''
-            return (f"// {mod['name']}.{proc['name']}{src}\n"
+            return (_stale_module_warning(path, mod)
+                    + f"// {mod['name']}.{proc['name']}{src}\n"
                     f"// Lines {proc['start_line']}-{proc['end_line']}\n\n{code}")
 
         case 'get_call_tree':
