@@ -200,6 +200,23 @@ def test_remove_source_unknown_source_errors_without_deleting():
             pm.close_all()
 
 
+def test_remove_source_confirmed_unknown_source_errors_instead_of_reporting_removal():
+    """confirm=true с несуществующим source_id раньше отвечал «removed» —
+    pm.remove_source молча выходит, если источника нет."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_project(tmpdir)
+        try:
+            result = execute_tool(pm, 'remove_source',
+                                  {'project_id': 'p1', 'source_id': 'ghost', 'confirm': True})
+            assert result.startswith('Error'), result
+            assert 'removed' not in result
+            assert 'main' in result, "ошибка перечисляет доступные источники"
+            assert [s.id for s in pm.get_project('p1').sources] == ['main']
+            assert 'main' in execute_tool(pm, 'list_sources', {'project_id': 'p1'})
+        finally:
+            pm.close_all()
+
+
 # ============================================
 # get_call_tree: max_nodes hard cap (Этап 6 token budget)
 # ============================================

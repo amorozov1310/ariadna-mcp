@@ -43,6 +43,15 @@ def _resolve_project_id(pm: ProjectManager, args: dict) -> tuple[str | None, str
     return None, f"Error: project_id is required (multiple projects exist). Available: {available}"
 
 
+def _unknown_source_error(pm: ProjectManager, project_id: str, source_id: str) -> str | None:
+    """Ошибка со списком доступных источников, если source_id в проекте нет."""
+    ids = [s.id for s in pm.get_project(project_id).sources]
+    if source_id in ids:
+        return None
+    return (f"Error: source '{source_id}' not found in project '{project_id}'. "
+            f"Available: {', '.join(ids) or 'none'}")
+
+
 # ============================================
 # PAGINATION (Этап 6 items 4 + 6: limit/offset + "shown X of Y" /
 # "use offset=N for more")
@@ -218,6 +227,11 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     f"  Files on disk: {'yes' if preview['files_exist'] else 'no'}\n"
                     f"This is irreversible. Repeat with confirm=true to actually delete."
                 )
+            # pm.remove_source молча выходит на неизвестном id (так его зовёт
+            # Web UI) — без проверки здесь инструмент рапортовал бы об удалении.
+            error = _unknown_source_error(pm, project_id, target)
+            if error:
+                return error
             try:
                 pm.remove_source(project_id, target)
                 return f"Source '{target}' removed (files + indexed data wiped)."
