@@ -390,10 +390,15 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             # модуль; если предел сработал, «показано всё» было бы неправдой.
             notes = []
             if truncated:
-                notes.append(
-                    f"выдача ограничена: просмотрено не больше {search_mod.SEARCH_CODE_FTS_MODULES} "
-                    f"модулей и не больше {search_mod.SEARCH_CODE_MAX_PER_MODULE} вхождений в модуле — "
-                    f"сузьте поиск через file_pattern или source_id")
+                # Называем только тот предел, который действительно сработал.
+                limits = []
+                if last.modules_cap:
+                    limits.append(f"просмотрено не больше {last.modules_cap} модулей")
+                if last.per_module_capped:
+                    limits.append(f"не больше {search_mod.SEARCH_CODE_MAX_PER_MODULE} "
+                                  f"строк с вхождениями в модуле")
+                notes.append(f"выдача ограничена: {' и '.join(limits)} — "
+                             f"сузьте поиск через file_pattern или source_id")
             if unreadable:
                 notes.append(f"не прочитано модулей: {unreadable} (файлы выгрузки недоступны "
                              f"на сервере) — выдача неполная")
