@@ -16,6 +16,7 @@ logger = logging.getLogger('ariadna')
 
 try:
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import ToolAnnotations
     from pydantic import Field
     HAS_MCP = True
@@ -71,11 +72,20 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
                     version=__version__)
 
     def run(name: str, **kwargs) -> str:
+        # Ошибка инструмента уходит клиенту с isError=true — как и ошибки
+        # валидации аргументов из SDK, а не обычным текстом. execute_tool
+        # по-прежнему возвращает строку «Error: …» (её так и проверяют тесты);
+        # превращение в ToolError — только здесь. SDK сам начинает текст с
+        # «Error executing tool <имя>: », поэтому наш префикс «Error:» снимается.
         try:
-            return execute_tool(pm, name, kwargs)
+            text = execute_tool(pm, name, kwargs)
         except Exception as e:
-            logger.error(f"Tool {name} failed: {e}")
-            return f"Error: {e}"
+            logger.exception("Инструмент %s упал", name)
+            raise ToolError(str(e)) from e
+        if text.startswith('Error'):
+            # Ожидаемая ошибка (проект не найден и т.п.) — без трассировки.
+            raise ToolError(text.removeprefix('Error:').strip())
+        return text
 
     # ── Project / index ──
 

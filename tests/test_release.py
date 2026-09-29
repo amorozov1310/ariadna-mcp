@@ -168,3 +168,73 @@ def test_main_wires_transport_security(monkeypatch, starter, request_kw):
         with TestClient(captured['app'], raise_server_exceptions=False) as client:
             resp = client.request(headers={**_MCP_HEADERS, 'Host': 'evil.example:1'}, **request_kw)
             assert resp.status_code == 421, resp.text
+
+
+# ============================================
+# isError у ошибок инструментов
+# ============================================
+
+import asyncio
+import logging
+
+
+def _call_via_sdk(mcp, name, args):
+    from mcp import Client
+
+    async def go():
+        async with Client(mcp) as client:
+            return await client.call_tool(name, args)
+    return asyncio.run(go())
+
+
+def _text(result) -> str:
+    return '\n'.join(c.text for c in result.content if getattr(c, 'text', None))
+
+
+def test_tool_error_text_becomes_is_error(caplog):
+    """Сравнение с ошибкой валидации аргументов из самого SDK — формы одинаковы."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm, mcp = _mcp_server(tmpdir)
+        try:
+            pm.create_project('p1', 'p1')
+            with caplog.at_level(logging.INFO, logger='ariadna'):
+                bad = _call_via_sdk(mcp, 'search_metadata', {'project_id': 'nope', 'query': 'x'})
+            assert bad.is_error is True
+            # Тот же вид, что у ошибок валидации аргументов из SDK.
+            assert _text(bad).startswith("Error executing tool search_metadata: project 'nope' not found"), _text(bad)
+            # Ожидаемая ошибка — без трассировки в логе.
+            assert not any(r.exc_info for r in caplog.records if r.name == 'ariadna')
+
+            ok = _call_via_sdk(mcp, 'list_projects', {})
+            assert ok.is_error is False and 'p1' in _text(ok)
+        finally:
+            pm.close_all()
+
+
+def test_unexpected_exception_is_error_with_traceback_in_log(monkeypatch, caplog):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm, mcp = _mcp_server(tmpdir)
+        try:
+            import src.mcp_server.server as server_module
+
+            def boom(*a, **kw):
+                raise RuntimeError('boom')
+            monkeypatch.setattr(server_module, 'execute_tool', boom)
+            with caplog.at_level(logging.INFO, logger='ariadna'):
+                res = _call_via_sdk(mcp, 'list_projects', {})
+            assert res.is_error is True
+            assert _text(res) == 'Error executing tool list_projects: boom'
+            assert any(r.exc_info and r.name == 'ariadna' for r in caplog.records), caplog.text
+        finally:
+            pm.close_all()
+
+
+def test_sdk_validation_error_has_same_shape():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm, mcp = _mcp_server(tmpdir)
+        try:
+            res = _call_via_sdk(mcp, 'search_metadata', {})     # нет обязательного query
+            assert res.is_error is True
+            assert _text(res).startswith('Error executing tool search_metadata:')
+        finally:
+            pm.close_all()
