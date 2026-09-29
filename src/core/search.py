@@ -598,16 +598,19 @@ class SearchEngine:
     # ============================================
 
     def _fts_query(self, query: str) -> str:
-        """Prepare FTS5 query with prefix matching."""
-        terms = query.strip().split()
-        if not terms:
+        """Запрос FTS5: каждое слово — строка в кавычках с префиксом.
+
+        Слова выделяются так же, как их режет токенизатор unicode61 (\\w+ с
+        Unicode), остальное — разделители. Голая пунктуация в MATCH — это
+        синтаксическая ошибка fts5 («Справочник.Номенклатура» падала на
+        точке), а в кавычках fts5 не разбирает операторы (NOT, NEAR, `:`).
+        Точное совпадение подстроки там, где оно важно (search_code), всё
+        равно проверяется по исходному запросу целиком.
+        """
+        words = re.findall(r'\w+', query)
+        if not words:
             return '""'
-        safe = []
-        for t in terms:
-            t = re.sub(r'["\'\(\)\*\-\+\~\^]', '', t)
-            if t:
-                safe.append(f'{t}*')
-        return ' '.join(safe) if safe else '""'
+        return ' '.join(f'"{w}"*' for w in words)
 
     def _like_variants(self, query: str) -> list[str]:
         """
