@@ -10,12 +10,13 @@ transport-agnostic there so it's unit-testable without the SDK.
 """
 
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 
 logger = logging.getLogger('ariadna')
 
 try:
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import ToolAnnotations
     from pydantic import Field
     HAS_MCP = True
@@ -23,6 +24,7 @@ except ImportError:
     HAS_MCP = False
     logger.warning("MCP SDK not installed. MCP server will not be available.")
 
+from .. import __version__
 from ..core.project_manager import ProjectManager
 from .tools import execute_tool
 
@@ -39,7 +41,7 @@ _MODULE = ("Имя модуля: полное (ОбщийМодуль.Общег
 
 INSTRUCTIONS = """\
 Ариадна — индекс конфигураций 1С:Предприятие (метаданные + код BSL) с графом вызовов.
-Отвечает за миллисекунды и экономит контекст: не читайте файлы выгрузки напрямую, пока
+Типичный вызов — доли секунды, и он экономит контекст: не читайте файлы выгрузки напрямую, пока
 вопрос решается инструментами.
 
 Проект. Все инструменты, кроме list_projects, работают в рамках проекта. Если проектов
@@ -66,21 +68,24 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     if not HAS_MCP:
         return None
 
-    try:
-        from importlib.metadata import version as _pkg_version
-        server_version = _pkg_version('ariadna')
-    except Exception:
-        server_version = '0.1.0'
-
     mcp = MCPServer("ariadna", title="Ариадна", instructions=INSTRUCTIONS,
-                    version=server_version)
+                    version=__version__)
 
     def run(name: str, **kwargs) -> str:
+        # Ошибка инструмента уходит клиенту с isError=true — как и ошибки
+        # валидации аргументов из SDK, а не обычным текстом. execute_tool
+        # по-прежнему возвращает строку «Error: …» (её так и проверяют тесты);
+        # превращение в ToolError — только здесь. SDK сам начинает текст с
+        # «Error executing tool <имя>: », поэтому наш префикс «Error:» снимается.
         try:
-            return execute_tool(pm, name, kwargs)
+            text = execute_tool(pm, name, kwargs)
         except Exception as e:
-            logger.error(f"Tool {name} failed: {e}")
-            return f"Error: {e}"
+            logger.exception("Инструмент %s упал", name)
+            raise ToolError(str(e)) from e
+        if text.startswith('Error'):
+            # Ожидаемая ошибка (проект не найден и т.п.) — без трассировки.
+            raise ToolError(text.removeprefix('Error:').strip())
+        return text
 
     # ── Project / index ──
 
@@ -266,7 +271,7 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         procedure_name: Annotated[str, Field(description="Имя процедуры (регистр не важен)")],
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         module_name: Annotated[str | None, Field(description=_MODULE + ". Без него строятся деревья для всех одноимённых процедур")] = None,
-        direction: Annotated[str, Field(description="down (кого вызывает) | up (кто вызывает)")] = 'down',
+        direction: Annotated[Literal['down', 'up'], Field(description="down (кого вызывает) | up (кто вызывает)")] = 'down',
         depth: Annotated[int, Field(description="Глубина дерева")] = 3,
         source_id: Annotated[str | None, Field(description="ID источника (для фильтрации корня дерева)")] = None,
         max_nodes: Annotated[int, Field(description="Жёсткий лимит узлов на всё дерево — при превышении вывод помечается как усечённый")] = 200,

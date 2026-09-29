@@ -295,12 +295,16 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
 
         case 'get_call_tree':
             from ..core.call_analyzer import CallAnalyzer
+            # Любое значение, кроме 'down', раньше молча работало как 'up'.
+            direction = (args.get('direction') or 'down').strip().lower()
+            if direction not in ('down', 'up'):
+                return "Error: direction must be 'down' or 'up'"
             db = pm.get_db(project_id)
             ca = CallAnalyzer(db)
             tree = ca.build_call_tree(
                 args.get('procedure_name', ''),
                 module_name=args.get('module_name') or None,
-                direction=args.get('direction', 'down'),
+                direction=direction,
                 depth=int(args.get('depth', 3)),
                 source_id=source_id,
                 max_nodes=int(args.get('max_nodes', 200)),

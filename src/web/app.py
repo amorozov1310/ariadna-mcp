@@ -13,8 +13,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..core.project_manager import ProjectManager
+from ..security import web_allowed_hosts
 
 logger = logging.getLogger('ariadna')
 
@@ -23,6 +25,10 @@ TEMPLATES_DIR = WEB_DIR / 'templates'
 STATIC_DIR = WEB_DIR / 'static'
 
 app = FastAPI(title="Ариадна")
+# Защита от DNS rebinding: чужой Host (страница в браузере, резолвящая свой
+# домен на 127.0.0.1) получает 400. Список общий с MCP, расширяется через
+# MCP_ALLOWED_HOSTS (src/security.py). Healthcheck ходит на localhost — он в списке.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=web_allowed_hosts())
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

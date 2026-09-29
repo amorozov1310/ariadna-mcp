@@ -31,7 +31,7 @@ docker run --rm -v "$PWD/docker-wheels:/wheels" python:3.12-slim sh /wheels/fetc
 
 ```bash
 docker compose up -d --build
-curl http://localhost:19878/health     # {"status":"ok"}
+curl http://127.0.0.1:19878/health     # {"status":"ok"}
 ```
 
 Проверяйте, что образ действительно пересобрался (`docker images ariadna`
@@ -40,7 +40,7 @@ curl http://localhost:19878/health     # {"status":"ok"}
 
 ### Шаг 4. Создать проект и загрузить данные
 
-1. Откройте http://localhost:19878 и нажмите **«Создать проект»**.
+1. Откройте http://127.0.0.1:19878 и нажмите **«Создать проект»**.
 2. ID: `bp30` (латиница), название: `Бухгалтерия 3.0`.
 3. На странице проекта — **«Добавить источник»**: ID `main`, тип
    «Основная», загрузите XML-выгрузку конфигурации в `.zip`
@@ -59,7 +59,7 @@ curl http://localhost:19878/health     # {"status":"ok"}
 ### Шаг 6. Подключить агента
 
 ```bash
-claude mcp add --transport http --scope user ariadna http://localhost:19879/mcp
+claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp
 ```
 
 В Claude Code `/mcp` должен показать `ariadna` в статусе connected.
@@ -69,11 +69,17 @@ Cursor, Codex CLI, `.mcp.json` в репозитории и legacy SSE — в RE
 
 ### Свои порты (если 19877/19878/19879 заняты)
 
+Порты публикуются только на `127.0.0.1` (`BIND_ADDR`, по умолчанию
+`127.0.0.1`). Доступ с других машин — `BIND_ADDR=0.0.0.0` плюс
+`MCP_ALLOWED_HOSTS` с адресом или именем машины (иначе MCP и Web UI
+отклонят чужой `Host`), только в доверенной сети: авторизации нет
+(подробнее — README, «Сервер на другой машине»).
+
 ```bash
 MCP_HOST_PORT=33000 MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d --build
-# Web UI:                http://localhost:33001
-# MCP (streamable HTTP): http://localhost:33002/mcp
-# MCP (SSE, legacy):     http://localhost:33000/sse
+# Web UI:                http://127.0.0.1:33001
+# MCP (streamable HTTP): http://127.0.0.1:33002/mcp
+# MCP (SSE, legacy):     http://127.0.0.1:33000/sse
 ```
 
 ---
@@ -124,7 +130,7 @@ DATA_DIR=./data WEB_PORT=9878 MCP_PORT=9877 MCP_HTTP_PORT=9879 python -m src.mai
 DATA_DIR=./data uvicorn src.web.app:app --host 0.0.0.0 --port 9878 --reload
 ```
 
-Web UI — http://localhost:9878, MCP — http://localhost:9879/mcp (в
+Web UI — http://127.0.0.1:9878, MCP — http://127.0.0.1:9879/mcp (в
 нативном запуске порты без префикса `1`).
 
 ---
@@ -152,7 +158,7 @@ cp -r /путь/к/выгрузке_расширения/*    data/projects/bp30
 docker compose up -d --build
 ```
 
-1. http://localhost:19878 → **«Создать проект»**, ID `bp30`.
+1. http://127.0.0.1:19878 → **«Создать проект»**, ID `bp30`.
 2. **«Добавить источник»**: ID `main`, тип «Основная», **файлы не
    загружайте** — каталог `xml/` подхватится с диска.
 3. То же для `ext_bsp` с типом «Расширение».
@@ -184,7 +190,7 @@ docker compose up -d --build         # пересобрать после изм�
 docker restart ariadna               # если MCP/Web UI отвечают «unable to open database file» (индексы в ./data, без INDEX_DIR)
 docker compose down && docker volume rm ariadna-index   # удалить индексы Docker; затем up -d и reindex проектов
 docker compose exec ariadna bash     # зайти внутрь
-curl http://localhost:19878/health   # здоровье
+curl http://127.0.0.1:19878/health   # здоровье
 ```
 
 ---

@@ -306,3 +306,38 @@ def test_build_call_tree_max_nodes_truncates():
             assert tree_full.truncated is False
         finally:
             db.close()
+
+
+# ============================================
+# get_call_tree: direction только 'down' | 'up'
+# ============================================
+
+def test_get_call_tree_rejects_unknown_direction():
+    """Раньше direction='sideways' молча работал как 'up'."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_project(tmpdir)
+        try:
+            result = execute_tool(pm, 'get_call_tree', {'project_id': 'p1', 'procedure_name': 'X',
+                                                        'direction': 'sideways'})
+            assert result == "Error: direction must be 'down' or 'up'", result
+            for ok in ('down', 'up', 'UP'):
+                text = execute_tool(pm, 'get_call_tree', {'project_id': 'p1', 'procedure_name': 'X',
+                                                          'direction': ok})
+                assert not text.startswith('Error'), (ok, text)
+        finally:
+            pm.close_all()
+
+
+def test_get_call_tree_direction_schema_is_enum():
+    import pytest
+    pytest.importorskip("mcp.server.mcpserver")
+    import asyncio
+    from src.mcp_server.server import create_mcp_server
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(data_dir=tmpdir)
+        try:
+            tools = asyncio.run(create_mcp_server(pm).list_tools())
+            schema = next(t for t in tools if t.name == 'get_call_tree').input_schema
+            assert schema['properties']['direction']['enum'] == ['down', 'up'], schema
+        finally:
+            pm.close_all()
