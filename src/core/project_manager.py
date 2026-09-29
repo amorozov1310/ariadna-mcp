@@ -46,6 +46,11 @@ _REINDEX_LOCKS_GUARD = threading.Lock()
 # переиндексация идут снаружи.
 _REGISTRY_LOCKS: dict[str, threading.RLock] = {}
 
+# Повторы os.replace при записи реестра (Windows, см. _write_registry_file):
+# 10 попыток с паузой 20, 40, … мс — в сумме до ~0,9 с.
+_REPLACE_ATTEMPTS = 10
+_REPLACE_DELAY_SEC = 0.02
+
 
 class ReindexInProgressError(RuntimeError):
     """Удаление отклонено: у проекта идёт переиндексация."""
@@ -219,7 +224,18 @@ class ProjectManager:
         tmp = self.registry_path.with_name(
             f'{self.registry_path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-        os.replace(tmp, self.registry_path)
+        # На Windows os.replace падает с PermissionError, пока другой поток
+        # держит projects.json открытым на чтение (_load_registry) — это доли
+        # миллисекунды, поэтому несколько коротких повторов.
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, self.registry_path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(_REPLACE_DELAY_SEC * (attempt + 1))
 
     @classmethod
     def _project_from_dict(cls, pdata: dict) -> tuple['ProjectInfo', bool]:

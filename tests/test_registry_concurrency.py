@@ -143,3 +143,48 @@ def test_two_instances_creating_projects_in_parallel_lose_nothing():
         finally:
             for pm in managers:
                 pm.close_all()
+
+
+# ============================================
+# Windows: os.replace реестра при открытом на чтение projects.json
+# ============================================
+
+import os
+import pytest
+
+from src.core import project_manager as pm_module
+
+
+def _flaky_replace(monkeypatch, failures: int) -> list:
+    calls = []
+    real = os.replace
+
+    def replace(src, dst):
+        calls.append(dst)
+        if len(calls) <= failures:
+            raise PermissionError(13, 'Процесс не может получить доступ к файлу')
+        return real(src, dst)
+
+    monkeypatch.setattr(pm_module.os, 'replace', replace)
+    monkeypatch.setattr(pm_module, '_REPLACE_DELAY_SEC', 0)
+    return calls
+
+
+def test_registry_write_retries_permission_error(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        calls = _flaky_replace(monkeypatch, failures=3)
+        pm.create_project('p1', 'p1')
+        assert len(calls) == 4
+        assert [p.id for p in ProjectManager(tmpdir).list_projects()] == ['p1']
+        assert not list(Path(tmpdir).glob('*.tmp')), "временный файл не остался"
+
+
+def test_registry_write_gives_up_after_attempts(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        calls = _flaky_replace(monkeypatch, failures=10**6)
+        with pytest.raises(PermissionError):
+            pm.create_project('p1', 'p1')
+        assert len(calls) == pm_module._REPLACE_ATTEMPTS
+        assert not list(Path(tmpdir).glob('*.tmp'))
