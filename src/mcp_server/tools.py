@@ -110,9 +110,37 @@ def _stale_module_warning(path: str, mod: dict) -> str:
 # TOOL EXECUTION
 # ============================================
 
+# Потолок limit у постраничных инструментов. Больший limit раздувал ответ и
+# контекст модели (limit=100000 — десятки тысяч строк за один вызов). 500 —
+# в 5 раз больше самого крупного значения по умолчанию (list_objects, 100):
+# ~500 строк результата — это уже десятки тысяч токенов; дальше
+# листать через offset.
+MAX_LIMIT = 500
+_PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
+                'search_procedures', 'search_code')
+
+# Сколько процедур «Missing from index» показывает diagnose_index: на большой
+# конфигурации их тысячи, а для диагностики хватает первых.
+DIAGNOSE_MISSING_SHOWN = 100
+
+
 def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
     """Execute a tool and return text result."""
+    requested = args.get('limit')
+    try:
+        capped = tool in _PAGED_TOOLS and requested is not None and int(requested) > MAX_LIMIT
+    except (TypeError, ValueError):
+        capped = False
+    if not capped:
+        return _execute_tool(pm, tool, args)
+    text = _execute_tool(pm, tool, {**args, 'limit': MAX_LIMIT})
+    if text.startswith('Error'):
+        return text
+    return (f"{text}\n(limit={requested} урезан до {MAX_LIMIT} — больше за один вызов не "
+            f"выдаётся; остальное — через offset)")
 
+
+def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
     if tool == 'list_projects':
         projects = pm.list_projects()
         if not projects:
@@ -426,8 +454,11 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             ]
             if result['missing']:
                 lines.append("")
-                for m in result['missing']:
+                shown = result['missing'][:DIAGNOSE_MISSING_SHOWN]
+                for m in shown:
                     lines.append(f"  ❌ {m['module']}:{m['line']}  {m['signature'][:120]}")
+                if len(shown) < result['missing_count']:
+                    lines.append(f"  … показано {len(shown)} из {result['missing_count']}")
             if result['extra']:
                 lines.append(f"\nExtra in index (not in files): {result['extra_count']}")
                 for e in result['extra'][:10]:

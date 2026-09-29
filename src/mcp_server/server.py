@@ -30,7 +30,7 @@ from .tools import execute_tool
 
 _PID = "ID проекта (необязательно, если в реестре только один проект)"
 _SID = "ID источника (пусто = все источники)"
-_LIMIT = "Макс. результатов на страницу"
+_LIMIT = "Макс. результатов на страницу (не больше 500; дальше — через offset)"
 _OFFSET = "Пропустить первые N результатов (пагинация, см. offset= в подсказке 'use offset=N for more')"
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
