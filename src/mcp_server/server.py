@@ -10,7 +10,7 @@ transport-agnostic there so it's unit-testable without the SDK.
 """
 
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 
 logger = logging.getLogger('ariadna')
 
@@ -271,7 +271,7 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         procedure_name: Annotated[str, Field(description="Имя процедуры (регистр не важен)")],
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         module_name: Annotated[str | None, Field(description=_MODULE + ". Без него строятся деревья для всех одноимённых процедур")] = None,
-        direction: Annotated[str, Field(description="down (кого вызывает) | up (кто вызывает)")] = 'down',
+        direction: Annotated[Literal['down', 'up'], Field(description="down (кого вызывает) | up (кто вызывает)")] = 'down',
         depth: Annotated[int, Field(description="Глубина дерева")] = 3,
         source_id: Annotated[str | None, Field(description="ID источника (для фильтрации корня дерева)")] = None,
         max_nodes: Annotated[int, Field(description="Жёсткий лимит узлов на всё дерево — при превышении вывод помечается как усечённый")] = 200,
