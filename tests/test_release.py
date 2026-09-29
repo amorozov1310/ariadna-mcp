@@ -23,7 +23,7 @@ ROOT = Path(__file__).parent.parent
 
 def test_version_single_source():
     assert src.__version__ == (ROOT / 'src' / 'VERSION').read_text(encoding='utf-8').strip()
-    assert src.__version__ == '0.2.0'
+    assert src.__version__ == '0.2.1'
     pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     assert 'dynamic = ["version"]' in pyproject
     assert 'version = {file = "src/VERSION"}' in pyproject
