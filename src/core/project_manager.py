@@ -8,6 +8,8 @@ Each project gets its own SQLite at /data/projects/{id}/index.db — or at
 import json
 import logging
 import shutil
+import sqlite3
+import time
 import os
 import threading
 import zipfile
@@ -32,6 +34,20 @@ logger = logging.getLogger('ariadna')
 # different projects/data dirs run concurrently.
 _REINDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _REINDEX_LOCKS_GUARD = threading.Lock()
+
+
+def _copy_sqlite(src: Path, dst: Path) -> None:
+    """Копия БД через sqlite3 backup API — с данными, которые ещё лежат в
+    -wal (копия одного файла их бы потеряла)."""
+    source = sqlite3.connect(str(src))
+    try:
+        target = sqlite3.connect(str(dst))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
 
 
 @dataclass
@@ -598,6 +614,49 @@ class ProjectManager:
         legacy=True — прежнее место в data_dir (источник переноса)."""
         base = self.projects_dir if legacy or self.index_dir is None else self.index_dir
         return base / project_id / 'index.db'
+
+    def migrate_index_dir(self) -> list[str]:
+        """Однократный перенос индексов из data_dir/projects в index_dir.
+
+        Для проекта, у которого нового индекса нет, а старый есть, — копия
+        через backup API во временный файл и os.replace: оборванная копия не
+        должна выглядеть готовым индексом. Старый файл не удаляется. Ошибка
+        одного проекта не прерывает перенос остальных: он просто будет
+        переиндексирован. Вызывать при старте, до любых get_db — тот создал
+        бы пустой индекс на новом месте. Возвращает id перенесённых проектов.
+        """
+        if self.index_dir is None:
+            return []
+        migrated: list[str] = []
+        for project in self.list_projects():
+            new = self._index_path(project.id)
+            old = self._index_path(project.id, legacy=True)
+            if new.exists() or not old.exists():
+                continue
+            tmp = new.with_name(new.name + '.migrating')
+            try:
+                new.parent.mkdir(parents=True, exist_ok=True)
+                started = time.monotonic()
+                _copy_sqlite(old, tmp)
+                os.replace(tmp, new)
+            except Exception:
+                logger.exception("Не удалось перенести индекс проекта %s из %s в %s — "
+                                 "проект будет переиндексирован", project.id, old, new)
+                for leftover in (tmp, Path(f'{tmp}-journal'), Path(f'{tmp}-wal'),
+                                 Path(f'{tmp}-shm')):
+                    try:
+                        leftover.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        logger.exception("Не удалось удалить %s", leftover)
+                continue
+            logger.info("Индекс проекта %s перенесён в %s: %.1f МБ за %.1f с. "
+                        "Старый файл %s больше не используется — его можно удалить вручную.",
+                        project.id, new, new.stat().st_size / 1024 / 1024,
+                        time.monotonic() - started, old)
+            migrated.append(project.id)
+        return migrated
 
     def get_db(self, project_id: str) -> Database:
         """Get or open SQLite connection for project."""

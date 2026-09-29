@@ -21,6 +21,27 @@ def _index_dir() -> str | None:
     return os.environ.get('INDEX_DIR') or None
 
 
+def _prepare_data(data_dir: str) -> None:
+    """Обслуживание до запуска любых рабочих потоков (ни одна переиндексация
+    ещё не идёт): перенос индексов в INDEX_DIR, затем сброс статуса
+    'indexing', оставшегося от прогона, который не пережил остановку
+    процесса (Этап U0). Порядок важен: reset_stale_indexing открывает БД, и
+    на новом месте без переноса появился бы пустой индекс."""
+    try:
+        from .core.project_manager import ProjectManager
+        pm = ProjectManager(data_dir, _index_dir())
+        try:
+            try:
+                pm.migrate_index_dir()
+            except Exception:
+                logger.exception("Не удалось перенести индексы в INDEX_DIR")
+            pm.reset_stale_indexing()
+        finally:
+            pm.close_all()
+    except Exception:
+        logger.exception("Не удалось проверить незавершённые индексации")
+
+
 def main():
     data_dir = os.environ.get('DATA_DIR', '/data')
     mcp_port = int(os.environ.get('MCP_PORT', '9877'))
@@ -30,14 +51,7 @@ def main():
     # Ensure data directory exists
     Path(data_dir).mkdir(parents=True, exist_ok=True)
 
-    # Этап U0: до запуска любых рабочих потоков — снять статус 'indexing',
-    # оставшийся от прогона, который не пережил прошлую остановку процесса.
-    # Именно здесь это безопасно: ни одна переиндексация ещё не идёт.
-    try:
-        from .core.project_manager import ProjectManager
-        ProjectManager(data_dir, _index_dir()).reset_stale_indexing()
-    except Exception:
-        logger.exception("Не удалось проверить незавершённые индексации")
+    _prepare_data(data_dir)
 
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Index directory: {_index_dir() or data_dir + '/projects'}")
