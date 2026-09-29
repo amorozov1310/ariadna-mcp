@@ -50,3 +50,17 @@ markers = [
 # Версия — из src/VERSION (единственный источник, см. src/__init__.py).
 [tool.setuptools.dynamic]
 version = {file = "src/VERSION"}
+
+# Пакеты — явно: код импортируется как `src.…`, а автопоиск setuptools
+# принимал каталог src/ за src-раскладку и клал в колесо core/, web/… на
+# верхний уровень без пакета src — установленный пакет не импортировался.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src", "src.*"]
+
+# Не-.py файлы, которые код читает во время работы (поиск: read_text, open,
+# Path(__file__), Jinja2Templates, StaticFiles, FileResponse).
+[tool.setuptools.package-data]
+"src" = ["VERSION"]                                   # src/__init__.py
+"src.web" = ["templates/*.html", "static/*", "static/fonts/*"]   # web/app.py
+"src.core" = ["vendor/*.json"]                        # core/report_generator.py
