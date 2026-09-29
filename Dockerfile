@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 # containers CAN. Refresh the wheels when deps change:
 #   docker run --rm -v <repo>/docker-wheels:/wheels python:3.12-slim \
 #     pip download --dest /wheels "mcp>=2,<3" "pydantic>=2" "fastapi>=0.110" \
-#     "uvicorn[standard]" jinja2 aiosqlite python-multipart starlette
+#     "uvicorn[standard]" jinja2 aiosqlite python-multipart "starlette>=1.7"
 # generate_config_report*.whl (Этап 5, optional xml-report extra) is built from
 # git+https://github.com/norkins/metadata.git the same way (needs git + --no-deps).
 COPY pyproject.toml .
@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir --no-index --find-links=/tmp/wheels \
     "jinja2" \
     "aiosqlite" \
     "python-multipart" \
-    "starlette" \
+    "starlette>=1.7" \
     "generate-config-report" && \
     rm -rf /tmp/wheels
 

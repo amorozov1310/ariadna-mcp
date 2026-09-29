@@ -672,3 +672,50 @@ class Indexer:
                 inserts[i:i + 2000])
         conn.commit()
         return {'resolved': len(inserts)}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Консольная команда `ariadna-index` (pyproject.toml, project.scripts):
+    переиндексировать проект без запуска сервера — то же, что reindex в Web UI
+    или MCP. Без аргументов только печатает подсказку по использованию."""
+    import argparse
+    import os
+    import sys
+    from .project_manager import ProjectManager
+
+    parser = argparse.ArgumentParser(
+        prog='ariadna-index',
+        description='Переиндексировать проект Ариадны. Не запускайте на тех же '
+                    'data/, пока работает сервер: реестр projects.json у них общий.')
+    parser.add_argument('project_id', help='ID проекта из реестра')
+    parser.add_argument('--source', help='ID источника (по умолчанию — все)')
+    parser.add_argument('--data-dir', default=os.environ.get('DATA_DIR', './data'),
+                        help='каталог данных (DATA_DIR, по умолчанию ./data)')
+    parser.add_argument('--index-dir', default=os.environ.get('INDEX_DIR') or None,
+                        help='каталог индексов (INDEX_DIR; по умолчанию — '
+                             'data/projects/{id}/index.db)')
+    args = parser.parse_args(argv)
+
+    if not Path(args.data_dir).is_dir():
+        print(f"Ошибка: каталог данных {args.data_dir} не найден", file=sys.stderr)
+        return 1
+    pm = ProjectManager(args.data_dir, index_dir=args.index_dir)
+    try:
+        # Неизвестный источник — до запуска: иначе reindex() успел бы
+        # записать проекту status='error'.
+        sources = [s.id for s in pm.get_project(args.project_id).sources]
+        if args.source and args.source not in sources:
+            print(f"Ошибка: источник '{args.source}' не найден в проекте "
+                  f"'{args.project_id}'. Доступны: {', '.join(sources) or 'нет'}",
+                  file=sys.stderr)
+            return 1
+        stats = pm.reindex(args.project_id, source_id=args.source)
+    except KeyError as e:
+        print(f"Ошибка: {e.args[0] if e.args else e}", file=sys.stderr)
+        return 1
+    finally:
+        pm.close_all()
+    print(f"Проект {args.project_id}: объектов {stats.total_objects}, модулей "
+          f"{stats.total_modules}, процедур {stats.total_procedures}, вызовов "
+          f"{stats.total_calls}, {stats.duration_sec} с")
+    return 0
