@@ -10,12 +10,16 @@ distinguish objects with identical ``full_name`` coming from different
 sources (main config vs extensions).
 """
 
+import logging
 import os
 import re
+import sqlite3
 from pathlib import Path
 
 from .db import Database
 from .report_parser import canonicalize_kind
+
+logger = logging.getLogger('ariadna')
 
 
 # Пределы search_code: каждый модуль-кандидат перечитывается с диска (FTS
@@ -25,6 +29,20 @@ from .report_parser import canonicalize_kind
 SEARCH_CODE_FTS_MODULES = 50         # модулей-кандидатов из FTS
 SEARCH_CODE_FALLBACK_MODULES = 300   # модулей в резервном просмотре без FTS
 SEARCH_CODE_MAX_PER_MODULE = 5       # вхождений из одного модуля
+
+
+def _fts_rows(conn, sql: str, params) -> list:
+    """Выполнить запрос с FTS5 MATCH. Ошибку разбора выражения fts5 не
+    выпускать наружу: вызывающий получает пустой список и идёт своим
+    резервным путём (LIKE / просмотр модулей). Прочие ошибки SQLite —
+    как есть."""
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as e:
+        if 'fts5' not in str(e):
+            raise
+        logger.warning("Ошибка FTS5, используется резервный поиск: %s", e)
+        return []
 
 
 def resolve_module_ids(conn, module_name: str, source_id: str | None = None) -> list[int]:
@@ -147,12 +165,13 @@ class SearchEngine:
         where = ' AND '.join(conditions)
         params.extend([limit, offset])
 
-        rows = conn.execute(
+        rows = _fts_rows(
+            conn,
             f"""SELECT m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id
                 FROM metadata_fts f JOIN metadata_objects m ON m.id = f.rowid
                 WHERE {where}
                 ORDER BY rank LIMIT ? OFFSET ?""",
-            params).fetchall()
+            params)
 
         # LIKE fallback: progressively shorter prefixes (helps with inflection,
         # primarily Russian endings, but works language-agnostically). D5:
@@ -293,14 +312,15 @@ class SearchEngine:
         where = ' AND '.join(conds)
         params.extend([limit, offset])
 
-        rows = conn.execute(
+        rows = _fts_rows(
+            conn,
             f"""SELECT a.name, a.kind, a.type_desc, a.synonym,
                       m.full_name as object_full_name, m.source_id
                FROM attributes_fts f
                JOIN attributes a ON a.id = f.rowid
                JOIN metadata_objects m ON m.id = a.object_id
                WHERE {where}
-               ORDER BY rank LIMIT ? OFFSET ?""", params).fetchall()
+               ORDER BY rank LIMIT ? OFFSET ?""", params)
 
         # LIKE fallback (D5: case-insensitive)
         if not rows:
@@ -488,13 +508,13 @@ class SearchEngine:
         # contingency — see db.py), which doesn't support bm25()/rank.
         # На одну строку больше предела — чтобы знать, что он сработал.
         cap = SEARCH_CODE_FTS_MODULES
-        rows = conn.execute(f"""
+        rows = _fts_rows(conn, f"""
             SELECT f.rowid as module_id, m.name as module_name,
                    m.file_path, m.abs_path, m.source_id
             FROM module_text_fts f
             JOIN modules m ON m.id = f.rowid
             WHERE {where}
-            ORDER BY m.name LIMIT ?""", params + [cap + 1]).fetchall()
+            ORDER BY m.name LIMIT ?""", params + [cap + 1])
         fts_capped = len(rows) > cap
 
         results, per_module_capped = self._extract_code_matches(rows[:cap], query, limit, offset=offset)

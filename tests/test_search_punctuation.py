@@ -98,3 +98,13 @@ def test_search_attributes_dotted_type_and_equals(pm):
         assert not text.startswith('Error'), (query, text)
         assert 'CatalogRef.Role' in text, (query, text)
 
+
+
+def test_fts_error_falls_back_instead_of_raising(pm, monkeypatch):
+    """Защита на будущее: если в MATCH всё же уйдёт выражение, которое fts5
+    не разберёт, — резервный путь, а не исключение наружу."""
+    monkeypatch.setattr(SearchEngine, '_fts_query', lambda self, q: 'Account.')
+    engine = pm.get_search('p1')
+    assert any(r['full_name'] == 'Справочник.Account' for r in engine.search_metadata('Account'))
+    assert any('Role' == r['name'] for r in engine.search_attributes('Role'))
+    assert engine.search_code('SessionParameters.OTelSettings')
