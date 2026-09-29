@@ -43,6 +43,15 @@ def _resolve_project_id(pm: ProjectManager, args: dict) -> tuple[str | None, str
     return None, f"Error: project_id is required (multiple projects exist). Available: {available}"
 
 
+def _unknown_source_error(pm: ProjectManager, project_id: str, source_id: str) -> str | None:
+    """Ошибка со списком доступных источников, если source_id в проекте нет."""
+    ids = [s.id for s in pm.get_project(project_id).sources]
+    if source_id in ids:
+        return None
+    return (f"Error: source '{source_id}' not found in project '{project_id}'. "
+            f"Available: {', '.join(ids) or 'none'}")
+
+
 # ============================================
 # PAGINATION (Этап 6 items 4 + 6: limit/offset + "shown X of Y" /
 # "use offset=N for more")
@@ -186,7 +195,13 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             # Этап 4/D7: never blocks — starts in the background and
             # returns immediately, so an ERP-scale corpus can't time out
             # the MCP call. Poll get_index_status for progress/completion.
-            result = pm.reindex_async(project_id, source_id=args.get('source_id') or None)
+            # Проверка до старта: иначе фоновый reindex() упал бы с KeyError уже
+            # после ответа «started» и оставил бы проекту status='error'.
+            if source_id:
+                error = _unknown_source_error(pm, project_id, source_id)
+                if error:
+                    return error
+            result = pm.reindex_async(project_id, source_id=source_id)
             if result['status'] == 'already_running':
                 return (
                     f"Reindex already in progress for '{project_id}'. "
@@ -218,6 +233,11 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     f"  Files on disk: {'yes' if preview['files_exist'] else 'no'}\n"
                     f"This is irreversible. Repeat with confirm=true to actually delete."
                 )
+            # pm.remove_source молча выходит на неизвестном id (так его зовёт
+            # Web UI) — без проверки здесь инструмент рапортовал бы об удалении.
+            error = _unknown_source_error(pm, project_id, target)
+            if error:
+                return error
             try:
                 pm.remove_source(project_id, target)
                 return f"Source '{target}' removed (files + indexed data wiped)."
@@ -288,21 +308,38 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             return ca.format_tree_simple(tree)
 
         case 'search_code':
+            from ..core import search as search_mod
             limit = int(limit_arg or 30)
-            page, has_more = _paginate(
-                lambda limit, offset: engine.search_code(
+            limited = {'truncated': False}
+
+            def fetch_code(limit, offset):
+                rows, limited['truncated'] = engine.search_code_limited(
                     args.get('query', ''), file_pattern=args.get('file_pattern') or None,
-                    source_id=source_id, limit=limit, offset=offset),
-                limit, offset)
+                    source_id=source_id, limit=limit, offset=offset)
+                return rows
+
+            page, has_more = _paginate(fetch_code, limit, offset)
+            # Поиск просматривает ограниченное число модулей и вхождений на
+            # модуль; если предел сработал, «показано всё» было бы неправдой.
+            limit_note = (
+                f"выдача ограничена: просмотрено не больше {search_mod.SEARCH_CODE_FTS_MODULES} "
+                f"модулей и не больше {search_mod.SEARCH_CODE_MAX_PER_MODULE} вхождений в модуле — "
+                f"сузьте поиск через file_pattern или source_id")
             if not page:
-                return "No code matches found." if offset == 0 else f"No further results at offset={offset}."
+                if offset == 0:
+                    return f"No code matches found ({limit_note})." if limited['truncated'] \
+                        else "No code matches found."
+                return f"No further results at offset={offset}."
             lines = [f"Found {len(page)} match(es):"]
             for r in page:
                 src = f"  @{r.get('source_label','')}" if r.get('source_label') else ''
                 lines.append(f"  {r['module_name']}:{r['line']}{src}")
                 for ctx_line in r['context'].splitlines():
                     lines.append(f"    {ctx_line}")
-            lines.append(_page_trailer(len(page), offset, limit, has_more))
+            if not has_more and limited['truncated']:
+                lines.append(f"(shown {len(page)}; {limit_note})")
+            else:
+                lines.append(_page_trailer(len(page), offset, limit, has_more))
             return '\n'.join(lines)
 
         case 'get_module_outline':
