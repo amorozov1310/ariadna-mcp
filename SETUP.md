@@ -69,6 +69,11 @@ Cursor, Codex CLI, `.mcp.json` в репозитории и legacy SSE — в RE
 
 ### Свои порты (если 19877/19878/19879 заняты)
 
+Порты публикуются только на `127.0.0.1` (`BIND_ADDR`, по умолчанию
+`127.0.0.1`). Доступ с других машин — `BIND_ADDR=0.0.0.0`, только в
+доверенной сети: авторизации нет (подробнее — README, «Сервер на другой
+машине»).
+
 ```bash
 MCP_HOST_PORT=33000 MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d --build
 # Web UI:                http://localhost:33001
