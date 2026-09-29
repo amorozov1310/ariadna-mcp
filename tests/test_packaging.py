@@ -107,3 +107,13 @@ def test_starlette_1_7_required_everywhere():
     assert '"starlette>=1.7"' in (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     assert '"starlette>=1.7"' in (ROOT / 'Dockerfile').read_text(encoding='utf-8')
     assert '"starlette>=1.7"' in (ROOT / 'docker-wheels' / 'fetch.sh').read_text(encoding='utf-8')
+
+
+def test_python_m_src_core_indexer_runs_cli():
+    """`python -m src.core.indexer` — тот же CLI, что ariadna-index
+    (раньше модуль без __main__ молча ничего не делал)."""
+    import subprocess
+    r = subprocess.run([sys.executable, '-m', 'src.core.indexer', '--help'],
+                       cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert 'usage' in r.stdout

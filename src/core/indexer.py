@@ -719,3 +719,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{stats.total_modules}, процедур {stats.total_procedures}, вызовов "
           f"{stats.total_calls}, {stats.duration_sec} с")
     return 0
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(main())
