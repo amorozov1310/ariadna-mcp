@@ -15,6 +15,12 @@ logging.basicConfig(
 logger = logging.getLogger('ariadna')
 
 
+def _index_dir() -> str | None:
+    """Каталог индексов SQLite (INDEX_DIR, в Docker — том вне 9p); None —
+    индексы рядом с выгрузками в DATA_DIR/projects, как раньше."""
+    return os.environ.get('INDEX_DIR') or None
+
+
 def main():
     data_dir = os.environ.get('DATA_DIR', '/data')
     mcp_port = int(os.environ.get('MCP_PORT', '9877'))
@@ -29,11 +35,12 @@ def main():
     # Именно здесь это безопасно: ни одна переиндексация ещё не идёт.
     try:
         from .core.project_manager import ProjectManager
-        ProjectManager(data_dir).reset_stale_indexing()
+        ProjectManager(data_dir, _index_dir()).reset_stale_indexing()
     except Exception:
         logger.exception("Не удалось проверить незавершённые индексации")
 
     logger.info(f"Data directory: {data_dir}")
+    logger.info(f"Index directory: {_index_dir() or data_dir + '/projects'}")
     logger.info(f"MCP SSE port: {mcp_port}")
     logger.info(f"MCP streamable HTTP port: {mcp_http_port}")
     logger.info(f"Web UI port: {web_port}")
@@ -95,7 +102,7 @@ def _start_mcp_sse(data_dir: str, port: int):
 
         import uvicorn
         from .core.project_manager import ProjectManager
-        pm = ProjectManager(data_dir)
+        pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
         app = mcp.sse_app(host="0.0.0.0")
@@ -119,7 +126,7 @@ def _start_mcp_streamable_http(data_dir: str, port: int):
 
         import uvicorn
         from .core.project_manager import ProjectManager
-        pm = ProjectManager(data_dir)
+        pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
         app = mcp.streamable_http_app(host="0.0.0.0")

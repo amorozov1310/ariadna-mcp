@@ -1,7 +1,8 @@
 """
 ProjectManager: CRUD for 1C projects, source management, DB pool.
 Stores registry in /data/projects.json.
-Each project gets its own SQLite at /data/projects/{id}/index.db.
+Each project gets its own SQLite at /data/projects/{id}/index.db — or at
+{index_dir}/{id}/index.db when index_dir is given (Docker: том вне 9p).
 """
 
 import json
@@ -80,10 +81,19 @@ class ProjectManager:
                     └── {source_id}/
                         ├── report.txt
                         └── xml/
+
+    index_dir, если задан, — отдельный каталог для индексов SQLite:
+    {index_dir}/{project_id}/index.db вместо projects/{project_id}/. В Docker
+    это именованный том: ./data монтируется через 9p, где SQLite перечитывает
+    файл при каждом полном проходе и не работают WAL и блокировки. Переменную
+    окружения INDEX_DIR читают вызывающие (main.py, web/app.py), а не этот
+    класс — иначе тесты с ProjectManager(tmpdir) уехали бы в каталог
+    разработчика.
     """
 
-    def __init__(self, data_dir: str = '/data'):
+    def __init__(self, data_dir: str = '/data', index_dir: str | None = None):
         self.data_dir = Path(data_dir)
+        self.index_dir = Path(index_dir) if index_dir else None
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
         self._db_pool: dict[str, Database] = {}
@@ -331,6 +341,9 @@ class ProjectManager:
         project_dir = self.projects_dir / project_id
         if project_dir.exists():
             shutil.rmtree(project_dir)
+        index_parent = self._index_path(project_id).parent
+        if index_parent != project_dir and index_parent.exists():
+            shutil.rmtree(index_parent)
 
         del registry[project_id]
         self._save_registry()
@@ -580,6 +593,12 @@ class ProjectManager:
     # DATABASE POOL
     # ============================================
 
+    def _index_path(self, project_id: str, legacy: bool = False) -> Path:
+        """Единственное место, где строится путь к индексу проекта.
+        legacy=True — прежнее место в data_dir (источник переноса)."""
+        base = self.projects_dir if legacy or self.index_dir is None else self.index_dir
+        return base / project_id / 'index.db'
+
     def get_db(self, project_id: str) -> Database:
         """Get or open SQLite connection for project."""
         if project_id in self._db_pool:
@@ -587,7 +606,7 @@ class ProjectManager:
             if db.conn:
                 return db
 
-        db_path = str(self.projects_dir / project_id / 'index.db')
+        db_path = str(self._index_path(project_id))
         db = Database(db_path)
         db.connect()
         db.init_schema()

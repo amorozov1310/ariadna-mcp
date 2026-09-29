@@ -35,7 +35,7 @@ def get_pm() -> ProjectManager:
     global _pm
     if _pm is None:
         data_dir = os.environ.get('DATA_DIR', '/data')
-        _pm = ProjectManager(data_dir)
+        _pm = ProjectManager(data_dir, os.environ.get('INDEX_DIR') or None)
     return _pm
 
 
