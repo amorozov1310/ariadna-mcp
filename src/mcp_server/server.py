@@ -23,6 +23,7 @@ except ImportError:
     HAS_MCP = False
     logger.warning("MCP SDK not installed. MCP server will not be available.")
 
+from .. import __version__
 from ..core.project_manager import ProjectManager
 from .tools import execute_tool
 
@@ -66,14 +67,8 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     if not HAS_MCP:
         return None
 
-    try:
-        from importlib.metadata import version as _pkg_version
-        server_version = _pkg_version('ariadna')
-    except Exception:
-        server_version = '0.1.0'
-
     mcp = MCPServer("ariadna", title="Ариадна", instructions=INSTRUCTIONS,
-                    version=server_version)
+                    version=__version__)
 
     def run(name: str, **kwargs) -> str:
         try:
