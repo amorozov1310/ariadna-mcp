@@ -40,12 +40,14 @@ docker compose up -d
 Docker, сеть используется из runtime-контейнера):
 
 ```bash
-docker run --rm -v "$PWD/docker-wheels:/wheels" python:3.12-slim sh /wheels/fetch.sh
+docker run --rm -v "$PWD:/repo" -w /repo python:3.12-slim sh docker-wheels/fetch.sh
 ```
 
-На Windows запускайте из PowerShell с полным путём
-(`-v D:\путь\до\ariadna\docker-wheels:/wheels`) — Git Bash искажает пути
-монтирования. Повторять при изменении зависимостей в Dockerfile.
+Команда запускается из корня репозитория: список зависимостей берётся из
+`pyproject.toml`. На Windows — только из PowerShell с полным путём
+(`-v D:\путь\до\ariadna:/repo`): Git Bash искажает пути монтирования.
+Повторять при изменении зависимостей в `pyproject.toml` — старые колёса
+заменяются новыми, при сбое сети прежний набор остаётся.
 
 Web UI: http://127.0.0.1:19878
 MCP (streamable HTTP): http://127.0.0.1:19879/mcp
@@ -99,6 +101,12 @@ cp -r ВыгрузкаРасширения/* data/projects/bp30/sources/ext_agro
 Если сервер остановили посреди прогона, при следующем старте статус
 `indexing` снимается автоматически (в лог пишется предупреждение), а
 прежний индекс остаётся пригодным — прогон достаточно повторить.
+
+Без сервера — командой `ariadna-index <проект> [--source <источник>]`
+(ставится с пакетом, `pip install .`); без установки пакета из корня
+репозитория — `python -m src.core.indexer <проект>`. Не запускайте её
+параллельно с работающим сервером на тех же `data/`: реестр `projects.json`
+у них общий.
 
 ### 5. Подключение MCP к агенту (по желанию)
 

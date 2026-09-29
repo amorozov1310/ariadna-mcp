@@ -9,7 +9,7 @@ removed — it never actually persisted anything, so every tool required
 project_id anyway; a single-project registry now just defaults to it).
 """
 
-from ..core.project_manager import ProjectManager
+from ..core.project_manager import ProjectManager, ReindexInProgressError
 from ..core.search import format_search_results, format_object_details
 
 
@@ -84,13 +84,63 @@ def _format_page(page: list[dict], offset: int, limit: int, has_more: bool) -> s
     return f"{text}\n{_page_trailer(len(page), offset, limit, has_more)}"
 
 
+def _stale_module_warning(path: str, mod: dict) -> str:
+    """Предупреждение, если файл модуля изменился после индексации.
+
+    get_procedure_code режет текущий файл по номерам строк из индекса: после
+    «обновить источник» без reindex под заголовком процедуры оказались бы
+    чужие строки. Хеш считается так же, как в индексаторе; пустой
+    file_hash (индексатор не смог прочитать файл) — не повод для тревоги."""
+    from ..core.indexer import form_xml_for_module, module_file_hash
+    stored = mod.get('file_hash') or ''
+    if not stored:
+        return ''
+    try:
+        current = module_file_hash(path, form_xml_for_module(path, mod.get('module_type') or ''))
+    except OSError:
+        return ''
+    if current == stored:
+        return ''
+    return ("// ВНИМАНИЕ: файл модуля изменён после индексации — границы процедуры "
+            "могут быть неверны, код ниже может быть чужим. Переиндексируйте проект "
+            "(reindex).\n")
+
+
 # ============================================
 # TOOL EXECUTION
 # ============================================
 
+# Потолок limit у постраничных инструментов. Больший limit раздувал ответ и
+# контекст модели (limit=100000 — десятки тысяч строк за один вызов). 500 —
+# в 5 раз больше самого крупного значения по умолчанию (list_objects, 100):
+# ~500 строк результата — это уже десятки тысяч токенов; дальше
+# листать через offset.
+MAX_LIMIT = 500
+_PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
+                'search_procedures', 'search_code')
+
+# Сколько процедур «Missing from index» показывает diagnose_index: на большой
+# конфигурации их тысячи, а для диагностики хватает первых.
+DIAGNOSE_MISSING_SHOWN = 100
+
+
 def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
     """Execute a tool and return text result."""
+    requested = args.get('limit')
+    try:
+        capped = tool in _PAGED_TOOLS and requested is not None and int(requested) > MAX_LIMIT
+    except (TypeError, ValueError):
+        capped = False
+    if not capped:
+        return _execute_tool(pm, tool, args)
+    text = _execute_tool(pm, tool, {**args, 'limit': MAX_LIMIT})
+    if text.startswith('Error'):
+        return text
+    return (f"{text}\n(limit={requested} урезан до {MAX_LIMIT} — больше за один вызов не "
+            f"выдаётся; остальное — через offset)")
 
+
+def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
     if tool == 'list_projects':
         projects = pm.list_projects()
         if not projects:
@@ -241,7 +291,7 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             try:
                 pm.remove_source(project_id, target)
                 return f"Source '{target}' removed (files + indexed data wiped)."
-            except (ValueError, KeyError) as e:
+            except (ReindexInProgressError, ValueError, KeyError) as e:
                 return f"Error: {e}"
 
         # Phase 2: BSL code analysis tools
@@ -290,7 +340,8 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             lines = content.split('\n')
             code = '\n'.join(lines[proc['start_line'] - 1:proc['end_line']])
             src = f"  @{outline['source_label']}" if outline.get('source_label') else ''
-            return (f"// {mod['name']}.{proc['name']}{src}\n"
+            return (_stale_module_warning(path, mod)
+                    + f"// {mod['name']}.{proc['name']}{src}\n"
                     f"// Lines {proc['start_line']}-{proc['end_line']}\n\n{code}")
 
         case 'get_call_tree':
@@ -339,10 +390,15 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             # модуль; если предел сработал, «показано всё» было бы неправдой.
             notes = []
             if truncated:
-                notes.append(
-                    f"выдача ограничена: просмотрено не больше {search_mod.SEARCH_CODE_FTS_MODULES} "
-                    f"модулей и не больше {search_mod.SEARCH_CODE_MAX_PER_MODULE} вхождений в модуле — "
-                    f"сузьте поиск через file_pattern или source_id")
+                # Называем только тот предел, который действительно сработал.
+                limits = []
+                if last.modules_cap:
+                    limits.append(f"просмотрено не больше {last.modules_cap} модулей")
+                if last.per_module_capped:
+                    limits.append(f"не больше {search_mod.SEARCH_CODE_MAX_PER_MODULE} "
+                                  f"строк с вхождениями в модуле")
+                notes.append(f"выдача ограничена: {' и '.join(limits)} — "
+                             f"сузьте поиск через file_pattern или source_id")
             if unreadable:
                 notes.append(f"не прочитано модулей: {unreadable} (файлы выгрузки недоступны "
                              f"на сервере) — выдача неполная")
@@ -403,8 +459,11 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             ]
             if result['missing']:
                 lines.append("")
-                for m in result['missing']:
+                shown = result['missing'][:DIAGNOSE_MISSING_SHOWN]
+                for m in shown:
                     lines.append(f"  ❌ {m['module']}:{m['line']}  {m['signature'][:120]}")
+                if len(shown) < result['missing_count']:
+                    lines.append(f"  … показано {len(shown)} из {result['missing_count']}")
             if result['extra']:
                 lines.append(f"\nExtra in index (not in files): {result['extra_count']}")
                 for e in result['extra'][:10]:

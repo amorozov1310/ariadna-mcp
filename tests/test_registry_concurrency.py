@@ -77,3 +77,114 @@ if __name__ == '__main__':
         import traceback
         print(f'  ❌ {e}')
         traceback.print_exc()
+
+
+# ============================================
+# Гонки при первом обращении (get_db) и при правке реестра двумя экземплярами
+# ============================================
+
+import threading
+
+
+def _in_threads(n: int, target) -> list:
+    barrier = threading.Barrier(n)
+    results: list = [None] * n
+    errors: list = []
+
+    def run(i):
+        try:
+            barrier.wait()
+            results[i] = target(i)
+        except Exception as e:          # pragma: no cover — упадёт assert ниже
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    return results
+
+
+def test_parallel_get_db_opens_one_database():
+    """Два потока пула SDK одновременно открывают проект — раньше создавались
+    два Database, и writer одного терялся."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        try:
+            pm.create_project('p1', 'p1')
+            dbs = _in_threads(16, lambda i: pm.get_db('p1'))
+            assert len({id(db) for db in dbs}) == 1
+            assert pm._db_pool['p1'] is dbs[0]
+        finally:
+            pm.close_all()
+
+
+def test_two_instances_creating_projects_in_parallel_lose_nothing():
+    """Web UI и MCP — разные ProjectManager одного процесса. Каждый делал
+    «перечитать → изменить → записать», и проект, созданный другим между
+    перечитыванием и записью, пропадал из реестра."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        managers = [ProjectManager(tmpdir), ProjectManager(tmpdir)]
+        try:
+            per_thread = 10
+
+            def create(i):
+                pm = managers[i % 2]
+                for k in range(per_thread):
+                    pm.create_project(f'p{i}_{k}', f'p{i}_{k}')
+
+            _in_threads(8, create)
+            expected = {f'p{i}_{k}' for i in range(8) for k in range(per_thread)}
+            fresh = ProjectManager(tmpdir)
+            assert {p.id for p in fresh.list_projects()} == expected
+            fresh.close_all()
+        finally:
+            for pm in managers:
+                pm.close_all()
+
+
+# ============================================
+# Windows: os.replace реестра при открытом на чтение projects.json
+# ============================================
+
+import os
+import pytest
+
+from src.core import project_manager as pm_module
+
+
+def _flaky_replace(monkeypatch, failures: int) -> list:
+    calls = []
+    real = os.replace
+
+    def replace(src, dst):
+        calls.append(dst)
+        if len(calls) <= failures:
+            raise PermissionError(13, 'Процесс не может получить доступ к файлу')
+        return real(src, dst)
+
+    monkeypatch.setattr(pm_module.os, 'replace', replace)
+    monkeypatch.setattr(pm_module, '_REPLACE_DELAY_SEC', 0)
+    return calls
+
+
+def test_registry_write_retries_permission_error(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        calls = _flaky_replace(monkeypatch, failures=3)
+        pm.create_project('p1', 'p1')
+        assert len(calls) == 4
+        assert [p.id for p in ProjectManager(tmpdir).list_projects()] == ['p1']
+        assert not list(Path(tmpdir).glob('*.tmp')), "временный файл не остался"
+
+
+def test_registry_write_gives_up_after_attempts(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        calls = _flaky_replace(monkeypatch, failures=10**6)
+        with pytest.raises(PermissionError):
+            pm.create_project('p1', 'p1')
+        assert len(calls) == pm_module._REPLACE_ATTEMPTS
+        assert not list(Path(tmpdir).glob('*.tmp'))

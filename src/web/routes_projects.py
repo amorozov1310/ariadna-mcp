@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 from .app import templates, get_pm
+from ..core.project_manager import ReindexInProgressError
 
 logger = logging.getLogger('ariadna')
 
@@ -263,6 +264,8 @@ async def remove_source(project_id: str, source_id: str):
     pm = get_pm()
     try:
         pm.remove_source(project_id, source_id)
+    except ReindexInProgressError as e:
+        raise HTTPException(409, f"Нельзя удалить источник: {e}")
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
     return RedirectResponse(f"/projects/{project_id}", status_code=303)
@@ -273,6 +276,8 @@ async def delete_project(project_id: str):
     pm = get_pm()
     try:
         pm.delete_project(project_id)
+    except ReindexInProgressError as e:
+        raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except KeyError as e:
         raise HTTPException(404, str(e))
     return JSONResponse({"status": "deleted", "project_id": project_id})
@@ -283,6 +288,8 @@ async def delete_project_post(project_id: str):
     pm = get_pm()
     try:
         pm.delete_project(project_id)
+    except ReindexInProgressError as e:
+        raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except KeyError as e:
         raise HTTPException(404, str(e))
     return RedirectResponse("/", status_code=303)

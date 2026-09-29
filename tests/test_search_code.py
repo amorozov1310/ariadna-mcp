@@ -301,3 +301,79 @@ def test_unreadable_and_limit_notes_agree(monkeypatch):
             assert ' of ' not in last, text
         finally:
             pm.close_all()
+
+
+# ============================================
+# Одна строка — одна запись; в оговорке — предел, который сработал
+# ============================================
+
+def _pm_with_xml_ru(tmpdir: str) -> ProjectManager:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as zf:
+        for path in (FIXTURES / 'xml_ru').rglob('*'):
+            if path.is_file():
+                zf.write(path, path.relative_to(FIXTURES / 'xml_ru'))
+    buf.seek(0)
+    pm = ProjectManager(data_dir=tmpdir)
+    pm.create_project('p1', 'p1')
+    with open(FIXTURES / 'report_ru.txt', 'rb') as f:
+        pm.add_source('p1', 'main', 'Main', report_file=f,
+                      xml_archive=buf, xml_archive_filename='x.zip')
+    pm.reindex('p1')
+    return pm
+
+
+def test_several_matches_on_one_line_give_one_result():
+    """В ФормаЭлемента на строках 14, 23, 56 по две кавычки — раньше каждая
+    строка выдавалась дважды с одинаковым модуль:строка и контекстом."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_ru(tmpdir)
+        try:
+            results = pm.get_search('p1').search_code_limited(
+                '"', file_pattern='ФормаЭлемента', limit=50).results
+            keys = [(r['module_name'], r['line']) for r in results]
+            assert keys and len(keys) == len(set(keys)), keys
+            assert [line for _, line in keys] == [14, 23, 56], keys
+        finally:
+            pm.close_all()
+
+
+def test_per_module_limit_counts_lines_not_occurrences(monkeypatch):
+    monkeypatch.setattr(search_module, 'SEARCH_CODE_MAX_PER_MODULE', 2)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_ru(tmpdir)
+        try:
+            res = pm.get_search('p1').search_code_limited('"', file_pattern='ФормаЭлемента', limit=50)
+            assert [r['line'] for r in res.results] == [14, 23]
+            assert res.per_module_capped and res.truncated
+        finally:
+            pm.close_all()
+
+
+def test_limit_note_names_the_cap_that_fired(monkeypatch):
+    """`"` FTS не находит (нет слов) — сработал резервный путь; раньше текст
+    всё равно называл предел FTS в 50 модулей."""
+    monkeypatch.setattr(search_module, 'SEARCH_CODE_FALLBACK_MODULES', 2)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_ru(tmpdir)
+        try:
+            res = pm.get_search('p1').search_code_limited('"', limit=50)
+            assert res.modules_cap == 2 and res.truncated
+            text = execute_tool(pm, 'search_code', {'project_id': 'p1', 'query': '"'})
+            assert 'просмотрено не больше 2 модулей' in text, text
+            assert f'не больше {search_module.SEARCH_CODE_FTS_MODULES} модулей' not in text, text
+        finally:
+            pm.close_all()
+
+    monkeypatch.setattr(search_module, 'SEARCH_CODE_FTS_MODULES', 1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_ru(tmpdir)
+        try:
+            res = pm.get_search('p1').search_code_limited('Возврат', limit=50)
+            assert res.modules_cap == 1, res
+            text = execute_tool(pm, 'search_code', {'project_id': 'p1', 'query': 'Возврат'})
+            assert 'просмотрено не больше 1 модулей' in text, text
+            # Предел строк на модуль не сработал — о нём ни слова.
+            assert 'строк с вхождениями' not in text, text
+        finally:
+            pm.close_all()

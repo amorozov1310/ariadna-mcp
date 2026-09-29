@@ -3,12 +3,33 @@ Indexer: parses a configuration report and populates per-project SQLite.
 Each call indexes one source (report.txt) into the project's DB.
 """
 
+import hashlib
 import time
 from pathlib import Path
 from datetime import datetime
 
 from .db import Database
 from .report_parser import parse_report, MetadataObject
+
+
+def module_file_hash(file_path: str | Path, form_xml_path: str | Path = '') -> str:
+    """modules.file_hash: md5 байтов .bsl, у модуля формы — вместе с её
+    Form.xml: реквизиты формы влияют на разбор её модуля (см.
+    read_form_attributes), так что правка одного Form.xml тоже должна
+    переразобрать модуль. Бросает OSError, если файл не прочитать."""
+    hasher = hashlib.md5(Path(file_path).read_bytes())
+    if form_xml_path:
+        hasher.update(Path(form_xml_path).read_bytes())
+    return hasher.hexdigest()
+
+
+def form_xml_for_module(file_path: str | Path, module_type: str) -> str:
+    """Form.xml модуля формы (…/Ext/Form/Module.bsl → …/Ext/Form.xml) — как
+    его находит XMLWalker; '' — не модуль формы или файла нет."""
+    if module_type != 'МодульФормы':
+        return ''
+    form_xml = Path(file_path).parent.parent / 'Form.xml'
+    return str(form_xml) if form_xml.exists() else ''
 
 
 class Indexer:
@@ -313,7 +334,6 @@ class Indexer:
         force_reparse — переразобрать все файлы, не глядя на хеш: результат
         разбора устарел из-за смены самого парсера (см. parser_fingerprint).
         """
-        import hashlib
         from .xml_walker import XMLWalker, read_form_attributes
         from .bsl_reference import module_context_vars, module_context_methods
         from .bsl_parser import BSLParser
@@ -368,13 +388,7 @@ class Indexer:
             # Hash first, before any parsing — an unchanged file costs one
             # file read instead of a full parse + a batch of DB writes.
             try:
-                hasher = hashlib.md5(Path(mf.file_path).read_bytes())
-                # Реквизиты формы влияют на разбор её модуля (см.
-                # read_form_attributes), так что правка одного Form.xml
-                # тоже должна переразобрать модуль.
-                if mf.form_xml_path:
-                    hasher.update(Path(mf.form_xml_path).read_bytes())
-                file_hash = hasher.hexdigest()
+                file_hash = module_file_hash(mf.file_path, mf.form_xml_path)
             except Exception:
                 file_hash = ''
 
@@ -719,3 +733,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{stats.total_modules}, процедур {stats.total_procedures}, вызовов "
           f"{stats.total_calls}, {stats.duration_sec} с")
     return 0
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(main())

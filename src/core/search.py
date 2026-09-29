@@ -38,6 +38,10 @@ class CodeSearchResult(NamedTuple):
     truncated: bool       # сработал один из пределов SEARCH_CODE_*
     unreadable: int       # модулей-кандидатов, чей файл не удалось прочитать
     readable: int         # модулей-кандидатов, прочитанных с диска
+    # Какой предел числа модулей сработал: SEARCH_CODE_FTS_MODULES (обычный
+    # путь) или SEARCH_CODE_FALLBACK_MODULES (резервный); None — ни один.
+    modules_cap: int | None = None
+    per_module_capped: bool = False   # в каком-то модуле строк больше SEARCH_CODE_MAX_PER_MODULE
 
 
 def _fts_rows(conn, sql: str, params) -> list:
@@ -535,10 +539,10 @@ class SearchEngine:
             WHERE {where}
             ORDER BY m.name LIMIT ?""", params + [cap + 1])
         fts_capped = len(rows) > cap
+        modules_cap = cap if fts_capped else None
 
         results, per_module_capped, unreadable, readable = self._extract_code_matches(
             rows[:cap], query, limit, offset=offset)
-        truncated = fts_capped or per_module_capped
 
         # Fallback (D5: case-insensitive) — covers queries FTS5's unicode61
         # tokenizer won't prefix-match (e.g. leading punctuation). No stored
@@ -559,18 +563,23 @@ class SearchEngine:
             rows = conn.execute(f"""
                 SELECT id as module_id, name as module_name, file_path, abs_path, source_id
                 FROM modules WHERE {w} LIMIT ?""", p + [cap + 1]).fetchall()
-            results, per_module_capped, fb_unreadable, fb_readable = self._extract_code_matches(
+            results, fb_per_module, fb_unreadable, fb_readable = self._extract_code_matches(
                 rows[:cap], query, limit, offset=offset)
-            fallback_truncated = len(rows) > cap or per_module_capped
-            # Пустой ответ при сработавшем пределе любого из путей — тоже
-            # неполный: вхождение может быть в непросмотренном модуле.
-            truncated = fallback_truncated if results else (truncated or fallback_truncated)
+            fb_modules_cap = cap if len(rows) > cap else None
+            if results:
+                modules_cap, per_module_capped = fb_modules_cap, fb_per_module
+            else:
+                # Пустой ответ при сработавшем пределе любого из путей — тоже
+                # неполный: вхождение может быть в непросмотренном модуле.
+                modules_cap = fb_modules_cap or modules_cap
+                per_module_capped = per_module_capped or fb_per_module
             # Резервный путь просматривает модули шире FTS-кандидатов, поэтому
             # его счётчики и описывают итог.
             unreadable, readable = fb_unreadable, fb_readable
 
-        return CodeSearchResult(self._attach_source_labels(results), truncated,
-                                unreadable, readable)
+        return CodeSearchResult(self._attach_source_labels(results),
+                                bool(modules_cap) or per_module_capped, unreadable, readable,
+                                modules_cap=modules_cap, per_module_capped=per_module_capped)
 
     def _extract_code_matches(self, rows, query: str, limit: int,
                                max_per_module: int | None = None,
@@ -587,7 +596,8 @@ class SearchEngine:
         there's no SQL LIMIT/OFFSET here since matches are found by
         scanning file text, not a query.
 
-        Возвращает (вхождения, в каком-то модуле вхождений больше
+        Каждая строка с вхождениями — одна запись. Возвращает (вхождения,
+        в каком-то модуле строк с вхождениями больше
         max_per_module — по умолчанию SEARCH_CODE_MAX_PER_MODULE — и лишние
         пропущены, модулей не прочитано, модулей прочитано). Считаются только
         модули, до которых дошёл просмотр.
@@ -621,7 +631,11 @@ class SearchEngine:
                 if idx == -1:
                     break
                 hits += 1
-                start = idx + len(needle)
+                # Одна строка — одна запись: остальные вхождения на той же
+                # строке дали бы дубли с тем же модуль:строка и контекстом
+                # (запрос `"`), и max_per_module считает строки, а не вхождения.
+                eol = hay.find('\n', idx)
+                start = len(hay) if eol == -1 else eol + 1
                 if skipped < offset:
                     skipped += 1
                     continue

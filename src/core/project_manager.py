@@ -14,6 +14,7 @@ import os
 import threading
 import zipfile
 import tarfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,30 @@ logger = logging.getLogger('ariadna')
 # different projects/data dirs run concurrently.
 _REINDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _REINDEX_LOCKS_GUARD = threading.Lock()
+
+# Реестр projects.json меняют несколько ProjectManager одного процесса (Web UI,
+# MCP SSE и HTTP — см. main.py), каждый по схеме «перечитать → изменить →
+# записать». Без общей блокировки правка другого экземпляра между
+# перечитыванием и записью затиралась. Поэтому блокировка — на процесс и на
+# путь реестра, как _REINDEX_LOCKS; RLock — CRUD-методы вызывают друг друга
+# (get_project → _load_registry → _save_registry при миграции). Под ней
+# только работа с реестром: распаковка архивов, удаление файлов и
+# переиндексация идут снаружи.
+_REGISTRY_LOCKS: dict[str, threading.RLock] = {}
+
+# Повторы os.replace при записи реестра (Windows, см. _write_registry_file):
+# 10 попыток с паузой 20, 40, … мс — в сумме до ~0,9 с.
+_REPLACE_ATTEMPTS = 10
+_REPLACE_DELAY_SEC = 0.02
+
+
+class ReindexInProgressError(RuntimeError):
+    """Удаление отклонено: у проекта идёт переиндексация."""
+
+    def __init__(self, project_id: str):
+        super().__init__(f"идёт переиндексация проекта '{project_id}' — повторите после "
+                         f"её завершения (get_index_status)")
+        self.project_id = project_id
 
 
 def _copy_sqlite(src: Path, dst: Path) -> None:
@@ -113,6 +138,10 @@ class ProjectManager:
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
         self._db_pool: dict[str, Database] = {}
+        # Пул открывают несколько потоков (пул SDK, фоновая переиндексация):
+        # без блокировки два потока создавали два Database на один проект, и
+        # writer одного терялся.
+        self._db_lock = threading.Lock()
         self._registry: dict[str, ProjectInfo] | None = None
         # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
         # собственной записи; None — кэш не сверен с диском.
@@ -124,6 +153,15 @@ class ProjectManager:
     # ============================================
     # REGISTRY
     # ============================================
+
+    def _registry_lock(self) -> threading.RLock:
+        """Общая на процесс блокировка реестра по его пути (_REGISTRY_LOCKS)."""
+        key = str(self.registry_path.resolve())
+        with _REINDEX_LOCKS_GUARD:
+            lock = _REGISTRY_LOCKS.get(key)
+            if lock is None:
+                lock = _REGISTRY_LOCKS[key] = threading.RLock()
+            return lock
 
     def _registry_signature(self) -> tuple[int, int] | None:
         try:
@@ -186,7 +224,18 @@ class ProjectManager:
         tmp = self.registry_path.with_name(
             f'{self.registry_path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-        os.replace(tmp, self.registry_path)
+        # На Windows os.replace падает с PermissionError, пока другой поток
+        # держит projects.json открытым на чтение (_load_registry) — это доли
+        # миллисекунды, поэтому несколько коротких повторов.
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, self.registry_path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(_REPLACE_DELAY_SEC * (attempt + 1))
 
     @classmethod
     def _project_from_dict(cls, pdata: dict) -> tuple['ProjectInfo', bool]:
@@ -256,6 +305,10 @@ class ProjectManager:
         диске, чтобы не потерять источник, добавленный через Web UI во время
         долгого прогона, и не вернуть удалённый.
         """
+        with self._registry_lock():
+            self._save_project_to_disk_locked(project_id, project)
+
+    def _save_project_to_disk_locked(self, project_id: str, project: 'ProjectInfo | None'):
         if project is None:
             project = self._load_registry().get(project_id)
             if project is None:
@@ -299,6 +352,10 @@ class ProjectManager:
 
     def create_project(self, project_id: str, name: str, description: str = '') -> ProjectInfo:
         """Create a new project. Returns ProjectInfo."""
+        with self._registry_lock():
+            return self._create_project(project_id, name, description)
+
+    def _create_project(self, project_id: str, name: str, description: str) -> ProjectInfo:
         registry = self._load_registry()
 
         if project_id in registry:
@@ -334,26 +391,47 @@ class ProjectManager:
 
     def update_project(self, project_id: str, **kwargs) -> ProjectInfo:
         """Update project fields (name, description, status)."""
-        project = self.get_project(project_id)
-        for key, value in kwargs.items():
-            if hasattr(project, key) and key not in ('id', 'created_at', 'sources', 'index_stats'):
-                setattr(project, key, value)
-        self._save_registry()
-        return project
+        with self._registry_lock():
+            project = self.get_project(project_id)
+            for key, value in kwargs.items():
+                if hasattr(project, key) and key not in ('id', 'created_at', 'sources', 'index_stats'):
+                    setattr(project, key, value)
+            self._save_registry()
+            return project
+
+    @contextmanager
+    def _no_reindex(self, project_id: str):
+        """Блокировка переиндексации проекта на время удаления, без ожидания.
+
+        Удаление чистит строки тем же writer'ом, которым пишет индексатор: во
+        время прогона оно могло оставить в индексе строки уже удалённого
+        источника (индексатор дописал их после чистки). Ждать прогон нельзя —
+        он идёт минутами, поэтому отказ с ReindexInProgressError."""
+        lock = self._reindex_lock(project_id)
+        if not lock.acquire(blocking=False):
+            raise ReindexInProgressError(project_id)
+        try:
+            yield
+        finally:
+            lock.release()
 
     def delete_project(self, project_id: str):
-        """Delete project and all its data from disk."""
-        registry = self._load_registry()
-        if project_id not in registry:
-            raise KeyError(f"Project '{project_id}' not found")
-        project = registry[project_id]
+        """Delete project and all its data from disk. Во время переиндексации
+        проекта — ReindexInProgressError, ничего не удаляется."""
+        with self._no_reindex(project_id):
+            self._delete_project(project_id)
+
+    def _delete_project(self, project_id: str):
+        self.get_project(project_id)          # KeyError, если проекта нет
 
         # Close DB if open
-        if project_id in self._db_pool:
-            self._db_pool[project_id].close()
-            del self._db_pool[project_id]
+        with self._db_lock:
+            db = self._db_pool.pop(project_id, None)
+        if db is not None:
+            db.close()
 
-        # Remove from disk
+        # Remove from disk — долго на больших выгрузках, поэтому вне
+        # блокировки реестра.
         project_dir = self.projects_dir / project_id
         if project_dir.exists():
             shutil.rmtree(project_dir)
@@ -361,8 +439,10 @@ class ProjectManager:
         if index_parent != project_dir and index_parent.exists():
             shutil.rmtree(index_parent)
 
-        del registry[project_id]
-        self._save_registry()
+        with self._registry_lock():
+            registry = self._load_registry()
+            if registry.pop(project_id, None) is not None:
+                self._save_registry()
 
     # ============================================
     # SOURCE MANAGEMENT
@@ -388,12 +468,13 @@ class ProjectManager:
         If files are None, assumes they are already at the expected paths
         (volume mount scenario).
         """
-        project = self.get_project(project_id)
+        def check_new(project: ProjectInfo):
+            if any(s.id == source_id for s in project.sources):
+                raise ValueError(f"Source '{source_id}' already exists in project '{project_id}'")
 
-        # Check for duplicate source_id
-        if any(s.id == source_id for s in project.sources):
-            raise ValueError(f"Source '{source_id}' already exists in project '{project_id}'")
+        check_new(self.get_project(project_id))
 
+        # Файлы — вне блокировки реестра: распаковка архива идёт минутами.
         source_dir = self.projects_dir / project_id / 'sources' / source_id
         source_dir.mkdir(parents=True, exist_ok=True)
 
@@ -437,8 +518,12 @@ class ProjectManager:
             report_path=report_path,
             xml_path=xml_path,
         )
-        project.sources.append(source)
-        self._save_registry()
+        with self._registry_lock():
+            # Реестр мог измениться, пока распаковывался архив.
+            project = self.get_project(project_id)
+            check_new(project)
+            project.sources.append(source)
+            self._save_registry()
         return source
 
     def update_source(
@@ -463,11 +548,17 @@ class ProjectManager:
         Caller must run ``reindex(project_id, source_id=source_id)`` afterwards
         to refresh the database.
         """
-        project = self.get_project(project_id)
-        source = next((s for s in project.sources if s.id == source_id), None)
-        if source is None:
-            raise ValueError(f"Source '{source_id}' not found in project '{project_id}'")
+        def find_source() -> SourceInfo:
+            project = self.get_project(project_id)
+            source = next((s for s in project.sources if s.id == source_id), None)
+            if source is None:
+                raise ValueError(f"Source '{source_id}' not found in project '{project_id}'")
+            return source
 
+        find_source()
+        changes: dict = {}
+
+        # Файлы — вне блокировки реестра: распаковка архива идёт минутами.
         source_dir = self.projects_dir / project_id / 'sources' / source_id
         source_dir.mkdir(parents=True, exist_ok=True)
 
@@ -477,7 +568,7 @@ class ProjectManager:
             with open(report_dest, 'wb') as f:
                 while chunk := report_file.read(8192):
                     f.write(chunk)
-            source.report_path = f'sources/{source_id}/report.txt'
+            changes['report_path'] = f'sources/{source_id}/report.txt'
 
         # Replace XML archive
         if xml_archive is not None:
@@ -497,18 +588,22 @@ class ProjectManager:
                 except zipfile.BadZipFile:
                     xml_archive.seek(0)
                     self._extract_tar(xml_archive, xml_dest)
-            source.xml_path = f'sources/{source_id}/xml'
+            changes['xml_path'] = f'sources/{source_id}/xml'
 
         # Update metadata fields
         if label is not None:
-            source.label = label
+            changes['label'] = label
         if source_type is not None:
-            source.source_type = source_type
+            changes['source_type'] = source_type
 
         # Reset indexed timestamp so dashboard shows source needs reindex
-        source.indexed_at = ''
+        changes['indexed_at'] = ''
 
-        self._save_registry()
+        with self._registry_lock():
+            source = find_source()          # реестр мог измениться за распаковку
+            for key, value in changes.items():
+                setattr(source, key, value)
+            self._save_registry()
         return source
 
     def preview_remove_source(self, project_id: str, source_id: str) -> dict:
@@ -560,7 +655,13 @@ class ProjectManager:
         }
 
     def remove_source(self, project_id: str, source_id: str):
-        """Remove source from project (registry, files, AND indexed DB rows)."""
+        """Remove source from project (registry, files, AND indexed DB rows).
+        Во время переиндексации проекта — ReindexInProgressError, ничего не
+        удаляется (см. _no_reindex)."""
+        with self._no_reindex(project_id):
+            self._remove_source(project_id, source_id)
+
+    def _remove_source(self, project_id: str, source_id: str):
         project = self.get_project(project_id)
         source = next((s for s in project.sources if s.id == source_id), None)
         if source is None:
@@ -577,15 +678,16 @@ class ProjectManager:
             # If DB doesn't exist yet (project never indexed), skip — not fatal
             pass
 
-        # Remove from registry
-        project.sources = [s for s in project.sources if s.id != source_id]
-
-        # Remove source directory
+        # Remove source directory — вне блокировки реестра.
         source_dir = self.projects_dir / project_id / 'sources' / source_id
         if source_dir.exists():
             shutil.rmtree(source_dir)
 
-        self._save_registry()
+        # Remove from registry
+        with self._registry_lock():
+            project = self.get_project(project_id)
+            project.sources = [s for s in project.sources if s.id != source_id]
+            self._save_registry()
 
     def get_source_report_path(self, project_id: str, source_id: str) -> Path | None:
         """Get absolute path to source's report.txt."""
@@ -660,17 +762,17 @@ class ProjectManager:
 
     def get_db(self, project_id: str) -> Database:
         """Get or open SQLite connection for project."""
-        if project_id in self._db_pool:
-            db = self._db_pool[project_id]
-            if db.conn:
+        with self._db_lock:
+            db = self._db_pool.get(project_id)
+            if db is not None and db.conn:
                 return db
 
-        db_path = str(self._index_path(project_id))
-        db = Database(db_path)
-        db.connect()
-        db.init_schema()
-        self._db_pool[project_id] = db
-        return db
+            db_path = str(self._index_path(project_id))
+            db = Database(db_path)
+            db.connect()
+            db.init_schema()
+            self._db_pool[project_id] = db
+            return db
 
     def get_search(self, project_id: str) -> SearchEngine:
         """Get SearchEngine instance for project."""
@@ -879,24 +981,27 @@ class ProjectManager:
         возвращается в 'ready', если он хоть раз успешно индексировался, и
         в 'empty', если нет. Возвращает id тронутых проектов.
         """
-        reset: list[str] = []
-        for project in self._load_registry().values():
-            if project.status != 'indexing':
-                continue
-            project.status = 'ready' if project.index_stats.last_indexed else 'empty'
-            reset.append(project.id)
+        reset: dict[str, str] = {}
+        with self._registry_lock():
+            for project in self._load_registry().values():
+                if project.status != 'indexing':
+                    continue
+                project.status = 'ready' if project.index_stats.last_indexed else 'empty'
+                reset[project.id] = project.status
+            if reset:
+                self._save_registry()
+        for project_id, status in reset.items():
             try:
-                db = self.get_db(project.id)
-                db.update_state(status=project.status, progress_phase='',
+                db = self.get_db(project_id)
+                db.update_state(status=status, progress_phase='',
                                  progress_current=0, progress_total=0)
             except Exception:
-                logger.exception("Не удалось сбросить index_state проекта %s", project.id)
+                logger.exception("Не удалось сбросить index_state проекта %s", project_id)
         if reset:
-            self._save_registry()
             logger.warning(
                 "Статус 'indexing' был протухшим (прогон не пережил перезапуск) "
                 "и сброшен у проектов: %s", ', '.join(reset))
-        return reset
+        return list(reset)
 
     # Сколько задание может числиться «выполняется», прежде чем считать,
     # что агент до него не дошёл. Выгрузка ERP занимает минуты; шесть часов
@@ -1100,6 +1205,8 @@ class ProjectManager:
 
     def close_all(self):
         """Close all open database connections."""
-        for db in self._db_pool.values():
+        with self._db_lock:
+            pool = list(self._db_pool.values())
+            self._db_pool.clear()
+        for db in pool:
             db.close()
-        self._db_pool.clear()

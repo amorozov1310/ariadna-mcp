@@ -40,6 +40,13 @@ python -m src.main                 # Web UI :9878, MCP :9879/mcp, SSE :9877/sse
 Зависимости: `pip install -e ".[dev]"`, генерация отчёта из XML —
 `pip install -e ".[xml-report]"`.
 
+Список зависимостей — только в `pyproject.toml`: Docker-образ ставит их
+офлайн из `docker-wheels/`, а `docker-wheels/fetch.sh` и `Dockerfile` берут
+список оттуда (`scripts/docker_requirements.py`). После правки зависимостей
+обновить колёса (из корня репозитория; на Windows — из PowerShell с полным
+путём, Git Bash портит пути в `-v`):
+`docker run --rm -v "$PWD:/repo" -w /repo python:3.12-slim sh docker-wheels/fetch.sh`.
+
 CI (`.github/workflows/tests.yml`) прогоняет быстрые тесты на каждый push
 и pull request — перед тем как просить смержить PR, убедитесь, что они
 зелёные локально.

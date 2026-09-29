@@ -18,6 +18,9 @@ docker-wheels/*
 __pycache__/
 *.py[cod]
 *.egg-info/
+# Сборка колеса (pip wheel ., python -m build) оставляет их в рабочем дереве.
+build/
+dist/
 .pytest_cache/
 .ruff_cache/
 
