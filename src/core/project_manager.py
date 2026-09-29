@@ -88,6 +88,9 @@ class ProjectManager:
         self.registry_path = self.data_dir / 'projects.json'
         self._db_pool: dict[str, Database] = {}
         self._registry: dict[str, ProjectInfo] | None = None
+        # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
+        # собственной записи; None — кэш не сверен с диском.
+        self._registry_sig: tuple[int, int] | None = None
 
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -96,13 +99,30 @@ class ProjectManager:
     # REGISTRY
     # ============================================
 
+    def _registry_signature(self) -> tuple[int, int] | None:
+        try:
+            st = self.registry_path.stat()
+        except FileNotFoundError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
     def _load_registry(self) -> dict[str, ProjectInfo]:
-        """Load project registry from JSON."""
-        if self._registry is not None:
-            return self._registry
+        """Реестр проектов из projects.json.
+
+        В одном процессе работают несколько независимых ProjectManager (MCP
+        SSE, MCP HTTP и Web UI — см. main.py), и каждый может менять файл.
+        Поэтому кэш отдаётся, только пока файл не изменился с последней
+        загрузки или собственной записи, иначе реестр перечитывается —
+        иначе MCP не видел проектов и источников, добавленных через Web UI,
+        и затирал их своей устаревшей копией.
+        """
+        cached = self._registry
+        sig = self._registry_signature()
+        if cached is not None and sig is not None and sig == self._registry_sig:
+            return cached
 
         migrated = False
-        if self.registry_path.exists():
+        if sig is not None:
             try:
                 data = json.loads(self.registry_path.read_text(encoding='utf-8'))
                 projects = {}
@@ -110,11 +130,19 @@ class ProjectManager:
                     project, dropped = self._project_from_dict(pdata)
                     projects[pid] = project
                     migrated = migrated or dropped
-                self._registry = projects
-            except (json.JSONDecodeError, TypeError):
-                self._registry = {}
+            except (json.JSONDecodeError, TypeError, OSError):
+                if cached is not None:
+                    # Файл, скорее всего, пишет другой экземпляр прямо сейчас.
+                    # Пустой реестр здесь опасен: следующая запись затёрла бы
+                    # им настоящий. Отдаём прежний кэш, повторим в следующий раз.
+                    return cached
+                projects = {}
+                sig = None
+            self._registry = projects
+            self._registry_sig = sig
         else:
             self._registry = {}
+            self._registry_sig = None
 
         if migrated:
             # Записать сразу, чтобы отброшенные поля не разбирались заново
@@ -125,6 +153,14 @@ class ProjectManager:
                 logger.exception("Не удалось записать обновлённый реестр проектов")
 
         return self._registry
+
+    def _write_registry_file(self, data: dict):
+        """Атомарная запись projects.json: другой экземпляр, перечитывающий
+        файл, не должен увидеть его наполовину записанным."""
+        tmp = self.registry_path.with_name(
+            f'{self.registry_path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        os.replace(tmp, self.registry_path)
 
     @classmethod
     def _project_from_dict(cls, pdata: dict) -> tuple['ProjectInfo', bool]:
@@ -173,32 +209,31 @@ class ProjectManager:
         working from is essentially current. NOT used by reindex() — see
         _save_project_to_disk for why a long background job needs a
         narrower write."""
-        registry = self._load_registry()
+        # Именно текущий кэш, без повторного _load_registry(): вызывающий уже
+        # изменил в нём проект, а перечитывание (если файл успел поменять
+        # другой экземпляр) выбросило бы эти изменения.
+        registry = self._registry if self._registry is not None else self._load_registry()
         data = {'projects': {pid: self._project_to_dict(proj) for pid, proj in registry.items()}}
-        self.registry_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding='utf-8'
-        )
+        self._write_registry_file(data)
+        self._registry_sig = self._registry_signature()
 
-    def _save_project_to_disk(self, project_id: str):
-        """Persist just this one project's current in-memory state,
-        re-reading the registry file first and touching only this
-        project's entry (Этап 4/D7).
+    def _save_project_to_disk(self, project_id: str, project: 'ProjectInfo | None' = None):
+        """Записать результат переиндексации одного проекта, перечитав файл
+        и не трогая остальные проекты (Этап 4/D7).
 
-        _save_registry() dumps this whole ProjectManager instance's
-        cached registry — fine for a quick CRUD call, but reindex_async()
-        can run for minutes, and main.py runs the Web UI and the MCP
-        server as two independent ProjectManager instances in the same
-        process. If either one saves the full registry while the other's
-        background reindex is still in flight, it clobbers that reindex's
-        eventual status='ready' with whatever stale copy it had cached of
-        that project at its own startup. Reading fresh and touching only
-        one key sidesteps that regardless of who else wrote what.
+        reindex() держит свой объект проекта всё время прогона и передаёт
+        его сюда: реестр за это время мог перечитаться, и registry[project_id]
+        — уже другой объект, без статуса, который выставляет reindex. Из
+        объекта берутся только поля, которыми владеет переиндексация
+        (status, index_stats и у уже известных источников indexed_at/
+        report_path); остальное — список источников, имя — остаётся как на
+        диске, чтобы не потерять источник, добавленный через Web UI во время
+        долгого прогона, и не вернуть удалённый.
         """
-        registry = self._load_registry()
-        project = registry.get(project_id)
         if project is None:
-            return
+            project = self._load_registry().get(project_id)
+            if project is None:
+                return
 
         disk: dict = {'projects': {}}
         if self.registry_path.exists():
@@ -206,12 +241,27 @@ class ProjectManager:
                 disk = json.loads(self.registry_path.read_text(encoding='utf-8'))
             except (json.JSONDecodeError, TypeError):
                 disk = {'projects': {}}
-        disk.setdefault('projects', {})[project_id] = self._project_to_dict(project)
+        projects = disk.setdefault('projects', {})
+        ours = self._project_to_dict(project)
+        entry = projects.get(project_id)
+        if entry is None:
+            projects[project_id] = ours
+        else:
+            entry['status'] = ours['status']
+            entry['index_stats'] = ours['index_stats']
+            our_sources = {s['id']: s for s in ours['sources']}
+            for src in entry.get('sources', []):
+                mine = our_sources.get(src.get('id'))
+                if mine is None:
+                    continue
+                src['indexed_at'] = mine['indexed_at']
+                if mine['report_path']:
+                    src['report_path'] = mine['report_path']
 
-        self.registry_path.write_text(
-            json.dumps(disk, ensure_ascii=False, indent=2),
-            encoding='utf-8'
-        )
+        self._write_registry_file(disk)
+        # Кэш этого экземпляра с записанным файлом не совпадает (остальные
+        # проекты и источники взяты с диска) — перечитать при следующем обращении.
+        self._registry_sig = None
 
     # ============================================
     # PROJECT CRUD
@@ -588,7 +638,7 @@ class ProjectManager:
         # and MCP server each run their own — see main.py) during however
         # long this reindex takes.
         project.status = 'indexing'
-        self._save_project_to_disk(project_id)
+        self._save_project_to_disk(project_id, project)
         db.update_state(status='indexing', progress_current=0, progress_total=0,
                          progress_phase='scanning')
 
@@ -689,13 +739,13 @@ class ProjectManager:
             project.status = 'ready'
             db.update_state(status='ready', progress_phase='', progress_current=0,
                              progress_total=0, index_duration_sec=total_stats.duration_sec)
-            self._save_project_to_disk(project_id)
+            self._save_project_to_disk(project_id, project)
 
             return total_stats
 
         except Exception as e:
             project.status = 'error'
-            self._save_project_to_disk(project_id)
+            self._save_project_to_disk(project_id, project)
             db.update_state(status='error', progress_phase='')
             raise
         finally:
