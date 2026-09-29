@@ -218,6 +218,45 @@ def test_remove_source_confirmed_unknown_source_errors_instead_of_reporting_remo
 
 
 # ============================================
+# reindex: неизвестный source_id
+# ============================================
+
+def test_reindex_unknown_source_errors_without_starting_background_run(monkeypatch):
+    """Раньше инструмент отвечал «Reindex started», а фоновый reindex()
+    падал с KeyError и оставлял проекту status='error'."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_project(tmpdir)
+        try:
+            started = []
+            monkeypatch.setattr(pm, 'reindex_async',
+                                lambda *a, **kw: started.append((a, kw)) or {'status': 'started'})
+            result = execute_tool(pm, 'reindex', {'project_id': 'p1', 'source_id': 'ghost'})
+            assert result.startswith('Error'), result
+            assert 'main' in result, "ошибка перечисляет доступные источники"
+            assert started == [], "фоновый прогон не должен стартовать"
+            assert pm.get_project('p1').status == 'ready'
+        finally:
+            pm.close_all()
+
+
+def test_background_reindex_failure_is_logged(caplog):
+    import logging
+    import threading
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_project(tmpdir)
+        try:
+            with caplog.at_level(logging.ERROR, logger='ariadna'):
+                assert pm.reindex_async('p1', source_id='ghost')['status'] == 'started'
+                for t in threading.enumerate():
+                    if t.name == 'reindex-p1':
+                        t.join(timeout=30)
+            assert any(r.exc_info and 'ghost' in r.getMessage() + str(r.exc_info[1])
+                       for r in caplog.records), caplog.text
+        finally:
+            pm.close_all()
+
+
+# ============================================
 # get_call_tree: max_nodes hard cap (Этап 6 token budget)
 # ============================================
 

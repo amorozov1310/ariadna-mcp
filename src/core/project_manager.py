@@ -774,7 +774,9 @@ class ProjectManager:
             try:
                 self.reindex(project_id, source_id=source_id)
             except Exception:
-                pass  # reindex() already records status='error' in the registry
+                # status='error' reindex() уже записал; причина нужна в логе.
+                logger.exception("Фоновая переиндексация проекта %s (источник %s) упала",
+                                 project_id, source_id or 'все')
             finally:
                 lock.release()
 

@@ -195,7 +195,13 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             # Этап 4/D7: never blocks — starts in the background and
             # returns immediately, so an ERP-scale corpus can't time out
             # the MCP call. Poll get_index_status for progress/completion.
-            result = pm.reindex_async(project_id, source_id=args.get('source_id') or None)
+            # Проверка до старта: иначе фоновый reindex() упал бы с KeyError уже
+            # после ответа «started» и оставил бы проекту status='error'.
+            if source_id:
+                error = _unknown_source_error(pm, project_id, source_id)
+                if error:
+                    return error
+            result = pm.reindex_async(project_id, source_id=source_id)
             if result['status'] == 'already_running':
                 return (
                     f"Reindex already in progress for '{project_id}'. "
