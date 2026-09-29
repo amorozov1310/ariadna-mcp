@@ -168,3 +168,76 @@ if __name__ == '__main__':
             traceback.print_exc()
             failed += 1
     print(f'\n{passed} passed, {failed} failed')
+
+
+# ============================================
+# Пределы search_code: сработавший предел не выдаётся за полную выдачу
+# ============================================
+
+import io
+import zipfile
+
+from src.core import search as search_module
+from src.core.project_manager import ProjectManager
+from src.mcp_server.tools import execute_tool
+
+
+def _pm_with_xml_en(tmpdir: str) -> ProjectManager:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as zf:
+        for path in (FIXTURES / 'xml_en').rglob('*'):
+            if path.is_file():
+                zf.write(path, path.relative_to(FIXTURES / 'xml_en'))
+    buf.seek(0)
+    pm = ProjectManager(data_dir=tmpdir)
+    pm.create_project('p1', 'p1')
+    with open(FIXTURES / 'report_en.txt', 'rb') as f:
+        pm.add_source('p1', 'main', 'Main', report_file=f,
+                      xml_archive=buf, xml_archive_filename='x.zip')
+    pm.reindex('p1')
+    return pm
+
+
+def test_per_module_limit_is_reported_not_shown_as_complete():
+    """В CommonAtServer «EndProcedure» встречается больше 5 раз — предел
+    вхождений на модуль срабатывает. Раньше последняя строка была
+    «shown 5 of 5», хотя вхождений больше."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_en(tmpdir)
+        try:
+            text = execute_tool(pm, 'search_code', {'query': 'EndProcedure',
+                                                    'file_pattern': 'CommonAtServer'})
+            assert text.count('CommonAtServer') >= 1
+            assert 'shown 5 of 5' not in text, text
+            assert 'выдача ограничена' in text and 'file_pattern' in text, text
+        finally:
+            pm.close_all()
+
+
+def test_module_limit_is_reported(monkeypatch):
+    monkeypatch.setattr(search_module, 'SEARCH_CODE_FTS_MODULES', 1)
+    monkeypatch.setattr(search_module, 'SEARCH_CODE_MAX_PER_MODULE', 1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_en(tmpdir)
+        try:
+            text = execute_tool(pm, 'search_code', {'query': 'Procedure'})
+            assert 'Found 1 match(es)' in text, text
+            assert 'shown 1 of 1' not in text, text
+            assert 'выдача ограничена' in text, text
+        finally:
+            pm.close_all()
+
+
+def test_complete_result_still_says_shown_and_web_api_returns_list():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_en(tmpdir)
+        try:
+            text = execute_tool(pm, 'search_code', {'query': 'SessionParameters'})
+            assert 'выдача ограничена' not in text, text
+            assert text.splitlines()[-1].startswith('shown '), text
+            # Web UI вызывает search_code и ждёт список — сигнатура та же.
+            results = pm.get_search('p1').search_code('SessionParameters', limit=50)
+            assert isinstance(results, list) and results
+            assert execute_tool(pm, 'search_code', {'query': 'НетТакогоТекста123'}) == 'No code matches found.'
+        finally:
+            pm.close_all()

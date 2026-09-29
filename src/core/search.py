@@ -18,6 +18,15 @@ from .db import Database
 from .report_parser import canonicalize_kind
 
 
+# Пределы search_code: каждый модуль-кандидат перечитывается с диска (FTS
+# без хранимого текста), поэтому без них один частый запрос читал бы тысячи
+# файлов. Сработавший предел поиск сообщает (search_code_limited), а
+# инструмент MCP — пользователю, вместо «показано всё».
+SEARCH_CODE_FTS_MODULES = 50         # модулей-кандидатов из FTS
+SEARCH_CODE_FALLBACK_MODULES = 300   # модулей в резервном просмотре без FTS
+SEARCH_CODE_MAX_PER_MODULE = 5       # вхождений из одного модуля
+
+
 def resolve_module_ids(conn, module_name: str, source_id: str | None = None) -> list[int]:
     """Ids of the modules that best match a user-typed module name.
 
@@ -437,6 +446,14 @@ class SearchEngine:
     def search_code(self, query: str, file_pattern: str | None = None,
                     source_id: str | None = None, limit: int = 30,
                     offset: int = 0) -> list[dict]:
+        """Вхождения query в тексте модулей — см. search_code_limited(); здесь
+        только результаты, без признака сработавшего предела (Web UI)."""
+        return self.search_code_limited(query, file_pattern=file_pattern, source_id=source_id,
+                                        limit=limit, offset=offset)[0]
+
+    def search_code_limited(self, query: str, file_pattern: str | None = None,
+                            source_id: str | None = None, limit: int = 30,
+                            offset: int = 0) -> tuple[list[dict], bool]:
         """
         Full-text search over the raw source of every indexed BSL module
         (Этап 3 / D6) — finds assignments, query text (SELECT ...),
@@ -446,11 +463,15 @@ class SearchEngine:
         Each result is one occurrence: module, matched line number, and
         ±1 line of context, computed from where the match actually sits in
         the module's text (module_text_fts stores the whole file).
+
+        Второй элемент — сработал ли один из пределов SEARCH_CODE_*: тогда
+        вхождения за пределами просмотренных модулей (или сверх
+        SEARCH_CODE_MAX_PER_MODULE в одном модуле) не показаны.
         """
         conn = self.db.read_conn()
         query = query.strip()
         if not query:
-            return []
+            return [], False
 
         fts_query = self._fts_query(query)
         conds = ["module_text_fts MATCH ?"]
@@ -465,15 +486,19 @@ class SearchEngine:
 
         # No "ORDER BY rank": module_text_fts uses detail=none (size
         # contingency — see db.py), which doesn't support bm25()/rank.
+        # На одну строку больше предела — чтобы знать, что он сработал.
+        cap = SEARCH_CODE_FTS_MODULES
         rows = conn.execute(f"""
             SELECT f.rowid as module_id, m.name as module_name,
                    m.file_path, m.abs_path, m.source_id
             FROM module_text_fts f
             JOIN modules m ON m.id = f.rowid
             WHERE {where}
-            ORDER BY m.name LIMIT 50""", params).fetchall()
+            ORDER BY m.name LIMIT ?""", params + [cap + 1]).fetchall()
+        fts_capped = len(rows) > cap
 
-        results = self._extract_code_matches(rows, query, limit, offset=offset)
+        results, per_module_capped = self._extract_code_matches(rows[:cap], query, limit, offset=offset)
+        truncated = fts_capped or per_module_capped
 
         # Fallback (D5: case-insensitive) — covers queries FTS5's unicode61
         # tokenizer won't prefix-match (e.g. leading punctuation). No stored
@@ -490,15 +515,22 @@ class SearchEngine:
                 conds.append("file_path LIKE ?")
                 p.append(f'%{file_pattern}%')
             w = ' AND '.join(conds)
+            cap = SEARCH_CODE_FALLBACK_MODULES
             rows = conn.execute(f"""
                 SELECT id as module_id, name as module_name, file_path, abs_path, source_id
-                FROM modules WHERE {w} LIMIT 300""", p).fetchall()
-            results = self._extract_code_matches(rows, query, limit, offset=offset)
+                FROM modules WHERE {w} LIMIT ?""", p + [cap + 1]).fetchall()
+            results, per_module_capped = self._extract_code_matches(
+                rows[:cap], query, limit, offset=offset)
+            fallback_truncated = len(rows) > cap or per_module_capped
+            # Пустой ответ при сработавшем пределе любого из путей — тоже
+            # неполный: вхождение может быть в непросмотренном модуле.
+            truncated = fallback_truncated if results else (truncated or fallback_truncated)
 
-        return self._attach_source_labels(results)
+        return self._attach_source_labels(results), truncated
 
     def _extract_code_matches(self, rows, query: str, limit: int,
-                               max_per_module: int = 5, offset: int = 0) -> list[dict]:
+                               max_per_module: int | None = None,
+                               offset: int = 0) -> tuple[list[dict], bool]:
         """Locate each occurrence of ``query`` (case-insensitive) inside the
         matched modules' text and build a module:line + ±1 line context
         result for it — the line number is computed from the match's
@@ -510,15 +542,21 @@ class SearchEngine:
         in the same scan order) before collecting into ``results`` —
         there's no SQL LIMIT/OFFSET here since matches are found by
         scanning file text, not a query.
+
+        Второй элемент — в каком-то модуле вхождений больше max_per_module
+        (по умолчанию SEARCH_CODE_MAX_PER_MODULE) и лишние пропущены.
         """
         from .bsl_parser import read_bsl_text
 
+        if max_per_module is None:
+            max_per_module = SEARCH_CODE_MAX_PER_MODULE
         needle = query.casefold()
         if not needle:
-            return []
+            return [], False
 
         results = []
         skipped = 0
+        capped = False
         for row in rows:
             path = self.module_file_path(row)
             content = read_bsl_text(path) if path else None
@@ -549,9 +587,11 @@ class SearchEngine:
                     'line': line_no,
                     'context': ctx,
                 })
+            if hits >= max_per_module and hay.find(needle, start) != -1:
+                capped = True
             if len(results) >= limit:
                 break
-        return results
+        return results, capped
 
     # ============================================
     # FTS HELPERS

@@ -308,21 +308,38 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             return ca.format_tree_simple(tree)
 
         case 'search_code':
+            from ..core import search as search_mod
             limit = int(limit_arg or 30)
-            page, has_more = _paginate(
-                lambda limit, offset: engine.search_code(
+            limited = {'truncated': False}
+
+            def fetch_code(limit, offset):
+                rows, limited['truncated'] = engine.search_code_limited(
                     args.get('query', ''), file_pattern=args.get('file_pattern') or None,
-                    source_id=source_id, limit=limit, offset=offset),
-                limit, offset)
+                    source_id=source_id, limit=limit, offset=offset)
+                return rows
+
+            page, has_more = _paginate(fetch_code, limit, offset)
+            # Поиск просматривает ограниченное число модулей и вхождений на
+            # модуль; если предел сработал, «показано всё» было бы неправдой.
+            limit_note = (
+                f"выдача ограничена: просмотрено не больше {search_mod.SEARCH_CODE_FTS_MODULES} "
+                f"модулей и не больше {search_mod.SEARCH_CODE_MAX_PER_MODULE} вхождений в модуле — "
+                f"сузьте поиск через file_pattern или source_id")
             if not page:
-                return "No code matches found." if offset == 0 else f"No further results at offset={offset}."
+                if offset == 0:
+                    return f"No code matches found ({limit_note})." if limited['truncated'] \
+                        else "No code matches found."
+                return f"No further results at offset={offset}."
             lines = [f"Found {len(page)} match(es):"]
             for r in page:
                 src = f"  @{r.get('source_label','')}" if r.get('source_label') else ''
                 lines.append(f"  {r['module_name']}:{r['line']}{src}")
                 for ctx_line in r['context'].splitlines():
                     lines.append(f"    {ctx_line}")
-            lines.append(_page_trailer(len(page), offset, limit, has_more))
+            if not has_more and limited['truncated']:
+                lines.append(f"(shown {len(page)}; {limit_note})")
+            else:
+                lines.append(_page_trailer(len(page), offset, limit, has_more))
             return '\n'.join(lines)
 
         case 'get_module_outline':
