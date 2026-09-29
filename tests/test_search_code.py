@@ -241,3 +241,63 @@ def test_complete_result_still_says_shown_and_web_api_returns_list():
             assert execute_tool(pm, 'search_code', {'query': 'НетТакогоТекста123'}) == 'No code matches found.'
         finally:
             pm.close_all()
+
+
+# ============================================
+# Недоступные файлы выгрузки: не «ничего не найдено», а честная ошибка
+# ============================================
+
+import shutil
+
+
+def _xml_dir(pm: ProjectManager) -> Path:
+    return pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
+
+
+def test_unreadable_dump_is_an_error_not_no_matches():
+    """Выгрузку убрали с диска после индексации (так на живом сервере с
+    bshp) — раньше search_code отвечал «No code matches found»."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_en(tmpdir)
+        try:
+            shutil.move(str(_xml_dir(pm)), str(Path(tmpdir) / 'moved-away'))
+            abs_paths = [r[0] for r in pm.get_db('p1').conn.execute(
+                "SELECT abs_path FROM modules WHERE abs_path != ''")]
+            assert abs_paths and not any(os.path.exists(p) for p in abs_paths), \
+                "запасной путь abs_path тоже должен быть недоступен"
+
+            text = execute_tool(pm, 'search_code', {'query': 'OTelSettings'})
+            assert 'No code matches found' not in text, text
+            assert text.startswith('Error'), text
+            assert 'недоступны' in text and 'переиндексируйте' in text.lower(), text
+        finally:
+            pm.close_all()
+
+
+def test_partially_unreadable_dump_marks_result_incomplete():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_en(tmpdir)
+        try:
+            (_xml_dir(pm) / 'CommonModules' / 'CommonAtServer' / 'Ext' / 'Module.bsl').unlink()
+            text = execute_tool(pm, 'search_code', {'query': 'EndFunction'})
+            assert not text.startswith('Error'), text
+            assert 'AgentDataUtils' in text, text
+            assert 'не прочитано модулей: 1' in text and 'выдача неполная' in text, text
+            assert 'shown' not in text.splitlines()[-1] or ' of ' not in text.splitlines()[-1], \
+                "«shown N of N» противоречит неполной выдаче"
+        finally:
+            pm.close_all()
+
+
+def test_unreadable_and_limit_notes_agree(monkeypatch):
+    monkeypatch.setattr(search_module, 'SEARCH_CODE_MAX_PER_MODULE', 1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm_with_xml_en(tmpdir)
+        try:
+            (_xml_dir(pm) / 'CommonModules' / 'CommonAtServer' / 'Ext' / 'Module.bsl').unlink()
+            text = execute_tool(pm, 'search_code', {'query': 'EndFunction'})
+            last = text.splitlines()[-1]
+            assert 'выдача ограничена' in last and 'не прочитано модулей: 1' in last, text
+            assert ' of ' not in last, text
+        finally:
+            pm.close_all()
