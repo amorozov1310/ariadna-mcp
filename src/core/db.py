@@ -329,6 +329,10 @@ class Database:
         self._readers: set[_ReaderConnection] = set()
         self._readers_lock = threading.Lock()
         self._generation = 0
+        # Индекс удаляется (delete_project): читающие соединения больше не
+        # открываются — ни к старому файлу, который сейчас удаляет rmtree
+        # (на Windows он бы стал занят), ни к новому пустому.
+        self._retired = False
         # (st_dev, st_ino) файла индекса при открытии — см. file_replaced().
         self._file_id: tuple[int, int] | None = None
 
@@ -397,14 +401,24 @@ class Database:
         conn = getattr(self._local, 'conn', None)
         if conn is not None and getattr(self._local, 'generation', None) == self._generation:
             return conn
+        if self._retired:
+            raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
         # Соединения нет или его закрыл close() из другого потока.
         if not os.path.exists(self.db_path) and self.db_path not in (':memory:', ''):
+            if self._generation > 0:
+                # Этот Database уже закрывали, а файла нет: индекс удалили
+                # (delete_project, удаление снаружи). Создать его заново
+                # здесь — значит оставить пустой index.db удалённого проекта.
+                raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
             # Nothing to read yet — make sure the writer has created
             # the file/schema first rather than racing it here.
             self.connect()
             self.init_schema()
         conn = _ReaderConnection(self._open_with_retry())
         with self._readers_lock:
+            if self._retired:          # retire() успел между проверкой и открытием
+                conn.close()
+                raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
             self._readers.add(conn)
             self._local.generation = self._generation
         self._local.conn = conn
@@ -482,6 +496,14 @@ class Database:
             except Exception:
                 pass
         self.conn.commit()
+
+    def retire(self):
+        """Закрыть навсегда: файл индекса удаляется. В отличие от close(),
+        read_conn потом не открывает новые соединения, а бросает
+        OperationalError."""
+        with self._readers_lock:
+            self._retired = True
+        self.close()
 
     def close(self):
         if self.conn:

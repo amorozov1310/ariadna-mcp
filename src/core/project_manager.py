@@ -204,7 +204,9 @@ class ProjectManager:
                 if db is None or os.path.abspath(db.db_path) != index_path:
                     continue
                 del pm._db_pool[project_id]
-            db.close()
+            # Файл сейчас удалят или заменят: запросы, которые уже держат
+            # этот Database (SearchEngine), не должны открыть его заново.
+            db.retire()
 
     # ============================================
     # REGISTRY
@@ -909,6 +911,16 @@ class ProjectManager:
                                "индекс открывается заново", project_id)
             if db is not None:
                 db.close()
+
+            # Открыть (и тем более создать) индекс — только для проекта из
+            # реестра. Проверка — под той же блокировкой пула: delete_project
+            # сперва убирает проект из реестра и лишь затем закрывает пулы,
+            # поэтому открытие либо успевает до закрытия (и будет закрыто),
+            # либо видит, что проекта нет. Иначе запрос посреди удаления
+            # создавал новый пустой index.db, а на Windows держал файл,
+            # который удаляет rmtree.
+            if project_id not in self._load_registry():
+                raise KeyError(f"Project '{project_id}' not found")
 
             db_path = str(self._index_path(project_id))
             db = Database(db_path)

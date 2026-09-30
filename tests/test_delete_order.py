@@ -116,3 +116,117 @@ def test_web_ui_reports_failed_removal_as_500(monkeypatch):
             assert not (pm.projects_dir / 'p1').exists()
         finally:
             pm.close_all()
+
+
+# ============================================
+# Чтение не создаёт индекс как побочный эффект
+# ============================================
+
+def _index_files(index_parent: Path) -> list[str]:
+    return sorted(p.name for p in index_parent.glob('index.db*')) if index_parent.exists() else []
+
+
+def test_delete_under_read_load_leaves_no_index():
+    """Воспроизведение: второй экземпляр (MCP) в цикле читает проект, первый
+    (Web UI) его удаляет. После остановки чтения каталога индекса нет."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir, index_dir = os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index')
+        for run in range(20):
+            web = _indexed(data_dir, index_dir)
+            mcp = ProjectManager(data_dir, index_dir)
+            index_parent = web._index_path('p1').parent
+            stop, warmed = threading.Event(), threading.Event()
+            reads = {'ok': 0, 'refused': 0}
+            errors = []
+
+            def read():
+                while not stop.is_set():
+                    try:
+                        mcp.get_search('p1').search_procedures('Рассчитать')
+                        mcp.get_db('p1').get_stats()
+                        reads['ok'] += 1
+                        if reads['ok'] >= 2:
+                            warmed.set()
+                    except (KeyError, sqlite3.OperationalError, sqlite3.ProgrammingError):
+                        reads['refused'] += 1
+                    except Exception as e:          # pragma: no cover
+                        errors.append(e)
+                        warmed.set()
+                        return
+
+            threads = [threading.Thread(target=read) for _ in range(2)]
+            for t in threads:
+                t.start()
+            assert warmed.wait(30)
+            try:
+                web.delete_project('p1')
+            finally:
+                stop.set()
+                for t in threads:
+                    t.join()
+                web.close_all()
+                mcp.close_all()
+            assert not errors, errors
+            assert not index_parent.exists(), \
+                f"прогон {run}: остался индекс {_index_files(index_parent)}"
+            assert 'p1' not in [p.id for p in ProjectManager(data_dir, index_dir).list_projects()]
+
+
+def test_get_db_for_unregistered_project_creates_nothing():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
+        try:
+            with pytest.raises(KeyError):
+                pm.get_db('нет-такого')
+            assert not pm._index_path('нет-такого').exists()
+            assert not pm._index_path('нет-такого').parent.exists()
+            with pytest.raises(KeyError):
+                pm.get_search('нет-такого')
+            assert not pm._index_path('нет-такого').exists()
+        finally:
+            pm.close_all()
+
+
+@pytest.mark.parametrize('how', ['close', 'retire'])
+def test_read_conn_of_closed_database_does_not_recreate_deleted_file(how):
+    from src.core.db import Database
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, 'index.db')
+        db = Database(path)
+        db.connect()
+        db.init_schema()
+        db.get_stats()
+        getattr(db, how)()
+        for suffix in ('', '-wal', '-shm'):
+            if os.path.exists(path + suffix):
+                os.remove(path + suffix)
+        with pytest.raises(sqlite3.OperationalError, match='индекс удалён'):
+            db.read_conn()
+        assert not os.path.exists(path)
+
+
+def test_retired_database_refuses_even_while_file_exists():
+    """Файл ещё не удалён (rmtree впереди), но Database списан — новое
+    соединение к нему не открывается (на Windows оно помешало бы rmtree)."""
+    from src.core.db import Database
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(os.path.join(tmpdir, 'index.db'))
+        db.connect()
+        db.init_schema()
+        db.retire()
+        with pytest.raises(sqlite3.OperationalError, match='индекс удалён'):
+            db.get_stats()
+
+
+def test_first_request_to_new_empty_project_still_creates_index():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
+        try:
+            pm.create_project('new', 'new')
+            assert not pm._index_path('new').exists()
+            stats = pm.get_db('new').get_stats()
+            assert stats['procedures'] == 0 and stats['metadata_objects'] == 0
+            assert pm._index_path('new').exists()
+            assert pm.get_search('new').search_procedures('x') == []
+        finally:
+            pm.close_all()
