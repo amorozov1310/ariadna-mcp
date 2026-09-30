@@ -253,6 +253,15 @@ class Database:
         self.db_path = db_path
         self.conn: sqlite3.Connection | None = None  # the single writer
         self._local = threading.local()               # per-thread readers (Этап 4/D7)
+        # Все выданные читающие соединения — чтобы close() закрыл и те, что
+        # открыты в других потоках (пул SDK, Web UI, TestClient). Иначе на
+        # Windows файл индекса оставался занятым: rmtree в delete_project и
+        # очистка временных каталогов падали с WinError 32. Поколение
+        # растёт при каждом close(): поток, чьё соединение закрыли извне,
+        # замечает это в read_conn и открывает новое.
+        self._readers: set[sqlite3.Connection] = set()
+        self._readers_lock = threading.Lock()
+        self._generation = 0
 
     def _open_conn(self) -> sqlite3.Connection:
         """Open one connection with the PRAGMAs/functions every connection
@@ -289,14 +298,19 @@ class Database:
         serialize concurrent reads through the same Connection object.
         Callers must never write through this connection."""
         conn = getattr(self._local, 'conn', None)
-        if conn is None:
-            if not os.path.exists(self.db_path) and self.db_path not in (':memory:', ''):
-                # Nothing to read yet — make sure the writer has created
-                # the file/schema first rather than racing it here.
-                self.connect()
-                self.init_schema()
-            conn = self._open_with_retry()
-            self._local.conn = conn
+        if conn is not None and getattr(self._local, 'generation', None) == self._generation:
+            return conn
+        # Соединения нет или его закрыл close() из другого потока.
+        if not os.path.exists(self.db_path) and self.db_path not in (':memory:', ''):
+            # Nothing to read yet — make sure the writer has created
+            # the file/schema first rather than racing it here.
+            self.connect()
+            self.init_schema()
+        conn = self._open_with_retry()
+        with self._readers_lock:
+            self._readers.add(conn)
+            self._local.generation = self._generation
+        self._local.conn = conn
         return conn
 
     def _open_with_retry(self, attempts: int = 3) -> sqlite3.Connection:
@@ -376,15 +390,19 @@ class Database:
         if self.conn:
             self.conn.close()
             self.conn = None
-        # Only closes *this* thread's reader, if any — the whole point of
-        # thread-local storage is that other threads' connections aren't
-        # reachable from here. They close themselves when their thread
-        # exits (or just get reclaimed with the process); tests that open
-        # a DB and close it on the same thread are unaffected.
-        reader = getattr(self._local, 'conn', None)
-        if reader:
-            reader.close()
-            self._local.conn = None
+        # Читающие соединения всех потоков: открыты с check_same_thread=False,
+        # поэтому закрывать их отсюда можно. Их потоки при следующем
+        # read_conn увидят новое поколение и откроют соединение заново.
+        with self._readers_lock:
+            readers = list(self._readers)
+            self._readers.clear()
+            self._generation += 1
+        for reader in readers:
+            try:
+                reader.close()
+            except sqlite3.Error:
+                pass
+        self._local.conn = None
 
     def get_stats(self) -> dict:
         # Read-only — uses this thread's own connection (Этап 4/D7) so
