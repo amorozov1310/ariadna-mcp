@@ -174,7 +174,11 @@ class Indexer:
         stats['config_name'] = config.name
         stats['config_version'] = config.version
 
-        self.db.update_state(status='ready', index_duration_sec=duration)
+        # Только своё поле. Статусом переиндексации владеет ProjectManager.reindex
+        # ('indexing' в начале, 'ready'/'error' в конце): 'ready' отсюда
+        # объявлял индекс готовым сразу после метаданных, пока BSL ещё
+        # разбирался минутами, и get_index_status врал агенту.
+        self.db.update_state(index_duration_sec=duration)
         return stats
 
     def _insert_object(self, conn, obj: MetadataObject, source_id: str) -> int | None:
