@@ -12,6 +12,7 @@ import sqlite3
 import time
 import os
 import threading
+import weakref
 import zipfile
 import tarfile
 from contextlib import contextmanager
@@ -45,6 +46,16 @@ _REINDEX_LOCKS_GUARD = threading.Lock()
 # только работа с реестром: распаковка архивов, удаление файлов и
 # переиндексация идут снаружи.
 _REGISTRY_LOCKS: dict[str, threading.RLock] = {}
+
+# Живые ProjectManager процесса по пути реестра. У каждого (Web UI, MCP SSE,
+# MCP HTTP — см. main.py) свой пул Database: свой писатель и свои читающие
+# соединения к тому же index.db. Общий пул намеренно не вводится — разные
+# экземпляры пишут через разные соединения, и SQLite изолирует их
+# транзакции. Но удаление проекта должно закрыть его индекс у всех: иначе
+# на Linux MCP продолжал читать удалённый файл (и отдавал данные удалённого
+# проекта для нового с тем же id), а на Windows rmtree падал с WinError 32.
+_INSTANCES: dict[str, 'weakref.WeakSet[ProjectManager]'] = {}
+_INSTANCES_GUARD = threading.Lock()
 
 # Повторы os.replace при записи реестра (Windows, см. _write_registry_file):
 # 10 попыток с паузой 20, 40, … мс — в сумме до ~0,9 с.
@@ -159,6 +170,31 @@ class ProjectManager:
 
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
+
+        with _INSTANCES_GUARD:
+            _INSTANCES.setdefault(self._instances_key(), weakref.WeakSet()).add(self)
+
+    def _instances_key(self) -> str:
+        return str(self.registry_path.resolve())
+
+    def _siblings(self) -> list['ProjectManager']:
+        """Все живые ProjectManager процесса с тем же реестром, включая себя."""
+        with _INSTANCES_GUARD:
+            return list(_INSTANCES.get(self._instances_key(), ()))
+
+    def _close_project_db_everywhere(self, project_id: str) -> None:
+        """Закрыть Database проекта и убрать его из пула у всех экземпляров
+        процесса с тем же реестром — перед удалением или заменой файла
+        индекса. Трогаются только Database с тем же путём индекса: экземпляр
+        с другим index_dir держит другой файл."""
+        index_path = os.path.abspath(self._index_path(project_id))
+        for pm in self._siblings():
+            with pm._db_lock:
+                db = pm._db_pool.get(project_id)
+                if db is None or os.path.abspath(db.db_path) != index_path:
+                    continue
+                del pm._db_pool[project_id]
+            db.close()
 
     # ============================================
     # REGISTRY
@@ -483,11 +519,9 @@ class ProjectManager:
     def _delete_project(self, project_id: str):
         self.get_project(project_id)          # KeyError, если проекта нет
 
-        # Close DB if open
-        with self._db_lock:
-            db = self._db_pool.pop(project_id, None)
-        if db is not None:
-            db.close()
+        # Индекс проекта — закрыть у всех ProjectManager процесса, не только
+        # у себя (см. _INSTANCES).
+        self._close_project_db_everywhere(project_id)
 
         # Remove from disk — долго на больших выгрузках, поэтому вне
         # блокировки реестра.
@@ -811,6 +845,7 @@ class ProjectManager:
                 new.parent.mkdir(parents=True, exist_ok=True)
                 started = time.monotonic()
                 _copy_sqlite(old, tmp)
+                self._close_project_db_everywhere(project.id)
                 os.replace(tmp, new)
             except Exception:
                 logger.exception("Не удалось перенести индекс проекта %s из %s в %s — "
