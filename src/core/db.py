@@ -414,11 +414,14 @@ class Database:
             # the file/schema first rather than racing it here.
             self.connect()
             self.init_schema()
-        conn = _ReaderConnection(self._open_with_retry())
+        # Открыть и зарегистрировать — под той же блокировкой, что retire() и
+        # close(): иначе соединение, открытое между проверкой _retired и
+        # регистрацией, пережило бы закрытие, и на Windows rmtree удаляемого
+        # индекса падал бы с WinError 32. Открытие — миллисекунды.
         with self._readers_lock:
-            if self._retired:          # retire() успел между проверкой и открытием
-                conn.close()
+            if self._retired:
                 raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
+            conn = _ReaderConnection(self._open_with_retry())
             self._readers.add(conn)
             self._local.generation = self._generation
         self._local.conn = conn

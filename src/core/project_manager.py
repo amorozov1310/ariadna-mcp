@@ -90,6 +90,27 @@ class ProjectFilesNotRemovedError(OSError):
         self.path = path
 
 
+# Повторы rmtree при PermissionError (Windows): файл индекса освобождается,
+# как только закончится запрос, начатый до закрытия (Database.close ждёт его,
+# но другой экземпляр мог ещё держать его долю секунды), а ещё его может
+# ненадолго открыть антивирус. До ~1 с в сумме.
+_RMTREE_ATTEMPTS = 8
+_RMTREE_DELAY_SEC = 0.03
+
+
+def _rmtree_with_retry(path: Path) -> None:
+    for attempt in range(_RMTREE_ATTEMPTS):
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError:
+            if attempt == _RMTREE_ATTEMPTS - 1:
+                raise
+            time.sleep(_RMTREE_DELAY_SEC * (attempt + 1))
+        except FileNotFoundError:
+            return          # удалил кто-то ещё
+
+
 def _copy_sqlite(src: Path, dst: Path) -> None:
     """Копия БД через sqlite3 backup API — с данными, которые ещё лежат в
     -wal (копия одного файла их бы потеряла)."""
@@ -560,7 +581,7 @@ class ProjectManager:
             if not path.exists():
                 continue
             try:
-                shutil.rmtree(path)
+                _rmtree_with_retry(path)
             except OSError as e:
                 logger.error("Проект %s убран из реестра, но каталог %s удалить не удалось: %s. "
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)

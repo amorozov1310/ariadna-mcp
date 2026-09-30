@@ -126,9 +126,34 @@ def _index_files(index_parent: Path) -> list[str]:
     return sorted(p.name for p in index_parent.glob('index.db*')) if index_parent.exists() else []
 
 
-def test_delete_under_read_load_leaves_no_index():
+def _open_handles_under(path: Path) -> list[str]:
+    """Файлы под path, открытые этим процессом (Linux, /proc/self/fd). На
+    Windows открытый файл не удалить (WinError 32) — здесь та же проверка."""
+    fd_dir = Path('/proc/self/fd')
+    found = []
+    for fd in fd_dir.iterdir() if fd_dir.is_dir() else ():
+        try:
+            target = os.readlink(fd)
+        except OSError:
+            continue
+        if target.startswith(str(path)):
+            found.append(target)
+    return found
+
+
+def test_delete_under_read_load_leaves_no_index(monkeypatch):
     """Воспроизведение: второй экземпляр (MCP) в цикле читает проект, первый
-    (Web UI) его удаляет. После остановки чтения каталога индекса нет."""
+    (Web UI) его удаляет. После остановки чтения каталога индекса нет, а в
+    момент rmtree на файлы каталога не открыто ни одного дескриптора (на
+    Windows с ними rmtree падает)."""
+    real_rmtree = shutil.rmtree
+    held = []
+
+    def checked_rmtree(path, *a, **kw):
+        held.extend(_open_handles_under(Path(path)))
+        return real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr(pm_module.shutil, 'rmtree', checked_rmtree)
     with tempfile.TemporaryDirectory() as tmpdir:
         data_dir, index_dir = os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index')
         for run in range(20):
@@ -169,6 +194,7 @@ def test_delete_under_read_load_leaves_no_index():
             assert not errors, errors
             assert not index_parent.exists(), \
                 f"прогон {run}: остался индекс {_index_files(index_parent)}"
+            assert not held, f"прогон {run}: при rmtree открыты {held}"
             assert 'p1' not in [p.id for p in ProjectManager(data_dir, index_dir).list_projects()]
 
 
