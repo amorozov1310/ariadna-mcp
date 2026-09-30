@@ -3,6 +3,7 @@
 безопасность транспорта, isError у ошибок инструментов.
 """
 
+import os
 import sys
 import logging
 import tempfile
@@ -268,3 +269,35 @@ def test_sdk_validation_error_has_same_shape():
             assert _text(res).startswith('Error executing tool search_metadata:')
         finally:
             pm.close_all()
+
+
+# ============================================
+# Адрес прослушивания: 127.0.0.1 без Docker, 0.0.0.0 только в контейнере
+# ============================================
+
+@pytest.mark.parametrize('starter', ['_start_web', '_start_mcp_sse', '_start_mcp_streamable_http'])
+@pytest.mark.parametrize('env, expected', [(None, '127.0.0.1'), ('0.0.0.0', '0.0.0.0')])
+def test_servers_listen_on_localhost_unless_listen_addr_set(monkeypatch, starter, env, expected):
+    """Раньше main.py всегда слушал 0.0.0.0 — при запуске без Docker серверы
+    без авторизации были открыты на всех интерфейсах."""
+    pytest.importorskip("mcp.server.mcpserver")
+    import uvicorn
+    from src import main as main_module
+    captured = {}
+    monkeypatch.setattr(uvicorn, 'run', lambda app, **kw: captured.update(kw))
+    # _start_web пишет DATA_DIR в os.environ — monkeypatch вернёт прежнее.
+    monkeypatch.setenv('DATA_DIR', os.environ.get('DATA_DIR', ''))
+    if env is None:
+        monkeypatch.delenv('LISTEN_ADDR', raising=False)
+    else:
+        monkeypatch.setenv('LISTEN_ADDR', env)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        getattr(main_module, starter)(tmpdir, 0)
+    assert captured['host'] == expected
+
+
+def test_docker_image_listens_on_all_interfaces():
+    """В контейнере без 0.0.0.0 не работает проброс портов; наружу их
+    открывает только BIND_ADDR (docker-compose.yml, по умолчанию 127.0.0.1)."""
+    assert 'ENV LISTEN_ADDR=0.0.0.0' in (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+    assert '${BIND_ADDR:-127.0.0.1}:' in (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
