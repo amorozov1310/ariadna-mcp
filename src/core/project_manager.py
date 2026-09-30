@@ -867,11 +867,21 @@ class ProjectManager:
         return migrated
 
     def get_db(self, project_id: str) -> Database:
-        """Get or open SQLite connection for project."""
+        """Get or open SQLite connection for project.
+
+        Закэшированный Database отдаётся, только пока его файл индекса — тот
+        же, что при открытии (Database.file_replaced, один os.stat): если
+        файл удалили или заменили снаружи, старые соединения закрываются и
+        индекс открывается заново."""
         with self._db_lock:
             db = self._db_pool.get(project_id)
             if db is not None and db.conn:
-                return db
+                if not db.file_replaced():
+                    return db
+                logger.warning("Файл индекса проекта %s удалён или заменён снаружи — "
+                               "индекс открывается заново", project_id)
+            if db is not None:
+                db.close()
 
             db_path = str(self._index_path(project_id))
             db = Database(db_path)

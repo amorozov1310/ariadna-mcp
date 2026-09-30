@@ -262,6 +262,8 @@ class Database:
         self._readers: set[sqlite3.Connection] = set()
         self._readers_lock = threading.Lock()
         self._generation = 0
+        # (st_dev, st_ino) файла индекса при открытии — см. file_replaced().
+        self._file_id: tuple[int, int] | None = None
 
     def _open_conn(self) -> sqlite3.Connection:
         """Open one connection with the PRAGMAs/functions every connection
@@ -288,7 +290,35 @@ class Database:
         self._recreate_if_stale_schema()
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self.conn = self._open_conn()
+        self._file_id = self._current_file_id()
         return self.conn
+
+    def _current_file_id(self) -> tuple[int, int] | None:
+        """(st_dev, st_ino) файла индекса; None — файла нет. На Windows
+        st_ino — настоящий идентификатор файла (Python 3.12+)."""
+        try:
+            st = os.stat(self.db_path)
+        except OSError:
+            return None
+        return st.st_dev, st.st_ino
+
+    def file_replaced(self) -> bool:
+        """Файл индекса удалён или заменён другим с тех пор, как этот
+        Database его открыл (другой процесс, ariadna-index рядом с сервером,
+        docker volume rm, ручное удаление). Соединения тогда читают старый
+        файл: на Linux удалённый файл остаётся доступным через открытые
+        дескрипторы, и поиск отдавал бы данные, которых уже нет.
+
+        Один os.stat. Если st_ino недоступен (0 — старый Python на Windows),
+        сравнивается только наличие файла."""
+        if self._file_id is None or self.db_path in (':memory:', ''):
+            return False
+        current = self._current_file_id()
+        if current is None:
+            return True
+        if current[1] == 0 or self._file_id[1] == 0:
+            return False
+        return current != self._file_id
 
     def read_conn(self) -> sqlite3.Connection:
         """Per-thread read connection (Этап 4/D7): search/call-graph/

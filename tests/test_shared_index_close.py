@@ -114,3 +114,59 @@ def test_other_index_dir_is_left_alone():
         finally:
             a.close_all()
             b.close_all()
+
+
+# ============================================
+# get_db: файл индекса удалён или заменён снаружи
+# ============================================
+
+def _index_files(pm: ProjectManager) -> list[Path]:
+    path = pm._index_path('p1')
+    return [Path(f'{path}{s}') for s in ('', '-wal', '-shm') if Path(f'{path}{s}').exists()]
+
+
+def _release_files(db) -> None:
+    """Отпустить файлы, оставив Database в пуле как есть (db.conn не None):
+    так его держал бы пул, пока файл удаляют снаружи — другой процесс,
+    ariadna-index, docker volume rm. На Windows открытый файл не удалить."""
+    db.conn.close()
+    for reader in list(db._readers):
+        reader.close()
+
+
+@pytest.mark.parametrize('how', ['removed', 'replaced'])
+def test_get_db_reopens_index_removed_or_replaced_outside(how):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir, index_dir = os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index')
+        pm = ProjectManager(data_dir, index_dir)
+        try:
+            pm.create_project('p1', 'p1')
+            _add_source(pm)
+            pm.reindex('p1')
+            old = pm.get_db('p1')
+            assert old.get_stats()['procedures'] > 0
+            assert pm.get_db('p1') is old            # файл тот же — тот же объект
+
+            _release_files(old)
+            index_path = pm._index_path('p1')
+            if how == 'removed':
+                for f in _index_files(pm):
+                    os.remove(f)
+            else:
+                # Другой файл на том же месте: пустой индекс, построенный
+                # «другим процессом».
+                other = ProjectManager(os.path.join(tmpdir, 'other'))
+                other.create_project('p1', 'p1')
+                other_path = other._index_path('p1')
+                other.get_db('p1')
+                other.close_all()
+                for f in _index_files(pm):
+                    os.remove(f)
+                os.replace(other_path, index_path)
+
+            db = pm.get_db('p1')
+            assert db is not old
+            assert db.get_stats()['procedures'] == 0
+            assert _procedures(pm) == []
+        finally:
+            pm.close_all()
