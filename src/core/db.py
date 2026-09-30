@@ -246,6 +246,73 @@ CREATE TABLE IF NOT EXISTS parser_state (
 """
 
 
+class _Rows:
+    """Результат запроса читающего соединения, уже целиком прочитанный:
+    fetchone/fetchall/итерация, как у sqlite3.Cursor."""
+
+    def __init__(self, rows: list, description):
+        self._rows = rows
+        self._pos = 0
+        self.description = description
+
+    def fetchone(self):
+        if self._pos >= len(self._rows):
+            return None
+        self._pos += 1
+        return self._rows[self._pos - 1]
+
+    def fetchall(self) -> list:
+        rows, self._pos = self._rows[self._pos:], len(self._rows)
+        return rows
+
+    def __iter__(self):
+        while self._pos < len(self._rows):
+            yield self.fetchone()
+
+
+class _ReaderConnection:
+    """Читающее соединение, которое можно безопасно закрыть из другого потока.
+
+    Database.close() закрывает читающие соединения всех потоков (иначе на
+    Windows index.db оставался занят). Но sqlite3.Connection.close(), пока
+    другой поток выполняет на нём запрос, роняет процесс (segfault в
+    CPython): так падал сервер при удалении проекта под нагрузкой MCP.
+    Поэтому запрос выполняется и дочитывается целиком под блокировкой
+    соединения, а close() ждёт её — не дольше одного запроса. Флаг
+    закрытия ставится до ожидания: новые запросы на этом соединении уже не
+    начинаются, иначе поток, выполняющий запросы подряд, перехватывал бы
+    блокировку раньше close() (Lock не справедлив), и тот ждал бы вечно."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def execute(self, sql: str, params=()) -> _Rows:
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        with self._lock:
+            if self._closed:
+                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+            cur = self._conn.execute(sql, params)
+            try:
+                return _Rows(cur.fetchall(), cur.description)
+            finally:
+                cur.close()
+
+    def refuse_new(self) -> None:
+        """Новые запросы на этом соединении больше не начнутся."""
+        self._closed = True
+
+    def close(self) -> None:
+        self.refuse_new()
+        with self._lock:                # дождаться текущего запроса
+            self._conn.close()          # повторный close() sqlite3 безвреден
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 class Database:
     """Per-project SQLite database wrapper."""
 
@@ -259,9 +326,13 @@ class Database:
         # очистка временных каталогов падали с WinError 32. Поколение
         # растёт при каждом close(): поток, чьё соединение закрыли извне,
         # замечает это в read_conn и открывает новое.
-        self._readers: set[sqlite3.Connection] = set()
+        self._readers: set[_ReaderConnection] = set()
         self._readers_lock = threading.Lock()
         self._generation = 0
+        # Индекс удаляется (delete_project): читающие соединения больше не
+        # открываются — ни к старому файлу, который сейчас удаляет rmtree
+        # (на Windows он бы стал занят), ни к новому пустому.
+        self._retired = False
         # (st_dev, st_ino) файла индекса при открытии — см. file_replaced().
         self._file_id: tuple[int, int] | None = None
 
@@ -320,7 +391,7 @@ class Database:
             return False
         return current != self._file_id
 
-    def read_conn(self) -> sqlite3.Connection:
+    def read_conn(self) -> '_ReaderConnection':
         """Per-thread read connection (Этап 4/D7): search/call-graph/
         diagnostics reads no longer share the single writer connection
         object across threads — each thread gets its own, opened lazily
@@ -330,14 +401,27 @@ class Database:
         conn = getattr(self._local, 'conn', None)
         if conn is not None and getattr(self._local, 'generation', None) == self._generation:
             return conn
+        if self._retired:
+            raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
         # Соединения нет или его закрыл close() из другого потока.
         if not os.path.exists(self.db_path) and self.db_path not in (':memory:', ''):
+            if self._generation > 0:
+                # Этот Database уже закрывали, а файла нет: индекс удалили
+                # (delete_project, удаление снаружи). Создать его заново
+                # здесь — значит оставить пустой index.db удалённого проекта.
+                raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
             # Nothing to read yet — make sure the writer has created
             # the file/schema first rather than racing it here.
             self.connect()
             self.init_schema()
-        conn = self._open_with_retry()
+        # Открыть и зарегистрировать — под той же блокировкой, что retire() и
+        # close(): иначе соединение, открытое между проверкой _retired и
+        # регистрацией, пережило бы закрытие, и на Windows rmtree удаляемого
+        # индекса падал бы с WinError 32. Открытие — миллисекунды.
         with self._readers_lock:
+            if self._retired:
+                raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
+            conn = _ReaderConnection(self._open_with_retry())
             self._readers.add(conn)
             self._local.generation = self._generation
         self._local.conn = conn
@@ -416,6 +500,14 @@ class Database:
                 pass
         self.conn.commit()
 
+    def retire(self):
+        """Закрыть навсегда: файл индекса удаляется. В отличие от close(),
+        read_conn потом не открывает новые соединения, а бросает
+        OperationalError."""
+        with self._readers_lock:
+            self._retired = True
+        self.close()
+
     def close(self):
         if self.conn:
             self.conn.close()
@@ -427,6 +519,10 @@ class Database:
             readers = list(self._readers)
             self._readers.clear()
             self._generation += 1
+        # Сначала запретить новые запросы на всех соединениях, потом ждать
+        # каждое: ожидание — самый долгий из текущих запросов, а не их сумма.
+        for reader in readers:
+            reader.refuse_new()
         for reader in readers:
             try:
                 reader.close()

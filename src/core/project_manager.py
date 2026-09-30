@@ -80,6 +80,37 @@ class ReindexInProgressError(RuntimeError):
         self.project_id = project_id
 
 
+class ProjectFilesNotRemovedError(OSError):
+    """Проект убран из реестра, но его каталог удалить не удалось."""
+
+    def __init__(self, project_id: str, path: Path, cause: OSError):
+        super().__init__(f"проект '{project_id}' удалён из реестра, но не удалось удалить "
+                         f"{path}: {cause}. Повторите удаление, чтобы дочистить файлы")
+        self.project_id = project_id
+        self.path = path
+
+
+# Повторы rmtree при PermissionError (Windows): файл индекса освобождается,
+# как только закончится запрос, начатый до закрытия (Database.close ждёт его,
+# но другой экземпляр мог ещё держать его долю секунды), а ещё его может
+# ненадолго открыть антивирус. До ~1 с в сумме.
+_RMTREE_ATTEMPTS = 8
+_RMTREE_DELAY_SEC = 0.03
+
+
+def _rmtree_with_retry(path: Path) -> None:
+    for attempt in range(_RMTREE_ATTEMPTS):
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError:
+            if attempt == _RMTREE_ATTEMPTS - 1:
+                raise
+            time.sleep(_RMTREE_DELAY_SEC * (attempt + 1))
+        except FileNotFoundError:
+            return          # удалил кто-то ещё
+
+
 def _copy_sqlite(src: Path, dst: Path) -> None:
     """Копия БД через sqlite3 backup API — с данными, которые ещё лежат в
     -wal (копия одного файла их бы потеряла)."""
@@ -194,7 +225,9 @@ class ProjectManager:
                 if db is None or os.path.abspath(db.db_path) != index_path:
                     continue
                 del pm._db_pool[project_id]
-            db.close()
+            # Файл сейчас удалят или заменят: запросы, которые уже держат
+            # этот Database (SearchEngine), не должны открыть его заново.
+            db.retire()
 
     # ============================================
     # REGISTRY
@@ -517,25 +550,42 @@ class ProjectManager:
             self._delete_project(project_id)
 
     def _delete_project(self, project_id: str):
-        self.get_project(project_id)          # KeyError, если проекта нет
+        """Порядок важен: реестр → закрытие индекса → файлы.
+
+        Пока проект в реестре, любой запрос MCP проходит проверку проекта и
+        через get_db открывает (или создаёт пустой) index.db — посреди
+        удаления это оставляло на томе новый пустой индекс-сироту, а на
+        Windows мешало rmtree. Поэтому проект сначала убирается из реестра:
+        новые запросы получают «not found», а get_db без проекта в реестре
+        индекс не открывает и не создаёт. Затем индекс закрывается у всех
+        экземпляров, затем удаляются файлы (на больших выгрузках — секунды).
+
+        Если удалить файлы не удалось (Windows, файл занят), проекта в
+        реестре уже нет, а исключение называет путь. Повторный вызов для
+        проекта, которого нет в реестре, но чьи каталоги остались, дочищает
+        их; KeyError — только если нет ни записи, ни каталогов."""
+        project_dir = self.projects_dir / project_id
+        index_parent = self._index_path(project_id).parent
+        with self._registry_lock():
+            registry = self._load_registry()
+            if registry.pop(project_id, None) is not None:
+                self._save_registry()
+            elif not project_dir.exists() and not index_parent.exists():
+                raise KeyError(f"Project '{project_id}' not found")
 
         # Индекс проекта — закрыть у всех ProjectManager процесса, не только
         # у себя (см. _INSTANCES).
         self._close_project_db_everywhere(project_id)
 
-        # Remove from disk — долго на больших выгрузках, поэтому вне
-        # блокировки реестра.
-        project_dir = self.projects_dir / project_id
-        if project_dir.exists():
-            shutil.rmtree(project_dir)
-        index_parent = self._index_path(project_id).parent
-        if index_parent != project_dir and index_parent.exists():
-            shutil.rmtree(index_parent)
-
-        with self._registry_lock():
-            registry = self._load_registry()
-            if registry.pop(project_id, None) is not None:
-                self._save_registry()
+        for path in dict.fromkeys((project_dir, index_parent)):
+            if not path.exists():
+                continue
+            try:
+                _rmtree_with_retry(path)
+            except OSError as e:
+                logger.error("Проект %s убран из реестра, но каталог %s удалить не удалось: %s. "
+                             "Повторите удаление, чтобы дочистить.", project_id, path, e)
+                raise ProjectFilesNotRemovedError(project_id, path, e) from e
 
     # ============================================
     # SOURCE MANAGEMENT
@@ -882,6 +932,16 @@ class ProjectManager:
                                "индекс открывается заново", project_id)
             if db is not None:
                 db.close()
+
+            # Открыть (и тем более создать) индекс — только для проекта из
+            # реестра. Проверка — под той же блокировкой пула: delete_project
+            # сперва убирает проект из реестра и лишь затем закрывает пулы,
+            # поэтому открытие либо успевает до закрытия (и будет закрыто),
+            # либо видит, что проекта нет. Иначе запрос посреди удаления
+            # создавал новый пустой index.db, а на Windows держал файл,
+            # который удаляет rmtree.
+            if project_id not in self._load_registry():
+                raise KeyError(f"Project '{project_id}' not found")
 
             db_path = str(self._index_path(project_id))
             db = Database(db_path)

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 from .app import templates, get_pm
-from ..core.project_manager import ReindexInProgressError
+from ..core.project_manager import ProjectFilesNotRemovedError, ReindexInProgressError
 
 logger = logging.getLogger('ariadna')
 
@@ -282,6 +282,8 @@ async def delete_project(project_id: str):
         pm.delete_project(project_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
+    except ProjectFilesNotRemovedError as e:
+        raise HTTPException(500, f"Не удалось удалить проект до конца: {e}")
     except KeyError as e:
         raise HTTPException(404, str(e))
     return JSONResponse({"status": "deleted", "project_id": project_id})
@@ -294,6 +296,8 @@ async def delete_project_post(project_id: str):
         pm.delete_project(project_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
+    except ProjectFilesNotRemovedError as e:
+        raise HTTPException(500, f"Не удалось удалить проект до конца: {e}")
     except KeyError as e:
         raise HTTPException(404, str(e))
     return RedirectResponse("/", status_code=303)
