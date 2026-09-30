@@ -112,3 +112,104 @@ def test_indexer_alone_does_not_touch_status():
             assert state.get('index_duration_sec') is not None
         finally:
             db.close()
+
+
+# ============================================
+# reindex_async: 'indexing' записан до ответа «started»
+# ============================================
+
+import threading
+
+
+def _hold_reindex(monkeypatch, pm) -> tuple[threading.Event, threading.Event]:
+    """reindex() в потоке ждёт release, затем выполняется по-настоящему;
+    done — поток закончил."""
+    release, done = threading.Event(), threading.Event()
+    real = ProjectManager.reindex
+
+    def held(self, project_id, source_id=None):
+        try:
+            assert release.wait(10)
+            return real(self, project_id, source_id=source_id)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(ProjectManager, 'reindex', held)
+    return release, done
+
+
+def test_reindex_async_marks_indexing_before_returning(monkeypatch):
+    """Повторная переиндексация готового проекта: раньше первые ~0,1 с после
+    ответа get_index_status отдавал прежний 'ready' — статус записывал
+    поток уже после ответа."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm(tmpdir)
+        try:
+            pm.reindex('p1')
+            assert pm.get_db('p1').get_stats()['status'] == 'ready'
+
+            release, done = _hold_reindex(monkeypatch, pm)
+            assert pm.reindex_async('p1') == {'status': 'started', 'project_id': 'p1'}
+            # Поток ещё ничего не сделал — всё записано синхронно.
+            assert pm.get_db('p1').get_stats()['status'] == 'indexing'
+            assert pm.get_project('p1').status == 'indexing'
+            assert ProjectManager(tmpdir).get_project('p1').status == 'indexing'   # на диске
+            assert _status(pm).startswith('Status: indexing'), _status(pm)
+            assert pm.reindex_async('p1')['status'] == 'already_running'
+
+            release.set()
+            assert done.wait(30)
+            assert pm.get_db('p1').get_stats()['status'] == 'ready'
+            assert pm.get_project('p1').status == 'ready'
+            assert _status(pm).startswith('Status: ready')
+            assert not pm._reindex_lock('p1').locked()
+        finally:
+            pm.close_all()
+
+
+def test_reindex_async_error_releases_lock_and_starts_nothing(monkeypatch):
+    """Проект удалили между вызовами (другой экземпляр — Web UI): ошибка,
+    блокировка отпущена, поток не запущен."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm(tmpdir)
+        try:
+            pm.get_project('p1')                          # закэширован в pm
+            ProjectManager(tmpdir).delete_project('p1')   # удалён другим экземпляром
+            started = []
+            monkeypatch.setattr(ProjectManager, 'reindex',
+                                lambda self, *a, **kw: started.append(a))
+            result = pm.reindex_async('p1')
+            assert result['status'] == 'error' and 'p1' in result['error'], result
+            assert not pm._reindex_lock('p1').locked()
+            assert started == []
+            assert execute_tool(pm, 'reindex', {'project_id': 'p1'}).startswith('Error')
+        finally:
+            pm.close_all()
+
+
+def test_web_ui_reindex_marks_indexing_and_reports_error(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm(tmpdir)
+        monkeypatch.setattr(app_module, '_pm', pm)
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878',
+                                                     'Accept': 'application/json'})
+        try:
+            release, done = _hold_reindex(monkeypatch, pm)
+            r = client.post('/api/projects/p1/reindex')
+            assert r.status_code == 200 and r.json()['status'] == 'started', r.text
+            assert client.get('/api/projects/p1/status').json()['status'] == 'indexing'
+            release.set()
+            assert done.wait(30)
+            assert client.get('/api/projects/p1/status').json()['status'] == 'ready'
+
+            # Запись статуса не удалась — ответ с ошибкой, а не «started».
+            def broken(self, project_id):
+                raise OSError('диск недоступен')
+            monkeypatch.setattr(ProjectManager, '_mark_indexing', broken)
+            r = client.post('/api/projects/p1/reindex')
+            assert r.status_code == 500 and 'диск недоступен' in r.json()['detail'], r.text
+            assert not pm._reindex_lock('p1').locked()
+        finally:
+            pm.close_all()
