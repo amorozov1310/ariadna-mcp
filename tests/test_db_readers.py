@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -169,3 +170,49 @@ def test_close_all_closes_readers_of_all_threads():
         finally:
             worker.stop()
             pm.close_all()
+
+
+def test_close_while_other_threads_query_does_not_crash():
+    """close() закрывает читающие соединения всех потоков. Раньше это был
+    sqlite3.Connection.close() прямо посреди запроса другого потока — CPython
+    падал с segfault (удаление проекта под нагрузкой MCP роняло сервер).
+    Теперь close() ждёт окончания текущего запроса соединения."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(os.path.join(tmpdir, 'index.db'))
+        db.connect()
+        db.init_schema()
+        db.conn.executemany("INSERT INTO sources (id, label) VALUES (?, ?)",
+                            [(f's{i}', 'x' * 200) for i in range(2000)])
+        db.conn.commit()
+        stop = threading.Event()
+        errors = []
+
+        def read():
+            while not stop.is_set():
+                try:
+                    # Долгий запрос: SQLite отпускает GIL на время шагов, и
+                    # close() из основного потока попадает в его середину.
+                    rows = db.read_conn().execute(
+                        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c "
+                        "WHERE x < 3000) SELECT x, (SELECT label FROM sources LIMIT 1) "
+                        "FROM c").fetchall()
+                    assert len(rows) == 3000
+                except sqlite3.ProgrammingError:
+                    pass                    # закрыто — следующий read_conn откроет новое
+                except Exception as e:      # pragma: no cover
+                    errors.append(e)
+                    return
+
+        threads = [threading.Thread(target=read) for _ in range(3)]
+        for t in threads:
+            t.start()
+        try:
+            for _ in range(30):
+                db.close()
+                time.sleep(0.001)
+        finally:
+            stop.set()
+            for t in threads:
+                t.join()
+            db.close()
+        assert not errors, errors
