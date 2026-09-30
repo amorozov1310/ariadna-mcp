@@ -80,8 +80,10 @@ class SourceInfo:
     id: str
     label: str
     source_type: str = 'main'          # 'main' (конфигурация) | 'extension'
-    report_path: str = ''               # relative to project dir
-    xml_path: str = ''                  # relative to project dir
+    # Относительно каталога проекта (sources/{id}/…) или абсолютные — см.
+    # ProjectManager.source_path.
+    report_path: str = ''
+    xml_path: str = ''
     indexed_at: str = ''
 
 
@@ -689,12 +691,24 @@ class ProjectManager:
             project.sources = [s for s in project.sources if s.id != source_id]
             self._save_registry()
 
+    def source_path(self, project_id: str, rel: str) -> Path:
+        """Путь к файлу или каталогу источника (report_path, xml_path).
+
+        Обычно путь относительный — от каталога проекта (sources/{id}/xml).
+        Абсолютный путь берётся как есть: так источник может лежать вне
+        data_dir — медленные тесты указывают им на реальные выгрузки в
+        data/projects, а реестр, индексы и сгенерированный report.txt держат
+        во временном каталоге (tests/corpus_sandbox.py). Единственное место,
+        где путь источника склеивается с каталогом проекта."""
+        path = Path(rel)
+        return path if path.is_absolute() else self.projects_dir / project_id / path
+
     def get_source_report_path(self, project_id: str, source_id: str) -> Path | None:
         """Get absolute path to source's report.txt."""
         project = self.get_project(project_id)
         for s in project.sources:
             if s.id == source_id and s.report_path:
-                return self.projects_dir / project_id / s.report_path
+                return self.source_path(project_id, s.report_path)
         return None
 
     def get_source_xml_path(self, project_id: str, source_id: str) -> Path | None:
@@ -702,7 +716,7 @@ class ProjectManager:
         project = self.get_project(project_id)
         for s in project.sources:
             if s.id == source_id and s.xml_path:
-                return self.projects_dir / project_id / s.xml_path
+                return self.source_path(project_id, s.xml_path)
         return None
 
 
@@ -784,7 +798,7 @@ class ProjectManager:
             project = None
         for src in (project.sources if project else []):
             if src.xml_path:
-                roots[src.id] = str(self.projects_dir / project_id / src.xml_path)
+                roots[src.id] = str(self.source_path(project_id, src.xml_path))
         return SearchEngine(db, source_roots=roots)
 
     # ============================================
@@ -847,7 +861,7 @@ class ProjectManager:
             walked: dict[str, list] = {}
             for s in project.sources:
                 if s.xml_path:
-                    p = self.projects_dir / project_id / s.xml_path
+                    p = self.source_path(project_id, s.xml_path)
                     if p.exists():
                         walked[s.id] = walker.walk(str(p))
             known_modules, known_objects, common_module_files = Indexer.collect_known_facts(
@@ -1080,12 +1094,12 @@ class ProjectManager:
 
         xml_path = None
         if source.xml_path:
-            xml_path = self.projects_dir / project_id / source.xml_path
+            xml_path = self.source_path(project_id, source.xml_path)
 
         # 1. Index report (metadata)
         report_path = None
         if source.report_path:
-            report_path = self.projects_dir / project_id / source.report_path
+            report_path = self.source_path(project_id, source.report_path)
 
         # Этап 5/вариант A: отчёт Конфигуратора больше не обязательный
         # ручной шаг — если у источника есть только XML-выгрузка, генерируем

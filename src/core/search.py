@@ -1012,7 +1012,7 @@ def diagnose_index(project_manager, project_id: str) -> dict:
     for source in project.sources:
         if not source.xml_path:
             continue
-        xml_path = pm.projects_dir / project_id / source.xml_path
+        xml_path = pm.source_path(project_id, source.xml_path)
         if not xml_path.exists():
             continue
 
