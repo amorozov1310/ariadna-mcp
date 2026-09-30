@@ -186,6 +186,10 @@ async def reindex_project(request: Request, project_id: str, source_id: str | No
         raise HTTPException(404)
 
     result = pm.reindex_async(project_id, source_id=source_id if source_id else None)
+    if result['status'] == 'error':
+        # Проект могли удалить между проверкой выше и запуском.
+        raise HTTPException(404 if project_id not in {p.id for p in pm.list_projects()} else 500,
+                            f"Не удалось начать переиндексацию: {result['error']}")
 
     accept = request.headers.get('accept', '')
     if 'application/json' in accept or request.headers.get('x-requested-with'):

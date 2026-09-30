@@ -822,19 +822,7 @@ class ProjectManager:
         from .indexer import Indexer
         from .xml_walker import XMLWalker
 
-        project = self.get_project(project_id)
-        db = self.get_db(project_id)
-
-        # Narrow, re-read-then-write-one-key save (Этап 4/D7) — not
-        # update_project()/self._save_registry(), which dump this whole
-        # instance's cached registry and would clobber concurrent changes
-        # to OTHER projects from another ProjectManager instance (Web UI
-        # and MCP server each run their own — see main.py) during however
-        # long this reindex takes.
-        project.status = 'indexing'
-        self._save_project_to_disk(project_id, project)
-        db.update_state(status='indexing', progress_current=0, progress_total=0,
-                         progress_phase='scanning')
+        project, db = self._mark_indexing(project_id)
 
         # Этап 4/D7 item 3: durability is not a concern for an index that's
         # fully rebuildable from source — trade it for write throughput for
@@ -946,6 +934,29 @@ class ProjectManager:
             db.conn.execute("PRAGMA synchronous=NORMAL")
             db.conn.commit()
 
+    def _mark_indexing(self, project_id: str) -> tuple['ProjectInfo', Database]:
+        """Записать начало переиндексации: status='indexing' в реестр и в
+        index_state (прогресс 0, фаза 'scanning'). Возвращает проект и БД.
+
+        Реестр — узкой записью «перечитать → записать один ключ» (Этап 4/D7),
+        а не update_project()/_save_registry(): те сбросили бы на диск весь
+        кэш этого экземпляра и затёрли бы правки других проектов из другого
+        ProjectManager (Web UI и MCP — у каждого свой, см. main.py) за время
+        долгого прогона.
+
+        Запись идемпотентна: reindex_async делает её синхронно до ответа
+        «started», и reindex() в потоке повторяет её — теми же значениями и
+        до того, как прогон что-либо изменил. Поэтому флаг «уже записано»
+        не нужен, а reindex() без reindex_async (CLI, тесты) остаётся
+        самодостаточным."""
+        project = self.get_project(project_id)
+        db = self.get_db(project_id)
+        project.status = 'indexing'
+        self._save_project_to_disk(project_id, project)
+        db.update_state(status='indexing', progress_current=0, progress_total=0,
+                        progress_phase='scanning')
+        return project, db
+
     def reindex_async(self, project_id: str, source_id: str | None = None) -> dict:
         """
         Start reindex() in a background thread and return immediately
@@ -959,10 +970,27 @@ class ProjectManager:
         while one is in flight returns status='already_running' instead of
         starting a concurrent one (which would corrupt the walk/UPSERT
         bookkeeping index_bsl relies on).
+
+        К возврату 'started' статус 'indexing' уже записан (реестр и
+        index_state). status='error' (и текст в 'error') — начать не
+        удалось, поток не запущен.
         """
         lock = self._reindex_lock(project_id)
         if not lock.acquire(blocking=False):
             return {'status': 'already_running', 'project_id': project_id}
+
+        # Статус 'indexing' — синхронно, до ответа «started»: иначе его
+        # записывал поток уже после ответа, и get_index_status сразу после
+        # reindex отдавал прежний 'ready' (вживую — 2 прогона из 3). Если
+        # запись не удалась (проект удалили между вызовами), поток не
+        # запускается.
+        try:
+            self._mark_indexing(project_id)
+        except Exception as e:
+            lock.release()
+            logger.exception("Не удалось начать переиндексацию проекта %s", project_id)
+            return {'status': 'error', 'project_id': project_id,
+                    'error': e.args[0] if isinstance(e, KeyError) and e.args else str(e)}
 
         def _run():
             try:

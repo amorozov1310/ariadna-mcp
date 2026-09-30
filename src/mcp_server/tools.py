@@ -252,6 +252,8 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                 if error:
                     return error
             result = pm.reindex_async(project_id, source_id=source_id)
+            if result['status'] == 'error':
+                return f"Error: не удалось начать переиндексацию '{project_id}': {result['error']}"
             if result['status'] == 'already_running':
                 return (
                     f"Reindex already in progress for '{project_id}'. "
