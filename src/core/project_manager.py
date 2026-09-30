@@ -51,6 +51,14 @@ _REGISTRY_LOCKS: dict[str, threading.RLock] = {}
 _REPLACE_ATTEMPTS = 10
 _REPLACE_DELAY_SEC = 0.02
 
+# Сколько ждать, пока projects.json снова появится, если он был и пропал. На
+# /data через 9p (Docker Desktop на Windows) os.replace не атомарен: замерено
+# 154 FileNotFoundError на ~2500 чтений при непрерывной записи. Внутри
+# процесса чтение и запись под одной блокировкой, но второй процесс (сервер
+# в контейнере и ariadna-index на хосте) так не видно.
+_REGISTRY_MISSING_WAIT_SEC = 0.2
+_REGISTRY_MISSING_POLL_SEC = 0.01
+
 
 class ReindexInProgressError(RuntimeError):
     """Удаление отклонено: у проекта идёт переиндексация."""
@@ -172,8 +180,32 @@ class ProjectManager:
             return None
         return st.st_mtime_ns, st.st_size
 
+    def _read_registry_text(self, wait: bool) -> tuple[tuple[int, int], str] | None:
+        """(подпись, текст) projects.json; None — файла нет. wait — файл был
+        раньше, и его отсутствие, скорее всего, временное (замена через 9p):
+        подождать его появления до _REGISTRY_MISSING_WAIT_SEC."""
+        deadline = time.monotonic() + (_REGISTRY_MISSING_WAIT_SEC if wait else 0)
+        while True:
+            sig = self._registry_signature()
+            if sig is not None:
+                try:
+                    return sig, self.registry_path.read_text(encoding='utf-8')
+                except OSError:
+                    pass    # пропал между stat и чтением / занят заменой (Windows)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(_REGISTRY_MISSING_POLL_SEC)
+
+    def _registry_known(self) -> bool:
+        """Реестр на диске уже был: этот экземпляр его читал или писал."""
+        return self._registry_sig is not None or bool(self._registry)
+
     def _load_registry(self) -> dict[str, ProjectInfo]:
         """Реестр проектов из projects.json.
+
+        Под той же блокировкой, что и запись (_registry_lock): иначе чтение
+        попадало между удалением файла и появлением нового и видело пустой
+        реестр («project not found. Available: none»).
 
         В одном процессе работают несколько независимых ProjectManager (MCP
         SSE, MCP HTTP и Web UI — см. main.py), и каждый может менять файл.
@@ -182,15 +214,30 @@ class ProjectManager:
         иначе MCP не видел проектов и источников, добавленных через Web UI,
         и затирал их своей устаревшей копией.
         """
+        with self._registry_lock():
+            return self._load_registry_locked()
+
+    def _load_registry_locked(self) -> dict[str, ProjectInfo]:
         cached = self._registry
         sig = self._registry_signature()
         if cached is not None and sig is not None and sig == self._registry_sig:
             return cached
 
+        known = self._registry_known()
+        read = self._read_registry_text(wait=known)
+        if read is None and known:
+            # Файл был и пропал: другой процесс заменяет его на ФС без
+            # атомарной замены. Пустой реестр здесь — ложное «проектов нет» и
+            # риск затереть им настоящий; отдаём прежний кэш.
+            logger.warning("projects.json временно недоступен (идёт замена?) — "
+                           "используется прежний реестр")
+            return cached if cached is not None else {}
+
         migrated = False
-        if sig is not None:
+        if read is not None:
+            sig, text = read
             try:
-                data = json.loads(self.registry_path.read_text(encoding='utf-8'))
+                data = json.loads(text)
                 projects = {}
                 for pid, pdata in data.get('projects', {}).items():
                     project, dropped = self._project_from_dict(pdata)
@@ -316,12 +363,22 @@ class ProjectManager:
             if project is None:
                 return
 
-        disk: dict = {'projects': {}}
-        if self.registry_path.exists():
+        # Основа — файл на диске. Если его нет или он не читается (замена
+        # через 9p другим процессом), — кэш этого экземпляра, но не пустой
+        # словарь: иначе реестр записался бы с одним этим проектом.
+        disk = None
+        read = self._read_registry_text(wait=self._registry_known())
+        if read is not None:
             try:
-                disk = json.loads(self.registry_path.read_text(encoding='utf-8'))
+                disk = json.loads(read[1])
             except (json.JSONDecodeError, TypeError):
-                disk = {'projects': {}}
+                disk = None
+        if not isinstance(disk, dict):
+            if self._registry:
+                logger.warning("projects.json недоступен при записи проекта %s — за основу "
+                               "взят реестр из памяти", project_id)
+            disk = {'projects': {pid: self._project_to_dict(p)
+                                 for pid, p in (self._registry or {}).items()}}
         projects = disk.setdefault('projects', {})
         ours = self._project_to_dict(project)
         entry = projects.get(project_id)
