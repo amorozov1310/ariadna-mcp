@@ -17,9 +17,10 @@ data/projects на месте: оставляли гигабайтные data/pr
 (в Docker индексы давно на томе ariadna-index), писали статус в общий
 data/projects.json (прерванный прогон оставлял status='indexing') и
 генерировали report.txt в каталог источника. После каждого теста
-проверяется, что data/projects.json (mtime и размер), index.db* в
-data/projects/*/ и report.txt источников не изменились, поэтому контейнер
-на время прогона останавливать не нужно.
+проверяется, что записи bshp и 1idm2 в data/projects.json (по содержимому),
+index.db* в data/projects/*/ и report.txt их источников не изменились.
+Правки других проектов в реестре (Web UI во время прогона) не мешают,
+поэтому контейнер на время прогона останавливать не нужно.
 """
 
 import sys
@@ -41,6 +42,7 @@ from corpus_sandbox import assert_data_unchanged, data_snapshot, sandbox_project
 DATA_DIR = Path(__file__).parent.parent / 'data'
 BSHP_XML = DATA_DIR / 'projects' / 'bshp' / 'sources' / 'main' / 'xml'
 IDM2_DIR = DATA_DIR / 'projects' / '1idm2'
+CORPUS_PROJECTS = ['bshp', '1idm2']   # проекты, которые тесты берут в песочницу
 
 pytestmark = pytest.mark.slow
 
@@ -51,7 +53,7 @@ def data_untouched():
     if not (DATA_DIR / 'projects.json').exists():
         yield
         return
-    before = data_snapshot(DATA_DIR)
+    before = data_snapshot(DATA_DIR, CORPUS_PROJECTS)
     yield
     assert_data_unchanged(DATA_DIR, before)
 
