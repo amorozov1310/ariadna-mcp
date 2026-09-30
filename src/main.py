@@ -21,6 +21,14 @@ def _index_dir() -> str | None:
     return os.environ.get('INDEX_DIR') or None
 
 
+def _listen_addr() -> str:
+    """Адрес, на котором слушают Web UI и MCP. Авторизации нет, поэтому по
+    умолчанию только эта машина (127.0.0.1) — как и порты Docker (BIND_ADDR).
+    В контейнере Dockerfile задаёт LISTEN_ADDR=0.0.0.0: иначе не работает
+    проброс портов, а наружу их по-прежнему открывает только BIND_ADDR."""
+    return os.environ.get('LISTEN_ADDR', '127.0.0.1')
+
+
 def _prepare_data(data_dir: str) -> None:
     """Обслуживание до запуска любых рабочих потоков (ни одна переиндексация
     ещё не идёт): перенос индексов в INDEX_DIR, затем сброс статуса
@@ -83,7 +91,7 @@ def _start_web(data_dir: str, port: int):
         os.environ['DATA_DIR'] = data_dir
         uvicorn.run(
             "src.web.app:app",
-            host="0.0.0.0",
+            host=_listen_addr(),
             port=port,
             log_level="warning",
         )
@@ -119,7 +127,7 @@ def _start_mcp_sse(data_dir: str, port: int):
         pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
-        uvicorn.run(_sse_app(mcp), host="0.0.0.0", port=port, log_level="warning")
+        uvicorn.run(_sse_app(mcp), host=_listen_addr(), port=port, log_level="warning")
 
     except ImportError as e:
         logger.warning(f"MCP dependencies missing ({e}) — running Web UI only")
@@ -157,7 +165,7 @@ def _start_mcp_streamable_http(data_dir: str, port: int):
 
         from .security import mcp_transport_security
         app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+        uvicorn.run(app, host=_listen_addr(), port=port, log_level="warning")
 
     except ImportError as e:
         logger.warning(f"MCP dependencies missing ({e}) — streamable HTTP transport unavailable")

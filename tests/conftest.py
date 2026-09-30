@@ -60,7 +60,7 @@ def environment_mismatches(requirements: list[str],
 
 def _setup_hint() -> str:
     activate = r'.venv\Scripts\activate' if sys.platform == 'win32' else 'source .venv/bin/activate'
-    return ("Соберите окружение по pyproject.toml (см. SETUP.md, «Вариант 2»):\n"
+    return ("Соберите окружение по pyproject.toml (см. SETUP.md, «Разработка без Docker»):\n"
             "  python -m venv .venv\n"
             f"  {activate}\n"
             '  pip install -e ".[dev]"')

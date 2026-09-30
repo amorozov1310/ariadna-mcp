@@ -10,8 +10,14 @@ on:
   pull_request:
 
 jobs:
+  # Разработка идёт на Windows: там иначе ведут себя открытые файлы (занятый
+  # index.db не удалить), кодировки и пути — поэтому быстрые тесты и на ней.
   pytest:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 

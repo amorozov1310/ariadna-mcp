@@ -147,8 +147,12 @@ def test_docker_dependencies_come_from_pyproject():
 def test_python_m_src_core_indexer_runs_cli():
     """`python -m src.core.indexer` — тот же CLI, что ariadna-index
     (раньше модуль без __main__ молча ничего не делал)."""
+    import os
     import subprocess
+    # Справка по-русски: через канал на Windows вывод шёл бы в кодировке
+    # локали (cp1252), где кириллицы нет.
     r = subprocess.run([sys.executable, '-m', 'src.core.indexer', '--help'],
-                       cwd=ROOT, capture_output=True, text=True, timeout=60)
+                       cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=60,
+                       env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
     assert r.returncode == 0, r.stderr
     assert 'usage' in r.stdout
