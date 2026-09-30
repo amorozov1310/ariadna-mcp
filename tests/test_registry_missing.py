@@ -103,7 +103,7 @@ def test_first_run_without_registry_is_empty_and_does_not_wait():
         assert _ids(ProjectManager(tmpdir)) == ['p1']
 
 
-def test_crud_and_reads_in_parallel_never_see_empty_registry(monkeypatch, caplog):
+def test_crud_and_reads_in_parallel_never_see_empty_registry(monkeypatch):
     """Один экземпляр в цикле создаёт и удаляет проект, второй в цикле читает
     реестр. os.replace подменён неатомарным (удалить → пауза →
     переименовать), как на 9p: без общей блокировки чтения читатель
@@ -122,6 +122,20 @@ def test_crud_and_reads_in_parallel_never_see_empty_registry(monkeypatch, caplog
     with tempfile.TemporaryDirectory() as tmpdir:
         writer, reader = ProjectManager(tmpdir), ProjectManager(tmpdir)
         writer.create_project('keep', 'keep')
+        # Сколько раз читатель застал файл отсутствующим (stat не нашёл его).
+        # Не по предупреждению в логе: на Windows чтение только что
+        # заменённого файла изредка получает отказ в доступе (его открыл
+        # антивирус) — это не пропажа файла, и в работе её покрывают повторы.
+        absent = []
+        real_signature = reader._registry_signature
+
+        def signature():
+            sig = real_signature()
+            if sig is None:
+                absent.append(1)
+            return sig
+
+        reader._registry_signature = signature
         stop = threading.Event()
         errors: list = []
 
@@ -137,17 +151,15 @@ def test_crud_and_reads_in_parallel_never_see_empty_registry(monkeypatch, caplog
 
         seen_empty = 0
         reads = 0
-        with caplog.at_level(logging.WARNING, logger='ariadna'):
-            t = threading.Thread(target=write)
-            t.start()
-            while not stop.is_set():
-                reads += 1
-                if 'keep' not in {p.id for p in reader.list_projects()}:
-                    seen_empty += 1
-            t.join()
+        t = threading.Thread(target=write)
+        t.start()
+        while not stop.is_set():
+            reads += 1
+            if 'keep' not in {p.id for p in reader.list_projects()}:
+                seen_empty += 1
+        t.join()
         assert not errors, errors
         assert reads > 10
         assert seen_empty == 0
         # Внутри процесса чтение ни разу не попало на отсутствующий файл.
-        missing = caplog.text.count('временно недоступен')
-        assert missing == 0, f"чтение видело отсутствующий файл {missing} раз"
+        assert not absent, f"чтение видело отсутствующий файл {len(absent)} раз"
