@@ -9,13 +9,21 @@ which are not meant to ship to every clone of this repo.
 Run explicitly with:
     python -m pytest tests -q -m slow
 
-These tests reindex the real project directories in data/projects/ in
-place (same registry/index.db the Web UI and MCP server use for these
-projects) rather than copying tens of thousands of files into a temp
-dir — that mirrors how bshp/1idm2 are actually indexed day to day.
+В data/ тесты ничего не пишут: выгрузки корпуса только читаются, а реестр,
+индексы и сгенерированный report.txt — во временном каталоге
+(tests/corpus_sandbox.py: собственный projects.json с теми же проектами и
+абсолютными путями к реальным источникам). Раньше тесты переиндексировали
+data/projects на месте: оставляли гигабайтные data/projects/*/index.db
+(в Docker индексы давно на томе ariadna-index), писали статус в общий
+data/projects.json (прерванный прогон оставлял status='indexing') и
+генерировали report.txt в каталог источника. После каждого теста
+проверяется, что data/projects.json (mtime и размер), index.db* в
+data/projects/*/ и report.txt источников не изменились, поэтому контейнер
+на время прогона останавливать не нужно.
 """
 
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -27,6 +35,9 @@ from src.core.project_manager import ProjectManager
 from src.core.call_analyzer import CallAnalyzer
 from src.core import report_generator
 
+sys.path.insert(0, str(Path(__file__).parent))
+from corpus_sandbox import assert_data_unchanged, data_snapshot, sandbox_project_manager
+
 DATA_DIR = Path(__file__).parent.parent / 'data'
 BSHP_XML = DATA_DIR / 'projects' / 'bshp' / 'sources' / 'main' / 'xml'
 IDM2_DIR = DATA_DIR / 'projects' / '1idm2'
@@ -34,12 +45,37 @@ IDM2_DIR = DATA_DIR / 'projects' / '1idm2'
 pytestmark = pytest.mark.slow
 
 
-def _project_manager() -> ProjectManager:
-    return ProjectManager(str(DATA_DIR))
+@pytest.fixture(autouse=True)
+def data_untouched():
+    """После теста в data/ не изменилось ничего (см. докстринг модуля)."""
+    if not (DATA_DIR / 'projects.json').exists():
+        yield
+        return
+    before = data_snapshot(DATA_DIR)
+    yield
+    assert_data_unchanged(DATA_DIR, before)
+
+
+@pytest.fixture
+def work_dir():
+    # Не tmp_path: pytest хранит три последних basetemp, а здесь гигабайты индексов.
+    with tempfile.TemporaryDirectory(prefix='ariadna-slow-') as tmp:
+        yield Path(tmp)
+
+
+def _project_manager(project_id: str, work_dir: Path) -> ProjectManager:
+    """Песочница с одним проектом из реального реестра; корпус — только чтение."""
+    pm = sandbox_project_manager(DATA_DIR, [project_id], work_dir)
+    try:
+        pm.get_project(project_id)
+    except KeyError:
+        pm.close_all()
+        pytest.skip(f"проекта {project_id} нет в data/projects.json")
+    return pm
 
 
 @pytest.mark.skipif(not BSHP_XML.exists(), reason="bshp corpus not present (data/projects/bshp/sources/main/xml)")
-def test_bshp_full_reindex_bsl_graph():
+def test_bshp_full_reindex_bsl_graph(work_dir):
     """Full BSHP corpus (~19k .bsl files, main + ext_obmen) indexes without errors.
 
     report.txt was absent for bshp until Этап 5 (see IMPROVEMENT_PLAN Этап 0.5) —
@@ -47,7 +83,7 @@ def test_bshp_full_reindex_bsl_graph():
     when the generate_config_report package is installed, so metadata is expected
     to be populated here too, not just BSL/call-graph.
     """
-    pm = _project_manager()
+    pm = _project_manager('bshp', work_dir)
     try:
         t0 = time.time()
         stats = pm.reindex('bshp')
@@ -76,9 +112,9 @@ def test_bshp_full_reindex_bsl_graph():
 
 
 @pytest.mark.skipif(not IDM2_DIR.exists(), reason="1idm2 corpus not present (data/projects/1idm2)")
-def test_1idm2_full_reindex_metadata_and_graph():
+def test_1idm2_full_reindex_metadata_and_graph(work_dir):
     """Full 1idm2 corpus (main + 11 extensions) indexes metadata + BSL without errors."""
-    pm = _project_manager()
+    pm = _project_manager('1idm2', work_dir)
     try:
         t0 = time.time()
         stats = pm.reindex('1idm2')
