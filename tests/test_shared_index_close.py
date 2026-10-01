@@ -1,14 +1,19 @@
 """
-Индекс проекта закрывается во всех ProjectManager процесса.
+Индекс удалённого проекта закрывается для всех потоков процесса.
 
-В одном процессе три ProjectManager (Web UI, MCP SSE, MCP HTTP), у каждого
-свой пул Database. delete_project закрывал Database только у себя.
-Вживую:
+Раньше в одном процессе было три ProjectManager (Web UI, MCP SSE, MCP HTTP)
+со своими пулами Database, а delete_project закрывал Database только у
+себя. Вживую:
 - Docker (Linux): Web UI удалил проект, создал заново без источников и
   переиндексировал, а MCP get_index_status по-прежнему отдавал
   «Procedures: 2045» и находил процедуры — его пул читал удалённый файл;
 - без Docker на Windows: DELETE /api/projects/{id} → 500 WinError 32,
   файл индекса держали соединения пула MCP.
+
+Теперь ProjectManager на процесс один (main.build_shared_state), и те же
+сценарии проверяются на нём: запросы MCP идут из других потоков, у каждого
+своё читающее соединение к индексу. Во второй части — защита от второго
+процесса: файл индекса удалили или заменили снаружи.
 """
 
 import io
@@ -46,74 +51,57 @@ def _procedures(pm: ProjectManager) -> list:
 
 
 @pytest.fixture
-def two_managers():
-    """Web UI и MCP: два ProjectManager на одних data_dir и index_dir;
-    второй читает проект первого из нескольких потоков."""
+def readers_in_threads():
+    """Один ProjectManager процесса; проект проиндексирован, и три потока
+    (как потоки пула MCP) читают его — у каждого своё соединение."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        data_dir, index_dir = os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index')
-        web, mcp = ProjectManager(data_dir, index_dir), ProjectManager(data_dir, index_dir)
+        pm = ProjectManager(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
         workers = [_Worker() for _ in range(3)]
         try:
-            web.create_project('p1', 'p1')
-            _add_source(web)
-            web.reindex('p1')
+            pm.create_project('p1', 'p1')
+            _add_source(pm)
+            pm.reindex('p1')
             readers = []
             for w in workers:
-                assert w.call(lambda: _procedures(mcp))
-                assert w.call(lambda: mcp.get_db('p1').get_stats()['procedures']) > 0
-                readers.append(w.call(lambda: mcp.get_db('p1').read_conn()))
-            assert 'Procedures: 0' not in execute_tool(mcp, 'get_index_status', {'project_id': 'p1'})
-            yield web, mcp, workers, readers
+                assert w.call(lambda: _procedures(pm))
+                assert w.call(lambda: pm.get_db('p1').get_stats()['procedures']) > 0
+                readers.append(w.call(lambda: pm.get_db('p1').read_conn()))
+            assert 'Procedures: 0' not in w.call(
+                lambda: execute_tool(pm, 'get_index_status', {'project_id': 'p1'}))
+            yield pm, workers, readers
         finally:
             for w in workers:
                 w.stop()
-            web.close_all()
-            mcp.close_all()
+            pm.close_all()
 
 
-def test_recreated_project_is_empty_for_other_manager(two_managers):
-    web, mcp, workers, _ = two_managers
-    web.delete_project('p1')
-    web.create_project('p1', 'p1')      # тот же id, без источников
-    web.reindex('p1')
+def test_recreated_project_is_empty_for_other_threads(readers_in_threads):
+    pm, workers, _ = readers_in_threads
+    pm.delete_project('p1')
+    pm.create_project('p1', 'p1')      # тот же id, без источников
+    pm.reindex('p1')
 
-    assert mcp.get_db('p1').get_stats()['procedures'] == 0
-    assert _procedures(mcp) == []
+    assert pm.get_db('p1').get_stats()['procedures'] == 0
+    assert _procedures(pm) == []
     for w in workers:
-        assert w.call(lambda: mcp.get_db('p1').get_stats()['procedures']) == 0
-        assert w.call(lambda: _procedures(mcp)) == []
-    status = execute_tool(mcp, 'get_index_status', {'project_id': 'p1'})
-    assert 'Procedures: 0' in status, status
+        assert w.call(lambda: pm.get_db('p1').get_stats()['procedures']) == 0
+        assert w.call(lambda: _procedures(pm)) == []
+        status = w.call(lambda: execute_tool(pm, 'get_index_status', {'project_id': 'p1'}))
+        assert 'Procedures: 0' in status, status
 
 
-def test_delete_project_closes_other_managers_connections(two_managers):
+def test_delete_project_closes_connections_of_all_threads(readers_in_threads):
     """На Windows без этого rmtree каталога индекса падал с WinError 32; на
-    Linux проверяем сами соединения другого экземпляра."""
-    web, mcp, workers, readers = two_managers
-    index_parent = web._index_path('p1').parent
-    writer = mcp._db_pool['p1'].conn
+    Linux проверяем сами соединения потоков."""
+    pm, workers, readers = readers_in_threads
+    index_parent = pm._index_path('p1').parent
+    writer = pm._db_pool['p1'].conn
 
-    web.delete_project('p1')
+    pm.delete_project('p1')
     assert not index_parent.exists()
-    assert not (web.projects_dir / 'p1').exists()
-    assert 'p1' not in mcp._db_pool
+    assert not (pm.projects_dir / 'p1').exists()
+    assert 'p1' not in pm._db_pool
     assert _closed(writer) and all(_closed(c) for c in readers)
-
-
-def test_other_index_dir_is_left_alone():
-    """Экземпляр с другим index_dir держит другой файл — его не трогаем."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        data_dir = os.path.join(tmpdir, 'data')
-        a = ProjectManager(data_dir, os.path.join(tmpdir, 'index-a'))
-        b = ProjectManager(data_dir, os.path.join(tmpdir, 'index-b'))
-        try:
-            a.create_project('p1', 'p1')
-            db_b = b.get_db('p1')
-            a._close_project_db_everywhere('p1')
-            assert b._db_pool.get('p1') is db_b and db_b.conn is not None
-        finally:
-            a.close_all()
-            b.close_all()
 
 
 # ============================================

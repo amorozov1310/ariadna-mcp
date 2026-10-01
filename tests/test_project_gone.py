@@ -45,7 +45,7 @@ def _indexed(tmpdir: str) -> ProjectManager:
 
 def _catch_deletion(monkeypatch, pm: ProjectManager, how: str):
     """Запрос «застаёт удаление»: Database проекта списан (retire), как
-    после _close_project_db_everywhere, — или проекта уже нет в реестре."""
+    после _retire_project_db в delete_project, — или проекта уже нет в реестре."""
     if how == 'retired':
         db = pm.get_db('p1')
         db.retire()
