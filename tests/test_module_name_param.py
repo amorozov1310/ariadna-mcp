@@ -96,9 +96,20 @@ def test_hint_for_missing_procedure_names_module_name():
 
 
 def test_playground_form_uses_module_name():
-    import src.web.app  # noqa: F401 — роутеры импортируются из app
-    from src.web.routes_playground import get_tools_meta
-    params = {t['name']: [p['name'] for p in t['params']] for t in get_tools_meta()}
+    """Формы playground строятся из схемы MCP — имя то же."""
+    from src.web.routes_playground import tool_forms
+    from src.mcp_server.server import create_mcp_server
+    from src.core.project_manager import ProjectManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        try:
+            tools = _sdk(create_mcp_server(pm), lambda c: c.list_tools()).tools
+        finally:
+            pm.close_all()
+    schemas = [{'name': t.name, 'description': t.description, 'input_schema': t.input_schema}
+               for t in tools]
+    params = {t['name']: [p['name'] for p in t['params']] for t in tool_forms(schemas)}
     assert 'module_name' in params['get_module_outline']
     assert 'module_name' in params['get_call_tree']
+    assert 'module_name' in params['get_procedure_code']
     assert not any('module_path' in p for p in params.values())
