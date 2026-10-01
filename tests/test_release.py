@@ -7,6 +7,7 @@ import os
 import sys
 import logging
 import tempfile
+import threading
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -49,7 +50,7 @@ def test_compose_publishes_ports_on_loopback_by_default():
     compose = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
     port_lines = [line.strip() for line in compose.splitlines()
                   if line.strip().startswith('- "') and ':98' in line]
-    assert len(port_lines) == 3, port_lines
+    assert len(port_lines) == 2, port_lines
     for line in port_lines:
         assert line.startswith('- "${BIND_ADDR:-127.0.0.1}:'), line
     # Переменная с хоста сама в контейнер не попадает.
@@ -132,39 +133,10 @@ def test_mcp_allowed_hosts_env_lets_remote_host_in(monkeypatch):
             pm.close_all()
 
 
-def test_mcp_sse_rejects_foreign_host_without_traceback(monkeypatch, caplog):
-    """SDK 2.2 после ответа 421/403 на /sse бросает ValueError — uvicorn
-    писал трассировку на каждый такой запрос. main._sse_app проверяет Host и
-    Origin до SDK: те же коды, в логе одна строка WARNING, ни одной ERROR.
-    TestClient по умолчанию пробрасывает исключения приложения — без обёртки
-    тест упал бы на ValueError."""
-    from fastapi.testclient import TestClient
-    from src import main as main_module
-    monkeypatch.delenv('MCP_ALLOWED_HOSTS', raising=False)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pm, mcp = _mcp_server(tmpdir)
-        try:
-            with caplog.at_level(logging.WARNING), TestClient(main_module._sse_app(mcp)) as client:
-                bad = client.get('/sse', headers={'Host': 'evil.example:19877'})
-                assert bad.status_code == 421, bad.text
-                bad_origin = client.get('/sse', headers={
-                    'Host': '127.0.0.1:19877', 'Origin': 'http://evil.example'})
-                assert bad_origin.status_code == 403, bad_origin.text
-                # Свой Host проходит обёртку — дальше ошибка уже про сессию, не про хост.
-                own = client.post('/messages/', json={}, headers={'Host': '127.0.0.1:19877'})
-                assert own.status_code not in (421, 403), own.text
-            assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-            warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-            # По одной строке на каждый отказ (третья — про отсутствие session_id).
-            assert warnings[:2] == ['Invalid Host header: evil.example:19877',
-                                    'Invalid Origin header: http://evil.example'], warnings
-        finally:
-            pm.close_all()
-
-
 def test_mcp_streamable_http_rejection_does_not_raise(monkeypatch, caplog):
-    """На streamable HTTP SDK отказ просто возвращает, без исключения, —
-    обёртка там не нужна."""
+    """На streamable HTTP SDK отклонённый запрос просто получает ответ, без
+    исключения и трассировки в логе, — отдельная обёртка (как была для SSE)
+    не нужна."""
     from fastapi.testclient import TestClient
     from src.security import mcp_transport_security
     monkeypatch.delenv('MCP_ALLOWED_HOSTS', raising=False)
@@ -180,12 +152,7 @@ def test_mcp_streamable_http_rejection_does_not_raise(monkeypatch, caplog):
             pm.close_all()
 
 
-@pytest.mark.parametrize('starter, request_kw', [
-    ('_start_mcp_streamable_http', {'method': 'POST', 'url': '/mcp', 'json': _INIT}),
-    # POST, а не GET /sse: без защиты GET открыл бы бесконечный поток.
-    ('_start_mcp_sse', {'method': 'POST', 'url': '/messages/?session_id=0', 'json': {}}),
-])
-def test_main_wires_transport_security(monkeypatch, starter, request_kw):
+def test_main_wires_transport_security(monkeypatch):
     """main.py собирает приложения MCP с защитой: чужой Host — 421."""
     pytest.importorskip("mcp.server.mcpserver")
     import uvicorn
@@ -197,9 +164,9 @@ def test_main_wires_transport_security(monkeypatch, starter, request_kw):
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = ProjectManager(tmpdir)
         try:
-            getattr(main_module, starter)(pm, 0)
+            main_module._start_mcp_streamable_http(pm, 0)
             with TestClient(captured['app'], raise_server_exceptions=False) as client:
-                resp = client.request(headers={**_MCP_HEADERS, 'Host': 'evil.example:1'}, **request_kw)
+                resp = client.post('/mcp', json=_INIT, headers={**_MCP_HEADERS, 'Host': 'evil.example:1'})
                 assert resp.status_code == 421, resp.text
         finally:
             pm.close_all()
@@ -279,7 +246,7 @@ def test_sdk_validation_error_has_same_shape():
 # Адрес прослушивания: 127.0.0.1 без Docker, 0.0.0.0 только в контейнере
 # ============================================
 
-@pytest.mark.parametrize('starter', ['_start_web', '_start_mcp_sse', '_start_mcp_streamable_http'])
+@pytest.mark.parametrize('starter', ['_start_web', '_start_mcp_streamable_http'])
 @pytest.mark.parametrize('env, expected', [(None, '127.0.0.1'), ('0.0.0.0', '0.0.0.0')])
 def test_servers_listen_on_localhost_unless_listen_addr_set(monkeypatch, starter, env, expected):
     """Раньше main.py всегда слушал 0.0.0.0 — при запуске без Docker серверы
@@ -303,6 +270,44 @@ def test_servers_listen_on_localhost_unless_listen_addr_set(monkeypatch, starter
         finally:
             pm.close_all()
     assert captured['host'] == expected
+
+
+def test_sse_transport_is_gone():
+    """0.3.0: транспорт SSE убран — ни порта 9877/19877, ни MCP_PORT, ни
+    _start_mcp_sse; MCP только streamable HTTP на 9879 (/mcp)."""
+    from src import main as main_module
+    import src.security as security
+    assert not hasattr(main_module, '_start_mcp_sse')
+    assert not hasattr(main_module, '_sse_app')
+    assert not hasattr(security, 'HostOriginGuard')
+    for name in ('Dockerfile', 'docker-compose.yml', 'scripts/entrypoint.sh', 'src/main.py'):
+        text = (ROOT / name).read_text(encoding='utf-8')
+        for gone in ('9877', 'MCP_PORT', 'MCP_HOST_PORT', 'sse'):
+            assert gone not in text, (name, gone)
+    assert '9879' in (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
+
+
+def test_main_blocks_on_mcp_and_runs_web_ui_in_thread(monkeypatch):
+    """main(): Web UI — в фоновом потоке, MCP (streamable HTTP) — в основном,
+    блокирующий: его падение завершает процесс."""
+    from src import main as main_module
+    calls = []
+    web_started = threading.Event()
+    monkeypatch.setattr(main_module, '_start_web',
+                        lambda pm, port: calls.append(('web', port)) or web_started.set())
+    monkeypatch.setattr(main_module, '_start_mcp_streamable_http',
+                        lambda pm, port: calls.append(('mcp', port, threading.current_thread())))
+    monkeypatch.setattr(main_module, '_quiet_proactor_connection_reset', lambda: None)
+    monkeypatch.delenv('MCP_HTTP_PORT', raising=False)
+    monkeypatch.delenv('WEB_PORT', raising=False)
+    monkeypatch.delenv('INDEX_DIR', raising=False)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        monkeypatch.setenv('DATA_DIR', tmpdir)
+        main_module.main()
+        assert web_started.wait(10)
+    mcp = [c for c in calls if c[0] == 'mcp']
+    assert mcp == [('mcp', 9879, threading.main_thread())]
+    assert ('web', 9878) in calls
 
 
 def test_docker_image_listens_on_all_interfaces():

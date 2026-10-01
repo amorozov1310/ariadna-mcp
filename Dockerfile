@@ -32,13 +32,12 @@ ENV DATA_DIR=/data
 # открывает только BIND_ADDR в docker-compose.yml (по умолчанию 127.0.0.1).
 # Без Docker по умолчанию 127.0.0.1 (src/main.py:_listen_addr).
 ENV LISTEN_ADDR=0.0.0.0
-ENV MCP_PORT=9877
 ENV MCP_HTTP_PORT=9879
 ENV WEB_PORT=9878
 ENV LOG_LEVEL=INFO
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 9877 9878 9879
+EXPOSE 9878 9879
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s \
     CMD curl -f http://localhost:9878/health || exit 1

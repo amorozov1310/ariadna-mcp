@@ -1,5 +1,5 @@
 """
-Один ProjectManager на процесс — общий для Web UI и обоих транспортов MCP.
+Один ProjectManager на процесс — общий для Web UI и MCP.
 
 Раньше main.py создавал по ProjectManager на каждый сервер (и ещё один
 временный для обслуживания при старте), а Web UI — свой. У каждого был свой
@@ -96,7 +96,7 @@ def test_web_ui_and_mcp_use_the_same_project_manager(shared, monkeypatch):
             result = await client.call_tool('list_projects', {})
             return '\n'.join(c.text for c in result.content if getattr(c, 'text', None))
 
-    for mcp in (create_mcp_server(shared), create_mcp_server(shared)):   # SSE и HTTP
+    for mcp in (create_mcp_server(shared), create_mcp_server(shared)):   # два сервера MCP — один pm
         assert 'p1' in asyncio.run(list_projects(mcp))
     assert len(calls) == 2
 

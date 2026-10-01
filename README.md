@@ -24,7 +24,7 @@ AI-агенты (Claude Code, Cursor, Codex) находят нужный объ�
 - **Web UI** — управление проектами, поиск, playground для MCP tools;
   светлая и тёмная тема, шрифты и иконки локальные — интерфейс полностью
   работает без интернета
-- **MCP Server** — streamable HTTP (текущий транспорт) + SSE (для совместимости со старыми клиентами), project-scoped tools
+- **MCP Server** — streamable HTTP, project-scoped tools
 
 ## Быстрый старт
 
@@ -57,7 +57,6 @@ docker run --rm -v "$PWD:/repo" -w /repo python:3.12-slim sh docker-wheels/fetch
 
 Web UI: http://127.0.0.1:19878
 MCP (streamable HTTP): http://127.0.0.1:19879/mcp
-MCP (SSE, для старых клиентов): http://127.0.0.1:19877/sse
 
 Адреса — именно `127.0.0.1`, а не `localhost`: на Docker Desktop под
 Windows каждое новое HTTP-соединение к `localhost` стоит около 0,26 с
@@ -178,10 +177,6 @@ url = "http://127.0.0.1:19879/mcp"
 Проверка: в composer Codex команда `/mcp` показывает `ariadna` со
 статусом connected.
 
-**Клиент без streamable HTTP** — legacy SSE:
-`claude mcp add --transport sse ariadna http://127.0.0.1:19877/sse`
-(в JSON — `"type": "sse"`).
-
 **Сервер на другой машине.** По умолчанию порты публикуются только на
 `127.0.0.1` — с других машин сервер недоступен. Чтобы открыть доступ,
 задайте адрес публикации явно:
@@ -209,7 +204,7 @@ BIND_ADDR=0.0.0.0 MCP_ALLOWED_HOSTS=192.168.1.10,ariadna.lan docker compose up -
 > search_metadata(project_id="erp", query="Номенклатура")
 > get_object_details(project_id="erp", full_name="Справочник.Номенклатура")
 > search_procedures(project_id="erp", query="ЗначениеРеквизитаОбъекта", export_only=true)
-> get_procedure_code(project_id="erp", module_path="ОбщегоНазначения",
+> get_procedure_code(project_id="erp", module_name="ОбщегоНазначения",
                      procedure_name="ЗначениеРеквизитаОбъекта")
 > get_call_tree(project_id="erp", procedure_name="ЗначениеРеквизитаОбъекта",
                 module_name="ОбщегоНазначения", direction="up", depth=2)
@@ -236,12 +231,11 @@ http://127.0.0.1:19878 — работает сразу после `docker compos
 | Сервис            | Контейнер | Хост (по умолчанию) | Настройка                   |
 |-------------------|-----------|---------------------|------------------------------|
 | MCP streamable HTTP | 9879    | 19879               | `MCP_HTTP_HOST_PORT=33002`  |
-| MCP SSE (legacy)  | 9877      | 19877               | `MCP_HOST_PORT=33000`       |
 | Web UI            | 9878      | 19878               | `WEB_HOST_PORT=33001`       |
 
 ```bash
 # Свои порты:
-MCP_HTTP_HOST_PORT=33002 MCP_HOST_PORT=33000 WEB_HOST_PORT=33001 docker compose up -d
+MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 ```
 
 ## MCP Tools
@@ -274,7 +268,8 @@ MCP_HTTP_HOST_PORT=33002 MCP_HOST_PORT=33000 WEB_HOST_PORT=33001 docker compose 
   иначе ошибка перечисляет доступные id.
 - **Имена** — как в конфигураторе, русские или английские, регистр не
   важен: `kind="Catalog"` равно `kind="Справочник"`.
-- **Имя модуля** (`module_path`, `module_name`) — полное
+- **Имя модуля** (`module_name` — в `get_procedure_code`,
+  `get_module_outline`, `get_call_tree`) — полное
   (`ОбщийМодуль.ОбщегоНазначения.Модуль`,
   `Документ.РеализацияТоваровУслуг.МодульОбъекта`), короткое имя общего
   модуля (`ОбщегоНазначения`) или часть имени. Точное совпадение
@@ -369,7 +364,6 @@ pip install -e ".[dev]"
 export DATA_DIR=./data
 export INDEX_DIR=./index    # индексы отдельно от data/ (без неё — data/projects/{id}/index.db)
 export WEB_PORT=9878
-export MCP_PORT=9877        # SSE (legacy)
 export MCP_HTTP_PORT=9879   # streamable HTTP
 
 # Сервер без Docker — режим разработки (контейнер на том же data/ остановить)

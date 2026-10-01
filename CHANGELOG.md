@@ -2,11 +2,51 @@
 
 ## 0.3.0 (не выпущен)
 
+- **Транспорт SSE убран.** MCP — только streamable HTTP:
+  `http://127.0.0.1:19879/mcp`. SSE устарел в спецификации MCP, а все
+  поддерживаемые клиенты (Claude Code, Cursor, Codex) работают через
+  streamable HTTP. Порт 9877/19877 и переменные `MCP_PORT`, `MCP_HOST_PORT`
+  больше не используются.
+- **Единое имя параметра модуля — `module_name`.** В `get_procedure_code` и
+  `get_module_outline` он назывался `module_path`, в `get_call_tree` —
+  `module_name`; теперь везде `module_name` (схема инструментов, инструкция
+  сервера, подсказки в ответах, playground Web UI). `module_filter` в
+  `search_procedures` и `type_filter` в `search_attributes` — фильтры по
+  части имени, они не менялись.
+- **Удаление проекта под нагрузкой MCP:** запрос, заставший удаление, иногда
+  получал «Cannot operate on a closed database» вместо обычного «проект
+  удалён» — теперь всегда второе.
+- Для разработчика: при запуске без Docker на Windows шум ProactorEventLoop
+  (`ConnectionResetError [WinError 10054]` из `_call_connection_lost`, когда
+  клиент резко закрыл соединение) понижен с ERROR до DEBUG; другие ошибки
+  asyncio не затронуты.
 - Для разработчика: Web UI и MCP в одном процессе используют один
   `ProjectManager` — общий реестр и пул индексов (`main.build_shared_state`,
   `web/app.py:set_pm`). Механизмы, нужные только нескольким экземплярам в
   процессе, удалены; защита от второго процесса (перечитывание реестра по
   mtime, проверка файла индекса) осталась.
+
+### Обновление с 0.2
+
+- **Клиенты, подключённые через SSE** (`http://…:19877/sse`), —
+  переподключить на streamable HTTP:
+  - Claude Code:
+    `claude mcp remove --scope user ariadna` и
+    `claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp`;
+  - Cursor (`.cursor/mcp.json` или `~/.cursor/mcp.json`):
+    `"ariadna": { "url": "http://127.0.0.1:19879/mcp" }`;
+  - Codex CLI: `codex mcp remove ariadna` и
+    `codex mcp add ariadna --url http://127.0.0.1:19879/mcp`
+    (или `url = "http://127.0.0.1:19879/mcp"` в `[mcp_servers.ariadna]`
+    `~/.codex/config.toml`).
+
+  Если в `.env` или в команде `docker compose` задан `MCP_HOST_PORT` — его
+  можно убрать, он больше ни на что не влияет.
+- **`module_path` → `module_name`** в вызовах `get_procedure_code` и
+  `get_module_outline` (скрипты, сохранённые промпты). Синонима нет: SDK MCP
+  отбрасывает неизвестные аргументы до обработчика, и вызов со старым именем
+  получает ошибку «module_name: Field required». Агентам ничего делать не
+  нужно — они читают схему при подключении.
 
 ## 0.2.1
 

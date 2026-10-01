@@ -255,3 +255,34 @@ def test_first_request_to_new_empty_project_still_creates_index():
             assert pm.get_search('new').search_procedures('x') == []
         finally:
             pm.close_all()
+
+
+def test_connection_taken_before_retire_reports_index_removed():
+    """Гонка из test_delete_under_mcp_load_leaves_no_index: поток получил
+    соединение из read_conn, delete_project списал Database (retire), и
+    только потом поток выполнил запрос. Раньше — ProgrammingError «Cannot
+    operate on a closed database» (агенту — непредвиденная ошибка), теперь
+    IndexRemovedError, как у любого запроса, заставшего удаление."""
+    from src.core.db import Database, IndexRemovedError
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(os.path.join(tmpdir, 'index.db'))
+        db.connect()
+        db.init_schema()
+        conn = db.read_conn()
+        db.retire()
+        with pytest.raises(IndexRemovedError):
+            conn.execute("SELECT 1")
+
+
+def test_connection_closed_without_retire_keeps_programming_error():
+    """Обычный close() (не удаление) — прежняя ошибка, проект не «удалён»."""
+    from src.core.db import Database, IndexRemovedError
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(os.path.join(tmpdir, 'index.db'))
+        db.connect()
+        db.init_schema()
+        conn = db.read_conn()
+        db.close()
+        with pytest.raises(sqlite3.ProgrammingError) as exc:
+            conn.execute("SELECT 1")
+        assert not isinstance(exc.value, IndexRemovedError)

@@ -1,8 +1,8 @@
 """
 Синхронизация реестра проектов между экземплярами ProjectManager.
 
-В одном процессе живут три независимых ProjectManager — MCP SSE, MCP HTTP и
-Web UI (src/main.py, src/web/app.py). Раньше каждый загружал projects.json
+В одном процессе жили три независимых ProjectManager — MCP SSE, MCP HTTP и
+Web UI (до 0.3.0; src/main.py, src/web/app.py). Каждый каждый загружал projects.json
 один раз и дальше отдавал кэш: MCP не видел проектов и источников,
 добавленных через Web UI, а его записи затирали их устаревшей копией.
 Теперь реестр перечитывается, если файл изменился (mtime_ns + размер).
