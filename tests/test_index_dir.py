@@ -153,7 +153,7 @@ def test_failed_copy_leaves_no_index_and_does_not_raise(monkeypatch):
 
 
 def test_startup_migrates_before_resetting_stale_indexing(monkeypatch):
-    """main._prepare_data: перенос раньше reset_stale_indexing — тот открывает
+    """main.build_shared_state: перенос раньше reset_stale_indexing — тот открывает
     БД через get_db и на новом месте создал бы пустой индекс, после чего
     перенос решил бы, что индекс уже есть."""
     from src import main as main_module
@@ -166,10 +166,9 @@ def test_startup_migrates_before_resetting_stale_indexing(monkeypatch):
             old_pm.close_all()
 
         monkeypatch.setenv('INDEX_DIR', index_dir)
-        main_module._prepare_data(data_dir)
-
-        pm = ProjectManager(data_dir, index_dir=index_dir)
+        pm = main_module.build_shared_state(data_dir)
         try:
+            assert pm.index_dir == Path(index_dir)
             assert pm.get_project('p1').status == 'ready'
             assert 'РассчитатьЦену' in _procedures(pm)
         finally:

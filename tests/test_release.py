@@ -195,10 +195,14 @@ def test_main_wires_transport_security(monkeypatch, starter, request_kw):
     monkeypatch.setattr(uvicorn, 'run', lambda app, **kw: captured.setdefault('app', app))
     monkeypatch.delenv('MCP_ALLOWED_HOSTS', raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
-        getattr(main_module, starter)(tmpdir, 0)
-        with TestClient(captured['app'], raise_server_exceptions=False) as client:
-            resp = client.request(headers={**_MCP_HEADERS, 'Host': 'evil.example:1'}, **request_kw)
-            assert resp.status_code == 421, resp.text
+        pm = ProjectManager(tmpdir)
+        try:
+            getattr(main_module, starter)(pm, 0)
+            with TestClient(captured['app'], raise_server_exceptions=False) as client:
+                resp = client.request(headers={**_MCP_HEADERS, 'Host': 'evil.example:1'}, **request_kw)
+                assert resp.status_code == 421, resp.text
+        finally:
+            pm.close_all()
 
 
 # ============================================
@@ -285,14 +289,19 @@ def test_servers_listen_on_localhost_unless_listen_addr_set(monkeypatch, starter
     from src import main as main_module
     captured = {}
     monkeypatch.setattr(uvicorn, 'run', lambda app, **kw: captured.update(kw))
-    # _start_web пишет DATA_DIR в os.environ — monkeypatch вернёт прежнее.
-    monkeypatch.setenv('DATA_DIR', os.environ.get('DATA_DIR', ''))
+    # _start_web задаёт ProjectManager приложению Web UI — monkeypatch вернёт прежний.
+    from src.web import app as app_module
+    monkeypatch.setattr(app_module, '_pm', app_module._pm)
     if env is None:
         monkeypatch.delenv('LISTEN_ADDR', raising=False)
     else:
         monkeypatch.setenv('LISTEN_ADDR', env)
     with tempfile.TemporaryDirectory() as tmpdir:
-        getattr(main_module, starter)(tmpdir, 0)
+        pm = ProjectManager(tmpdir)
+        try:
+            getattr(main_module, starter)(pm, 0)
+        finally:
+            pm.close_all()
     assert captured['host'] == expected
 
 

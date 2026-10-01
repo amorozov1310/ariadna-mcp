@@ -34,8 +34,16 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=web_allowed_hosts())
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Singleton ProjectManager
+# ProjectManager процесса. src/main.py задаёт общий для Web UI и MCP через
+# set_pm() до запуска сервера. Без него (режим разработки
+# `uvicorn src.web.app:app --reload`, Web UI один в процессе) get_pm создаёт
+# свой из DATA_DIR/INDEX_DIR.
 _pm: ProjectManager | None = None
+
+
+def set_pm(pm: ProjectManager) -> None:
+    global _pm
+    _pm = pm
 
 
 def get_pm() -> ProjectManager:
