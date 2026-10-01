@@ -294,19 +294,27 @@ class _ReaderConnection:
     соединения, а close() ждёт её — не дольше одного запроса. Флаг
     закрытия ставится до ожидания: новые запросы на этом соединении уже не
     начинаются, иначе поток, выполняющий запросы подряд, перехватывал бы
-    блокировку раньше close() (Lock не справедлив), и тот ждал бы вечно."""
+    блокировку раньше close() (Lock не справедлив), и тот ждал бы вечно.
 
-    def __init__(self, conn: sqlite3.Connection):
+    closed_error — исключение для запроса на уже закрытом соединении. Поток
+    мог получить соединение из read_conn до retire() и выполнить запрос
+    после: тогда это IndexRemovedError («проект удалён»), а не
+    ProgrammingError «Cannot operate on a closed database», которая
+    уходила агенту как непредвиденная ошибка."""
+
+    def __init__(self, conn: sqlite3.Connection, closed_error=None):
         self._conn = conn
         self._lock = threading.Lock()
         self._closed = False
+        self._closed_error = closed_error or (
+            lambda: sqlite3.ProgrammingError("Cannot operate on a closed database."))
 
     def execute(self, sql: str, params=()) -> _Rows:
         if self._closed:
-            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+            raise self._closed_error()
         with self._lock:
             if self._closed:
-                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+                raise self._closed_error()
             cur = self._conn.execute(sql, params)
             try:
                 return _Rows(cur.fetchall(), cur.description)
@@ -434,11 +442,16 @@ class Database:
         with self._readers_lock:
             if self._retired:
                 raise IndexRemovedError(self.db_path)
-            conn = _ReaderConnection(self._open_with_retry())
+            conn = _ReaderConnection(self._open_with_retry(), self._closed_reader_error)
             self._readers.add(conn)
             self._local.generation = self._generation
         self._local.conn = conn
         return conn
+
+    def _closed_reader_error(self) -> sqlite3.Error:
+        if self._retired:
+            return IndexRemovedError(self.db_path)
+        return sqlite3.ProgrammingError("Cannot operate on a closed database.")
 
     def _open_with_retry(self, attempts: int = 3) -> sqlite3.Connection:
         """Этап U0/U13: opening a *new* reader occasionally fails with

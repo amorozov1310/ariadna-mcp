@@ -69,8 +69,12 @@ class _Worker:
 
 
 def _closed(conn: sqlite3.Connection) -> bool:
+    """Закрыто ли само соединение sqlite3 (под обёрткой _ReaderConnection).
+    Через обёртку закрытое соединение списанного Database отвечает
+    IndexRemovedError, а не ProgrammingError."""
+    raw = getattr(conn, '_conn', conn)
     try:
-        conn.execute('SELECT 1')
+        raw.execute('SELECT 1')
     except sqlite3.ProgrammingError:
         return True
     return False
