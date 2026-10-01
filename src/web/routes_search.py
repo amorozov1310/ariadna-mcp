@@ -9,6 +9,7 @@ import time
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse
 
+from ..core.project_manager import PROJECT_GONE
 from .app import templates, get_pm
 
 router = APIRouter()
@@ -34,6 +35,8 @@ def search_page(request: Request, project_id: str, q: str = '', kind: str = '',
     kinds: dict[str, int] = {}
     try:
         kinds = pm.get_db(project_id).get_stats().get('kinds', {}) or {}
+    except PROJECT_GONE:
+        raise          # проект удалён во время запроса — 404 (app.py)
     except Exception:
         kinds = {}
 

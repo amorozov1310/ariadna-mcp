@@ -25,7 +25,7 @@ except ImportError:
     logger.warning("MCP SDK not installed. MCP server will not be available.")
 
 from .. import __version__
-from ..core.project_manager import ProjectManager
+from ..core.project_manager import PROJECT_GONE, PROJECT_GONE_MESSAGE, ProjectManager
 from .tools import execute_tool
 
 _PID = "ID проекта (необязательно, если в реестре только один проект)"
@@ -79,6 +79,11 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         # «Error executing tool <имя>: », поэтому наш префикс «Error:» снимается.
         try:
             text = execute_tool(pm, name, kwargs)
+        except PROJECT_GONE:
+            # Проект удалили, пока шёл запрос (delete_project под нагрузкой) —
+            # штатно: одна строка в лог без трассировки и без пути индекса.
+            logger.info("Инструмент %s: проект удалён во время запроса", name)
+            raise ToolError(PROJECT_GONE_MESSAGE) from None
         except Exception as e:
             logger.exception("Инструмент %s упал", name)
             raise ToolError(str(e)) from e
