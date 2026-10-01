@@ -9,8 +9,8 @@
 ### Шаг 1. Получить исходники
 
 ```bash
-tar xzf ariadna.tar.gz
-cd ariadna
+git clone https://github.com/amorozov1310/ariadna-mcp.git
+cd ariadna-mcp
 ```
 
 ### Шаг 2. Подготовить зависимости образа (один раз)
