@@ -1,0 +1,59 @@
+name: Замечание из работы
+description: Ариадна ответила не так, как ожидалось, в реальной задаче (пробная эксплуатация перед 1.0)
+title: "[dogfood] "
+labels: ["dogfood"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Одно замечание — одна задача. Хватит пары строк: по ним составляется
+        задание на исправление и проверка вживую.
+  - type: input
+    id: version
+    attributes:
+      label: Версия Ариадны
+      description: serverInfo.version в клиенте или src/VERSION
+      placeholder: 0.2.1
+    validations:
+      required: true
+  - type: input
+    id: project
+    attributes:
+      label: Проект и конфигурация
+      placeholder: erp — ERP 2.5
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Что спрашивали
+      description: Вопрос агенту своими словами
+    validations:
+      required: true
+  - type: textarea
+    id: calls
+    attributes:
+      label: Что сделал агент
+      description: Какие инструменты вызвал и с какими параметрами — можно скопировать из лога клиента
+      render: text
+  - type: textarea
+    id: wrong
+    attributes:
+      label: Что не так
+      description: Неверный или неполный ответ, лишние вызовы, непонятное описание инструмента, медленно, ошибка
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Как должно быть
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Насколько мешает
+      options:
+        - Блокирует — без обхода задачу не решить
+        - Мешает — есть обход
+        - Мелочь
+    validations:
+      required: true
