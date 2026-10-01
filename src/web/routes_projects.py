@@ -6,7 +6,8 @@ from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 from .app import templates, get_pm
-from ..core.project_manager import ProjectFilesNotRemovedError, ReindexInProgressError
+from ..core.project_manager import (PROJECT_GONE, ProjectFilesNotRemovedError,
+                                     ReindexInProgressError)
 
 logger = logging.getLogger('ariadna')
 
@@ -73,6 +74,8 @@ def project_dashboard(request: Request, project_id: str):
     kinds: dict[str, int] = {}
     try:
         kinds = pm.get_db(project_id).get_kind_counts()
+    except PROJECT_GONE:
+        raise          # проект удалён во время запроса — 404 (app.py)
     except Exception:
         logger.exception("Не удалось прочитать виды метаданных проекта %s", project_id)
 
@@ -215,6 +218,8 @@ async def project_status(project_id: str):
     progress = {}
     try:
         progress = pm.get_db(project_id).get_index_progress()
+    except PROJECT_GONE:
+        raise          # проект удалён во время запроса — 404 (app.py)
     except Exception:
         logger.exception("Не удалось прочитать прогресс индексации %s", project_id)
 

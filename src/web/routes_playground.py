@@ -10,6 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from ..core.project_manager import PROJECT_GONE
 from .app import templates, get_pm
 
 router = APIRouter()
@@ -30,6 +31,8 @@ def playground_page(request: Request, project_id: str):
     # проекта, а не из захардкоженного перечня (в шаблонах их быть не должно).
     try:
         kinds = list((pm.get_db(project_id).get_stats().get('kinds') or {}).keys())
+    except PROJECT_GONE:
+        raise          # проект удалён во время запроса — 404 (app.py)
     except Exception:
         kinds = []
 
@@ -58,6 +61,8 @@ async def playground_execute(request: Request, project_id: str):
     t0 = time.time()
     try:
         result_text, result_data = _execute_tool(engine, tool_name, params)
+    except PROJECT_GONE:
+        raise          # проект удалён во время запроса — 404 (app.py)
     except Exception as e:
         result_text = f"Error: {e}"
         result_data = None

@@ -246,6 +246,19 @@ CREATE TABLE IF NOT EXISTS parser_state (
 """
 
 
+class IndexRemovedError(sqlite3.OperationalError):
+    """Индекс проекта удалён, пока запрос его читал (delete_project под
+    нагрузкой). Штатная ситуация, а не сбой: MCP и Web UI отвечают «проект
+    удалён» без трассировки в логе. Наследник sqlite3.OperationalError —
+    прежние `except sqlite3.OperationalError` продолжают его ловить. Путь к
+    файлу хранится в .path, но в текст не попадает: внутренний путь сервера
+    в ответе агенту ни к чему."""
+
+    def __init__(self, path: str):
+        super().__init__("индекс удалён — проект удалён во время запроса")
+        self.path = path
+
+
 class _Rows:
     """Результат запроса читающего соединения, уже целиком прочитанный:
     fetchone/fetchall/итерация, как у sqlite3.Cursor."""
@@ -402,14 +415,14 @@ class Database:
         if conn is not None and getattr(self._local, 'generation', None) == self._generation:
             return conn
         if self._retired:
-            raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
+            raise IndexRemovedError(self.db_path)
         # Соединения нет или его закрыл close() из другого потока.
         if not os.path.exists(self.db_path) and self.db_path not in (':memory:', ''):
             if self._generation > 0:
                 # Этот Database уже закрывали, а файла нет: индекс удалили
                 # (delete_project, удаление снаружи). Создать его заново
                 # здесь — значит оставить пустой index.db удалённого проекта.
-                raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
+                raise IndexRemovedError(self.db_path)
             # Nothing to read yet — make sure the writer has created
             # the file/schema first rather than racing it here.
             self.connect()
@@ -420,7 +433,7 @@ class Database:
         # индекса падал бы с WinError 32. Открытие — миллисекунды.
         with self._readers_lock:
             if self._retired:
-                raise sqlite3.OperationalError(f"индекс удалён: {self.db_path}")
+                raise IndexRemovedError(self.db_path)
             conn = _ReaderConnection(self._open_with_retry())
             self._readers.add(conn)
             self._local.generation = self._generation

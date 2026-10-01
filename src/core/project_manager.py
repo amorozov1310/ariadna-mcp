@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from . import parser_fingerprint
-from .db import Database
+from .db import Database, IndexRemovedError
 from .search import SearchEngine
 
 logger = logging.getLogger('ariadna')
@@ -78,6 +78,21 @@ class ReindexInProgressError(RuntimeError):
         super().__init__(f"идёт переиндексация проекта '{project_id}' — повторите после "
                          f"её завершения (get_index_status)")
         self.project_id = project_id
+
+
+class ProjectNotFoundError(KeyError):
+    """get_db: проекта нет в реестре — обычно его удалили, пока запрос шёл
+    (см. _delete_project). KeyError — как прежде, но MCP и Web UI отличают
+    его от прочих KeyError и отвечают «проект удалён» без трассировки."""
+
+    def __init__(self, project_id: str):
+        super().__init__(f"Project '{project_id}' not found")
+        self.project_id = project_id
+
+
+# Ожидаемые ошибки запроса к проекту, который удаляют в этот момент.
+PROJECT_GONE = (IndexRemovedError, ProjectNotFoundError)
+PROJECT_GONE_MESSAGE = "проект удалён во время запроса — проверьте list_projects"
 
 
 class ProjectFilesNotRemovedError(OSError):
@@ -941,7 +956,7 @@ class ProjectManager:
             # создавал новый пустой index.db, а на Windows держал файл,
             # который удаляет rmtree.
             if project_id not in self._load_registry():
-                raise KeyError(f"Project '{project_id}' not found")
+                raise ProjectNotFoundError(project_id)
 
             db_path = str(self._index_path(project_id))
             db = Database(db_path)

@@ -15,7 +15,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from ..core.project_manager import ProjectManager
+from ..core.db import IndexRemovedError
+from ..core.project_manager import ProjectManager, ProjectNotFoundError
 from ..security import web_allowed_hosts
 
 logger = logging.getLogger('ariadna')
@@ -134,6 +135,24 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return templates.TemplateResponse(
         name="error.html", request=request, status_code=exc.status_code,
         context=_error_context(request, exc.status_code, title, message, detail))
+
+
+async def _project_gone_response(request: Request):
+    """Проект удалили, пока шёл запрос (delete_project под нагрузкой): 404
+    «проект удалён», одна строка в лог без трассировки и без пути индекса."""
+    logger.info("Проект удалён во время запроса %s", request.url.path)
+    exc = StarletteHTTPException(404, 'Проект удалён.')
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(IndexRemovedError)
+async def index_removed_handler(request: Request, exc: IndexRemovedError):
+    return await _project_gone_response(request)
+
+
+@app.exception_handler(ProjectNotFoundError)
+async def project_not_found_handler(request: Request, exc: ProjectNotFoundError):
+    return await _project_gone_response(request)
 
 
 @app.exception_handler(Exception)
