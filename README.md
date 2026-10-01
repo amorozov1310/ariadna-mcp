@@ -204,7 +204,7 @@ BIND_ADDR=0.0.0.0 MCP_ALLOWED_HOSTS=192.168.1.10,ariadna.lan docker compose up -
 > search_metadata(project_id="erp", query="Номенклатура")
 > get_object_details(project_id="erp", full_name="Справочник.Номенклатура")
 > search_procedures(project_id="erp", query="ЗначениеРеквизитаОбъекта", export_only=true)
-> get_procedure_code(project_id="erp", module_path="ОбщегоНазначения",
+> get_procedure_code(project_id="erp", module_name="ОбщегоНазначения",
                      procedure_name="ЗначениеРеквизитаОбъекта")
 > get_call_tree(project_id="erp", procedure_name="ЗначениеРеквизитаОбъекта",
                 module_name="ОбщегоНазначения", direction="up", depth=2)
@@ -268,7 +268,8 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
   иначе ошибка перечисляет доступные id.
 - **Имена** — как в конфигураторе, русские или английские, регистр не
   важен: `kind="Catalog"` равно `kind="Справочник"`.
-- **Имя модуля** (`module_path`, `module_name`) — полное
+- **Имя модуля** (`module_name` — в `get_procedure_code`,
+  `get_module_outline`, `get_call_tree`) — полное
   (`ОбщийМодуль.ОбщегоНазначения.Модуль`,
   `Документ.РеализацияТоваровУслуг.МодульОбъекта`), короткое имя общего
   модуля (`ОбщегоНазначения`) или часть имени. Точное совпадение

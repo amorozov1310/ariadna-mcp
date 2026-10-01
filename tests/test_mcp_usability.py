@@ -74,7 +74,7 @@ def test_module_short_name_prefers_exact_common_module():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm_with_xml_project(tmpdir)
         try:
-            out = execute_tool(pm, 'get_module_outline', {'module_path': 'ОбщегоНазначения'})
+            out = execute_tool(pm, 'get_module_outline', {'module_name': 'ОбщегоНазначения'})
             assert out.startswith('Module: ОбщийМодуль.ОбщегоНазначения.Модуль'), out
         finally:
             pm.close_all()
@@ -85,7 +85,7 @@ def test_get_procedure_code_short_module_name_and_any_case():
         pm = _pm_with_xml_project(tmpdir)
         try:
             out = execute_tool(pm, 'get_procedure_code', {
-                'module_path': 'общегоназначения', 'procedure_name': 'значениереквизитаобъекта'})
+                'module_name': 'общегоназначения', 'procedure_name': 'значениереквизитаобъекта'})
             assert 'Возврат "общий"' in out, out
             assert 'международный' not in out
         finally:
@@ -98,7 +98,7 @@ def test_code_tools_work_with_index_built_elsewhere():
         try:
             _simulate_foreign_index(pm)
             code = execute_tool(pm, 'get_procedure_code', {
-                'module_path': 'ОбщийМодуль.ОбщегоНазначения.Модуль',
+                'module_name': 'ОбщийМодуль.ОбщегоНазначения.Модуль',
                 'procedure_name': 'ЗначениеРеквизитаОбъекта'})
             assert 'Возврат "общий"' in code, code
             found = execute_tool(pm, 'search_code', {'query': 'Возврат "международный"'})

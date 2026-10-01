@@ -320,7 +320,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
 
         case 'get_procedure_code':
             from ..core.bsl_parser import read_bsl_text
-            module_name = args.get('module_path', '') or args.get('module_name', '')
+            module_name = args.get('module_name', '')
             proc_name = (args.get('procedure_name') or '').strip()
             outline = engine.get_module_outline(module_name, source_id=source_id)
             if not outline:
@@ -331,7 +331,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                          if p['name'].casefold() == proc_name.casefold()), None)
             if not proc:
                 return (f"Procedure '{proc_name}' not found in module {mod['name']}. "
-                        f"List its procedures with get_module_outline(module_path=\"{mod['name']}\").")
+                        f"List its procedures with get_module_outline(module_name=\"{mod['name']}\").")
             path = engine.module_file_path(mod)
             if not path:
                 return (f"{mod['name']}.{proc['name']}: lines {proc['start_line']}-{proc['end_line']} — "
@@ -428,7 +428,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
 
         case 'get_module_outline':
             outline = engine.get_module_outline(
-                args.get('module_path', ''),
+                args.get('module_name', ''),
                 source_id=source_id,
             )
             if not outline:

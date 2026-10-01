@@ -94,7 +94,7 @@ def test_sandbox_reads_corpus_and_writes_nothing_to_data(monkeypatch):
 
             # Поиск, код процедуры и diagnose_index читают файлы корпуса.
             code = execute_tool(pm, 'get_procedure_code', {
-                'project_id': 'corpus', 'module_path': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
+                'project_id': 'corpus', 'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
             assert 'Функция РассчитатьЦену' in code and 'изменён' not in code, code
             assert 'Found' in execute_tool(pm, 'search_code', {'project_id': 'corpus', 'query': 'Возврат'})
             assert 'BSL files scanned' in execute_tool(pm, 'diagnose_index', {'project_id': 'corpus'})

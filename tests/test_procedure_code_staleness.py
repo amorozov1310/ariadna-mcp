@@ -40,7 +40,7 @@ def _pm(tmpdir: str) -> ProjectManager:
 
 
 def _code(pm, module, proc):
-    return execute_tool(pm, 'get_procedure_code', {'project_id': 'p1', 'module_path': module,
+    return execute_tool(pm, 'get_procedure_code', {'project_id': 'p1', 'module_name': module,
                                                    'procedure_name': proc})
 
 

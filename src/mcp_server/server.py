@@ -51,7 +51,7 @@ INSTRUCTIONS = """\
 Типовой порядок:
 - объект конфигурации: search_metadata → get_object_details(full_name из выдачи);
 - «где используется справочник/документ как тип реквизита»: find_references;
-- процедура: search_procedures → get_procedure_code(module_path, procedure_name из выдачи);
+- процедура: search_procedures → get_procedure_code(module_name, procedure_name из выдачи);
   структура модуля без чтения кода — get_module_outline;
 - «кто вызывает / что вызывает»: get_call_tree (direction=up/down); передавайте
   module_name, если имя процедуры встречается в нескольких модулях;
@@ -258,13 +258,13 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         annotations=_READ_ONLY,
     )
     def get_procedure_code(
-        module_path: Annotated[str, Field(description=_MODULE)],
+        module_name: Annotated[str, Field(description=_MODULE)],
         procedure_name: Annotated[str, Field(description="Имя процедуры или функции (регистр не важен)")],
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         source_id: Annotated[str | None, Field(description="ID источника — если модуль с таким именем есть и в конфигурации, и в расширении")] = None,
     ) -> str:
         return run('get_procedure_code', project_id=project_id,
-                    module_path=module_path, procedure_name=procedure_name, source_id=source_id)
+                    module_name=module_name, procedure_name=procedure_name, source_id=source_id)
 
     @mcp.tool(
         description="Кто вызывает / что вызывает процедура — дерево вверх (direction=up) или "
@@ -312,12 +312,12 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         annotations=_READ_ONLY,
     )
     def get_module_outline(
-        module_path: Annotated[str, Field(description=_MODULE)],
+        module_name: Annotated[str, Field(description=_MODULE)],
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         source_id: Annotated[str | None, Field(description="ID источника (если одинаковое имя модуля в разных источниках)")] = None,
     ) -> str:
         return run('get_module_outline', project_id=project_id,
-                    module_path=module_path, source_id=source_id)
+                    module_name=module_name, source_id=source_id)
 
     @mcp.tool(
         description="Диагностика индекса: процедуры в файлах против проиндексированных (пропущенные "

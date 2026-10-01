@@ -209,7 +209,7 @@ def _execute_tool(engine, tool: str, params: dict) -> tuple[str, dict | None]:
 
         case 'get_module_outline':
             outline = engine.get_module_outline(
-                params.get('module_path', ''),
+                params.get('module_name', ''),
                 source_id=source_id,
             )
             if not outline:
@@ -464,7 +464,7 @@ def get_tools_meta(sources: list[dict] | None = None,
             'name': 'get_module_outline',
             'description': 'Структура модуля: все процедуры с директивами, экспортом, строками',
             'params': _with_source([
-                {'name': 'module_path', 'type': 'text', 'required': True, 'hint': 'РасчетныйМодуль...'},
+                {'name': 'module_name', 'type': 'text', 'required': True, 'hint': 'РасчетныйМодуль...'},
             ]),
         },
         {
