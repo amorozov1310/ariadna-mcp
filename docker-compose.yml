@@ -13,7 +13,6 @@ services:
     # доверенной сети. Внутри контейнера серверы слушают 0.0.0.0 — это нужно
     # для проброса портов.
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${MCP_HOST_PORT:-19877}:9877"        # MCP SSE (устаревший транспорт, для совместимости)
       - "${BIND_ADDR:-127.0.0.1}:${MCP_HTTP_HOST_PORT:-19879}:9879"   # MCP streamable HTTP
       - "${BIND_ADDR:-127.0.0.1}:${WEB_HOST_PORT:-19878}:9878"        # Web UI
     volumes:
@@ -34,7 +33,6 @@ services:
       # BIND_ADDR=0.0.0.0), через запятую; без них чужой Host отклоняется —
       # защита от DNS rebinding (src/security.py).
       - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-}
-      - MCP_PORT=9877
       - MCP_HTTP_PORT=9879
       - WEB_PORT=9878
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

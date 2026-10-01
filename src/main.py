@@ -1,5 +1,5 @@
 """
-Ариадна — точка входа: MCP-сервер (SSE + streamable HTTP) и Web UI.
+Ариадна — точка входа: MCP-сервер (streamable HTTP) и Web UI.
 """
 
 import os
@@ -30,9 +30,9 @@ def _listen_addr() -> str:
 
 
 def build_shared_state(data_dir: str):
-    """Один ProjectManager на процесс — общий для Web UI и обоих транспортов
-    MCP: один реестр и один пул индексов. Раньше у каждого сервера был свой
-    экземпляр, и согласовывать их приходилось заплатками (MCP не видел
+    """Один ProjectManager на процесс — общий для Web UI и MCP: один реестр
+    и один пул индексов. Раньше у каждого сервера (Web UI, MCP SSE и HTTP)
+    был свой экземпляр, и согласовывать их приходилось заплатками (MCP не видел
     проектов из Web UI, читал индекс удалённого проекта, держал файл,
     который удалял Web UI).
 
@@ -58,7 +58,6 @@ def build_shared_state(data_dir: str):
 
 def main():
     data_dir = os.environ.get('DATA_DIR', '/data')
-    mcp_port = int(os.environ.get('MCP_PORT', '9877'))
     mcp_http_port = int(os.environ.get('MCP_HTTP_PORT', '9879'))
     web_port = int(os.environ.get('WEB_PORT', '9878'))
 
@@ -66,25 +65,20 @@ def main():
 
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Index directory: {_index_dir() or data_dir + '/projects'}")
-    logger.info(f"MCP SSE port: {mcp_port}")
     logger.info(f"MCP streamable HTTP port: {mcp_http_port}")
     logger.info(f"Web UI port: {web_port}")
 
-    # Start Web UI in background thread
+    # Web UI — в фоновом потоке.
     web_thread = threading.Thread(target=_start_web, args=(pm, web_port), daemon=True)
     web_thread.start()
     logger.info(f"Web UI starting on :{web_port}")
 
-    # Streamable HTTP (Этап 6): the current MCP transport — start alongside
-    # SSE, which stays on its existing port for backward compatibility with
-    # clients that haven't migrated yet (SSE is deprecated in the MCP spec).
-    http_thread = threading.Thread(target=_start_mcp_streamable_http, args=(pm, mcp_http_port), daemon=True)
-    http_thread.start()
+    # MCP (streamable HTTP) — в основном потоке, блокирующий: это основной
+    # интерфейс сервера. Если он упал, процесс завершается и Docker его
+    # перезапускает (restart: unless-stopped); упавший в фоне MCP оставил бы
+    # «живой» контейнер без MCP — healthcheck проверяет только Web UI.
     logger.info(f"MCP streamable HTTP starting on :{mcp_http_port}")
-
-    # Start MCP SSE server in main thread (blocking)
-    logger.info(f"MCP SSE server starting on :{mcp_port}")
-    _start_mcp_sse(pm, mcp_port)
+    _start_mcp_streamable_http(pm, mcp_http_port)
 
 
 def _start_web(pm, port: int):
@@ -114,13 +108,12 @@ def _idle_forever():
         time.sleep(60)
 
 
-def _start_mcp_sse(pm, port: int):
-    """Start the MCP server on the (deprecated but still widely used) SSE
-    transport — kept on its existing port for backward compatibility
-    (Этап 6). mcp.server.mcpserver.MCPServer.sse_app() builds this itself
-    now (SDK 2.x); no more hand-rolled SseServerTransport wiring, which
-    also means the old modelcontextprotocol/python-sdk#1099 Response()
-    workaround is gone with it — the SDK's own app already returns one."""
+def _start_mcp_streamable_http(pm, port: int):
+    """MCP-сервер на транспорте streamable HTTP (/mcp) — блокирующий вызов.
+
+    Защита от DNS rebinding — transport_security SDK: внутри контейнера
+    слушаем 0.0.0.0 (проброс портов), и SDK сам её не включает. Без MCP SDK
+    процесс не завершается — работает только Web UI."""
     try:
         from .mcp_server.server import create_mcp_server, HAS_MCP
         if not HAS_MCP:
@@ -131,48 +124,16 @@ def _start_mcp_sse(pm, port: int):
         import uvicorn
         mcp = create_mcp_server(pm)
 
-        uvicorn.run(_sse_app(mcp), host=_listen_addr(), port=port, log_level="warning")
-
-    except ImportError as e:
-        logger.warning(f"MCP dependencies missing ({e}) — running Web UI only")
-        _idle_forever()
-    except Exception as e:
-        logger.error(f"MCP SSE server failed: {e}")
-        raise
-
-
-def _sse_app(mcp):
-    """SSE-приложение SDK за проверкой Host/Origin (HostOriginGuard).
-
-    Внутри контейнера слушаем 0.0.0.0 (проброс портов) — SDK тогда сам не
-    включает защиту от DNS rebinding, передаём её явно. Обёртка отвечает
-    421/403 до SDK: иначе SDK после ответа бросает исключение, и каждый
-    отклонённый запрос оставляет в логе трассировку. Streamable HTTP в
-    обёртке не нуждается — там SDK просто возвращает ответ."""
-    from .security import HostOriginGuard, mcp_transport_security
-    settings = mcp_transport_security()
-    return HostOriginGuard(mcp.sse_app(host="0.0.0.0", transport_security=settings), settings)
-
-
-def _start_mcp_streamable_http(pm, port: int):
-    """Start the MCP server on the streamable HTTP transport (Этап 6) —
-    the current (non-deprecated) transport in the MCP spec."""
-    try:
-        from .mcp_server.server import create_mcp_server, HAS_MCP
-        if not HAS_MCP:
-            return  # already logged/idled by _start_mcp_sse in the main thread
-
-        import uvicorn
-        mcp = create_mcp_server(pm)
-
         from .security import mcp_transport_security
         app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
         uvicorn.run(app, host=_listen_addr(), port=port, log_level="warning")
 
     except ImportError as e:
-        logger.warning(f"MCP dependencies missing ({e}) — streamable HTTP transport unavailable")
+        logger.warning(f"MCP dependencies missing ({e}) — running Web UI only")
+        _idle_forever()
     except Exception as e:
         logger.error(f"MCP streamable HTTP server failed: {e}")
+        raise
 
 
 if __name__ == '__main__':

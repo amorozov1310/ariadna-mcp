@@ -72,11 +72,11 @@ claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp
 ```
 
 В Claude Code `/mcp` должен показать `ariadna` в статусе connected.
-Cursor, Codex CLI, `.mcp.json` в репозитории и legacy SSE — в README,
+Cursor, Codex CLI и `.mcp.json` в репозитории — в README,
 раздел «Подключение MCP к агенту». Без агента тоже можно — см. в README
 раздел «Web UI».
 
-### Свои порты (если 19877/19878/19879 заняты)
+### Свои порты (если 19878/19879 заняты)
 
 Порты публикуются только на `127.0.0.1` (`BIND_ADDR`, по умолчанию
 `127.0.0.1`). Доступ с других машин — `BIND_ADDR=0.0.0.0` плюс
@@ -85,10 +85,9 @@ Cursor, Codex CLI, `.mcp.json` в репозитории и legacy SSE — в RE
 (подробнее — README, «Сервер на другой машине»).
 
 ```bash
-MCP_HOST_PORT=33000 MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d --build
+MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d --build
 # Web UI:                http://127.0.0.1:33001
 # MCP (streamable HTTP): http://127.0.0.1:33002/mcp
-# MCP (SSE, legacy):     http://127.0.0.1:33000/sse
 ```
 
 ---
@@ -134,7 +133,7 @@ python scripts/generate_test_data.py ./data
 **Web UI + MCP:**
 
 ```bash
-DATA_DIR=./data WEB_PORT=9878 MCP_PORT=9877 MCP_HTTP_PORT=9879 python -m src.main
+DATA_DIR=./data WEB_PORT=9878 MCP_HTTP_PORT=9879 python -m src.main
 ```
 
 **Только Web UI с автоперезагрузкой при правке кода:**

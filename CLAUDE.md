@@ -38,7 +38,7 @@ MCP-сервер + Web UI: индексируют XML-выгрузку конф�
 ```bash
 python -m pytest tests -q          # быстрые тесты, ~10 с, должны быть зелёными
 python -m pytest tests -q -m slow  # только при наличии data/projects (локально)
-python -m src.main                 # Web UI :9878, MCP :9879/mcp, SSE :9877/sse
+python -m src.main                 # Web UI :9878, MCP :9879/mcp
 ```
 
 Зависимости: `pip install -e ".[dev]"`, генерация отчёта из XML —
@@ -67,8 +67,8 @@ CI (`.github/workflows/tests.yml`) прогоняет быстрые тесты 
   напрямую).
 - `src/web/` — FastAPI + Jinja2, без сборки фронтенда.
 - Один `ProjectManager` на процесс (`main.build_shared_state`): общий для
-  Web UI (`web/app.py:set_pm`) и обоих транспортов MCP — один реестр и один
-  пул индексов; его используют потоки трёх серверов и фоновая
+  Web UI (`web/app.py:set_pm`) и MCP — один реестр и один
+  пул индексов; его используют потоки обоих серверов и фоновая
   переиндексация, поэтому блокировки реестра, пула и переиндексации
   остаются. Перечитывание `projects.json` по mtime и проверка файла
   индекса (`Database.file_replaced`) — защита от второго процесса

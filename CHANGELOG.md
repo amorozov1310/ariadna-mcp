@@ -2,6 +2,11 @@
 
 ## 0.3.0 (не выпущен)
 
+- **Транспорт SSE убран.** MCP — только streamable HTTP:
+  `http://127.0.0.1:19879/mcp`. SSE устарел в спецификации MCP, а все
+  поддерживаемые клиенты (Claude Code, Cursor, Codex) работают через
+  streamable HTTP. Порт 9877/19877 и переменные `MCP_PORT`, `MCP_HOST_PORT`
+  больше не используются.
 - **Удаление проекта под нагрузкой MCP:** запрос, заставший удаление, иногда
   получал «Cannot operate on a closed database» вместо обычного «проект
   удалён» — теперь всегда второе.
@@ -10,6 +15,23 @@
   `web/app.py:set_pm`). Механизмы, нужные только нескольким экземплярам в
   процессе, удалены; защита от второго процесса (перечитывание реестра по
   mtime, проверка файла индекса) осталась.
+
+### Обновление с 0.2
+
+- **Клиенты, подключённые через SSE** (`http://…:19877/sse`), —
+  переподключить на streamable HTTP:
+  - Claude Code:
+    `claude mcp remove --scope user ariadna` и
+    `claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp`;
+  - Cursor (`.cursor/mcp.json` или `~/.cursor/mcp.json`):
+    `"ariadna": { "url": "http://127.0.0.1:19879/mcp" }`;
+  - Codex CLI: `codex mcp remove ariadna` и
+    `codex mcp add ariadna --url http://127.0.0.1:19879/mcp`
+    (или `url = "http://127.0.0.1:19879/mcp"` в `[mcp_servers.ariadna]`
+    `~/.codex/config.toml`).
+
+  Если в `.env` или в команде `docker compose` задан `MCP_HOST_PORT` — его
+  можно убрать, он больше ни на что не влияет.
 
 ## 0.2.1
 
