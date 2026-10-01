@@ -48,14 +48,14 @@ def test_project_leaves_registry_before_index_is_closed(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _indexed(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
         seen = []
-        real = ProjectManager._close_project_db_everywhere
+        real = ProjectManager._retire_project_db
 
         def spy(self, project_id):
             # Свежий экземпляр читает реестр с диска.
             seen.append([p.id for p in ProjectManager(str(self.data_dir)).list_projects()])
             return real(self, project_id)
 
-        monkeypatch.setattr(ProjectManager, '_close_project_db_everywhere', spy)
+        monkeypatch.setattr(ProjectManager, '_retire_project_db', spy)
         try:
             pm.delete_project('p1')
             assert seen == [[]]
@@ -142,8 +142,9 @@ def _open_handles_under(path: Path) -> list[str]:
 
 
 def test_delete_under_read_load_leaves_no_index(monkeypatch):
-    """Воспроизведение: второй экземпляр (MCP) в цикле читает проект, первый
-    (Web UI) его удаляет. После остановки чтения каталога индекса нет, а в
+    """Воспроизведение: потоки MCP в цикле читают проект, Web UI (тот же
+    ProjectManager процесса) его удаляет. После остановки чтения каталога
+    индекса нет, а в
     момент rmtree на файлы каталога не открыто ни одного дескриптора (на
     Windows с ними rmtree падает)."""
     real_rmtree = shutil.rmtree
@@ -157,9 +158,8 @@ def test_delete_under_read_load_leaves_no_index(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         data_dir, index_dir = os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index')
         for run in range(20):
-            web = _indexed(data_dir, index_dir)
-            mcp = ProjectManager(data_dir, index_dir)
-            index_parent = web._index_path('p1').parent
+            pm = _indexed(data_dir, index_dir)
+            index_parent = pm._index_path('p1').parent
             stop, warmed = threading.Event(), threading.Event()
             reads = {'ok': 0, 'refused': 0}
             errors = []
@@ -167,8 +167,8 @@ def test_delete_under_read_load_leaves_no_index(monkeypatch):
             def read():
                 while not stop.is_set():
                     try:
-                        mcp.get_search('p1').search_procedures('Рассчитать')
-                        mcp.get_db('p1').get_stats()
+                        pm.get_search('p1').search_procedures('Рассчитать')
+                        pm.get_db('p1').get_stats()
                         reads['ok'] += 1
                         if reads['ok'] >= 2:
                             warmed.set()
@@ -184,13 +184,12 @@ def test_delete_under_read_load_leaves_no_index(monkeypatch):
                 t.start()
             assert warmed.wait(30)
             try:
-                web.delete_project('p1')
+                pm.delete_project('p1')
             finally:
                 stop.set()
                 for t in threads:
                     t.join()
-                web.close_all()
-                mcp.close_all()
+                pm.close_all()
             assert not errors, errors
             assert not index_parent.exists(), \
                 f"прогон {run}: остался индекс {_index_files(index_parent)}"

@@ -12,7 +12,6 @@ import sqlite3
 import time
 import os
 import threading
-import weakref
 import zipfile
 import tarfile
 from contextlib import contextmanager
@@ -27,35 +26,26 @@ from .search import SearchEngine
 
 logger = logging.getLogger('ariadna')
 
-# Этап 4/D7: process-wide, not per-ProjectManager-instance. main.py runs
-# the Web UI and the MCP server as two independent ProjectManager objects
-# in the same process (see main.py:_start_web / _start_mcp) — a lock on
-# self would only stop two reindexes started through the *same* one of
-# those from overlapping, not a web-triggered and an MCP-triggered one on
-# the same project. Keying by (data_dir, project_id) still lets genuinely
-# different projects/data dirs run concurrently.
+# Блокировка переиндексации — на процесс и на (data_dir, project_id), а не
+# на экземпляр. main.py держит один ProjectManager на процесс (общий для Web
+# UI и MCP), но блокировка охраняет файлы проекта, а не объект: и второй
+# экземпляр на том же data_dir (тесты, отдельный инструмент в том же
+# процессе) не начнёт параллельный прогон. Разные проекты и data_dir
+# индексируются независимо. Другой процесс (ariadna-index рядом с сервером)
+# её не видит — его запуск параллельно с сервером не поддерживается.
 _REINDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _REINDEX_LOCKS_GUARD = threading.Lock()
 
-# Реестр projects.json меняют несколько ProjectManager одного процесса (Web UI,
-# MCP SSE и HTTP — см. main.py), каждый по схеме «перечитать → изменить →
-# записать». Без общей блокировки правка другого экземпляра между
-# перечитыванием и записью затиралась. Поэтому блокировка — на процесс и на
-# путь реестра, как _REINDEX_LOCKS; RLock — CRUD-методы вызывают друг друга
-# (get_project → _load_registry → _save_registry при миграции). Под ней
-# только работа с реестром: распаковка архивов, удаление файлов и
-# переиндексация идут снаружи.
+# Реестр projects.json меняется по схеме «перечитать → изменить → записать»
+# из потоков трёх серверов (Web UI, MCP SSE и HTTP — один ProjectManager на
+# процесс, см. main.py) и фоновой переиндексации. Без блокировки правка
+# одного потока между перечитыванием и записью другого затиралась бы.
+# Блокировка — на процесс и путь реестра, как _REINDEX_LOCKS: она охраняет
+# файл, а не объект. RLock — CRUD-методы вызывают друг друга (get_project →
+# _load_registry → _save_registry при миграции). Под ней только работа с
+# реестром: распаковка архивов, удаление файлов и переиндексация идут
+# снаружи.
 _REGISTRY_LOCKS: dict[str, threading.RLock] = {}
-
-# Живые ProjectManager процесса по пути реестра. У каждого (Web UI, MCP SSE,
-# MCP HTTP — см. main.py) свой пул Database: свой писатель и свои читающие
-# соединения к тому же index.db. Общий пул намеренно не вводится — разные
-# экземпляры пишут через разные соединения, и SQLite изолирует их
-# транзакции. Но удаление проекта должно закрыть его индекс у всех: иначе
-# на Linux MCP продолжал читать удалённый файл (и отдавал данные удалённого
-# проекта для нового с тем же id), а на Windows rmtree падал с WinError 32.
-_INSTANCES: dict[str, 'weakref.WeakSet[ProjectManager]'] = {}
-_INSTANCES_GUARD = threading.Lock()
 
 # Повторы os.replace при записи реестра (Windows, см. _write_registry_file):
 # 10 попыток с паузой 20, 40, … мс — в сумме до ~0,9 с.
@@ -106,9 +96,8 @@ class ProjectFilesNotRemovedError(OSError):
 
 
 # Повторы rmtree при PermissionError (Windows): файл индекса освобождается,
-# как только закончится запрос, начатый до закрытия (Database.close ждёт его,
-# но другой экземпляр мог ещё держать его долю секунды), а ещё его может
-# ненадолго открыть антивирус. До ~1 с в сумме.
+# как только закончится запрос, начатый до закрытия (Database.close ждёт его),
+# а ещё его может ненадолго открыть антивирус. До ~1 с в сумме.
 _RMTREE_ATTEMPTS = 8
 _RMTREE_DELAY_SEC = 0.03
 
@@ -217,31 +206,15 @@ class ProjectManager:
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
-        with _INSTANCES_GUARD:
-            _INSTANCES.setdefault(self._instances_key(), weakref.WeakSet()).add(self)
-
-    def _instances_key(self) -> str:
-        return str(self.registry_path.resolve())
-
-    def _siblings(self) -> list['ProjectManager']:
-        """Все живые ProjectManager процесса с тем же реестром, включая себя."""
-        with _INSTANCES_GUARD:
-            return list(_INSTANCES.get(self._instances_key(), ()))
-
-    def _close_project_db_everywhere(self, project_id: str) -> None:
-        """Закрыть Database проекта и убрать его из пула у всех экземпляров
-        процесса с тем же реестром — перед удалением или заменой файла
-        индекса. Трогаются только Database с тем же путём индекса: экземпляр
-        с другим index_dir держит другой файл."""
-        index_path = os.path.abspath(self._index_path(project_id))
-        for pm in self._siblings():
-            with pm._db_lock:
-                db = pm._db_pool.get(project_id)
-                if db is None or os.path.abspath(db.db_path) != index_path:
-                    continue
-                del pm._db_pool[project_id]
-            # Файл сейчас удалят или заменят: запросы, которые уже держат
-            # этот Database (SearchEngine), не должны открыть его заново.
+    def _retire_project_db(self, project_id: str) -> None:
+        """Закрыть Database проекта и убрать его из пула — перед удалением
+        или заменой файла индекса. Пул один на процесс (один ProjectManager
+        на Web UI и MCP, см. main.py), так что закрыть индекс достаточно
+        здесь. retire(), а не close(): запросы, которые уже держат этот
+        Database (SearchEngine), не должны открыть файл заново."""
+        with self._db_lock:
+            db = self._db_pool.pop(project_id, None)
+        if db is not None:
             db.retire()
 
     # ============================================
@@ -291,12 +264,13 @@ class ProjectManager:
         попадало между удалением файла и появлением нового и видело пустой
         реестр («project not found. Available: none»).
 
-        В одном процессе работают несколько независимых ProjectManager (MCP
-        SSE, MCP HTTP и Web UI — см. main.py), и каждый может менять файл.
-        Поэтому кэш отдаётся, только пока файл не изменился с последней
-        загрузки или собственной записи, иначе реестр перечитывается —
-        иначе MCP не видел проектов и источников, добавленных через Web UI,
-        и затирал их своей устаревшей копией.
+        Внутри процесса реестр один (один ProjectManager на Web UI и MCP, см.
+        main.py), но файл может поменять второй процесс — ariadna-index или
+        python -m src.core.indexer рядом с сервером, сервер в контейнере и
+        нативный запуск на одном data/. Поэтому кэш отдаётся, только пока
+        файл не изменился с последней загрузки или собственной записи, иначе
+        реестр перечитывается — иначе изменения второго процесса не были бы
+        видны и затирались бы устаревшей копией.
         """
         with self._registry_lock():
             return self._load_registry_locked()
@@ -329,7 +303,7 @@ class ProjectManager:
                     migrated = migrated or dropped
             except (json.JSONDecodeError, TypeError, OSError):
                 if cached is not None:
-                    # Файл, скорее всего, пишет другой экземпляр прямо сейчас.
+                    # Файл, скорее всего, пишет другой процесс прямо сейчас.
                     # Пустой реестр здесь опасен: следующая запись затёрла бы
                     # им настоящий. Отдаём прежний кэш, повторим в следующий раз.
                     return cached
@@ -352,7 +326,7 @@ class ProjectManager:
         return self._registry
 
     def _write_registry_file(self, data: dict):
-        """Атомарная запись projects.json: другой экземпляр, перечитывающий
+        """Атомарная запись projects.json: другой процесс, перечитывающий
         файл, не должен увидеть его наполовину записанным."""
         tmp = self.registry_path.with_name(
             f'{self.registry_path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
@@ -419,7 +393,7 @@ class ProjectManager:
         narrower write."""
         # Именно текущий кэш, без повторного _load_registry(): вызывающий уже
         # изменил в нём проект, а перечитывание (если файл успел поменять
-        # другой экземпляр) выбросило бы эти изменения.
+        # другой процесс) выбросило бы эти изменения.
         registry = self._registry if self._registry is not None else self._load_registry()
         data = {'projects': {pid: self._project_to_dict(proj) for pid, proj in registry.items()}}
         self._write_registry_file(data)
@@ -572,8 +546,9 @@ class ProjectManager:
         удаления это оставляло на томе новый пустой индекс-сироту, а на
         Windows мешало rmtree. Поэтому проект сначала убирается из реестра:
         новые запросы получают «not found», а get_db без проекта в реестре
-        индекс не открывает и не создаёт. Затем индекс закрывается у всех
-        экземпляров, затем удаляются файлы (на больших выгрузках — секунды).
+        индекс не открывает и не создаёт. Затем индекс закрывается в пуле
+        (_retire_project_db), затем удаляются файлы (на больших выгрузках —
+        секунды).
 
         Если удалить файлы не удалось (Windows, файл занят), проекта в
         реестре уже нет, а исключение называет путь. Повторный вызов для
@@ -588,9 +563,7 @@ class ProjectManager:
             elif not project_dir.exists() and not index_parent.exists():
                 raise KeyError(f"Project '{project_id}' not found")
 
-        # Индекс проекта — закрыть у всех ProjectManager процесса, не только
-        # у себя (см. _INSTANCES).
-        self._close_project_db_everywhere(project_id)
+        self._retire_project_db(project_id)
 
         for path in dict.fromkeys((project_dir, index_parent)):
             if not path.exists():
@@ -910,7 +883,7 @@ class ProjectManager:
                 new.parent.mkdir(parents=True, exist_ok=True)
                 started = time.monotonic()
                 _copy_sqlite(old, tmp)
-                self._close_project_db_everywhere(project.id)
+                self._retire_project_db(project.id)
                 os.replace(tmp, new)
             except Exception:
                 logger.exception("Не удалось перенести индекс проекта %s из %s в %s — "
@@ -950,7 +923,7 @@ class ProjectManager:
 
             # Открыть (и тем более создать) индекс — только для проекта из
             # реестра. Проверка — под той же блокировкой пула: delete_project
-            # сперва убирает проект из реестра и лишь затем закрывает пулы,
+            # сперва убирает проект из реестра и лишь затем закрывает пул,
             # поэтому открытие либо успевает до закрытия (и будет закрыто),
             # либо видит, что проекта нет. Иначе запрос посреди удаления
             # создавал новый пустой index.db, а на Windows держал файл,
@@ -1117,9 +1090,9 @@ class ProjectManager:
 
         Реестр — узкой записью «перечитать → записать один ключ» (Этап 4/D7),
         а не update_project()/_save_registry(): те сбросили бы на диск весь
-        кэш этого экземпляра и затёрли бы правки других проектов из другого
-        ProjectManager (Web UI и MCP — у каждого свой, см. main.py) за время
-        долгого прогона.
+        кэш реестра и затёрли бы правки других проектов, сделанные за время
+        долгого прогона вторым процессом (ariadna-index, нативный запуск на
+        том же data/).
 
         Запись идемпотентна: reindex_async делает её синхронно до ответа
         «started», и reindex() в потоке повторяет её — теми же значениями и
@@ -1261,8 +1234,8 @@ class ProjectManager:
 
     def _reindex_lock(self, project_id: str) -> threading.Lock:
         """Process-wide reindex lock for this (data_dir, project_id) — see
-        the module-level _REINDEX_LOCKS comment for why it can't be a
-        plain instance attribute (Этап 4/D7)."""
+        the module-level _REINDEX_LOCKS comment for why it is per process
+        and per project rather than per instance (Этап 4/D7)."""
         key = (str(self.data_dir), project_id)
         with _REINDEX_LOCKS_GUARD:
             lock = _REINDEX_LOCKS.get(key)

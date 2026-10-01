@@ -29,25 +29,31 @@ def _listen_addr() -> str:
     return os.environ.get('LISTEN_ADDR', '127.0.0.1')
 
 
-def _prepare_data(data_dir: str) -> None:
-    """Обслуживание до запуска любых рабочих потоков (ни одна переиндексация
-    ещё не идёт): перенос индексов в INDEX_DIR, затем сброс статуса
-    'indexing', оставшегося от прогона, который не пережил остановку
-    процесса (Этап U0). Порядок важен: reset_stale_indexing открывает БД, и
-    на новом месте без переноса появился бы пустой индекс."""
+def build_shared_state(data_dir: str):
+    """Один ProjectManager на процесс — общий для Web UI и обоих транспортов
+    MCP: один реестр и один пул индексов. Раньше у каждого сервера был свой
+    экземпляр, и согласовывать их приходилось заплатками (MCP не видел
+    проектов из Web UI, читал индекс удалённого проекта, держал файл,
+    который удалял Web UI).
+
+    До запуска любых рабочих потоков (ни одна переиндексация ещё не идёт):
+    перенос индексов в INDEX_DIR, затем сброс статуса 'indexing', оставшегося
+    от прогона, который не пережил остановку процесса (Этап U0). Порядок
+    важен: reset_stale_indexing открывает БД, и на новом месте без переноса
+    появился бы пустой индекс. Ошибки обслуживания логируются и не мешают
+    запуску."""
+    from .core.project_manager import ProjectManager
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    pm = ProjectManager(data_dir, _index_dir())
     try:
-        from .core.project_manager import ProjectManager
-        pm = ProjectManager(data_dir, _index_dir())
-        try:
-            try:
-                pm.migrate_index_dir()
-            except Exception:
-                logger.exception("Не удалось перенести индексы в INDEX_DIR")
-            pm.reset_stale_indexing()
-        finally:
-            pm.close_all()
+        pm.migrate_index_dir()
+    except Exception:
+        logger.exception("Не удалось перенести индексы в INDEX_DIR")
+    try:
+        pm.reset_stale_indexing()
     except Exception:
         logger.exception("Не удалось проверить незавершённые индексации")
+    return pm
 
 
 def main():
@@ -56,10 +62,7 @@ def main():
     mcp_http_port = int(os.environ.get('MCP_HTTP_PORT', '9879'))
     web_port = int(os.environ.get('WEB_PORT', '9878'))
 
-    # Ensure data directory exists
-    Path(data_dir).mkdir(parents=True, exist_ok=True)
-
-    _prepare_data(data_dir)
+    pm = build_shared_state(data_dir)
 
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Index directory: {_index_dir() or data_dir + '/projects'}")
@@ -68,29 +71,32 @@ def main():
     logger.info(f"Web UI port: {web_port}")
 
     # Start Web UI in background thread
-    web_thread = threading.Thread(target=_start_web, args=(data_dir, web_port), daemon=True)
+    web_thread = threading.Thread(target=_start_web, args=(pm, web_port), daemon=True)
     web_thread.start()
     logger.info(f"Web UI starting on :{web_port}")
 
     # Streamable HTTP (Этап 6): the current MCP transport — start alongside
     # SSE, which stays on its existing port for backward compatibility with
     # clients that haven't migrated yet (SSE is deprecated in the MCP spec).
-    http_thread = threading.Thread(target=_start_mcp_streamable_http, args=(data_dir, mcp_http_port), daemon=True)
+    http_thread = threading.Thread(target=_start_mcp_streamable_http, args=(pm, mcp_http_port), daemon=True)
     http_thread.start()
     logger.info(f"MCP streamable HTTP starting on :{mcp_http_port}")
 
     # Start MCP SSE server in main thread (blocking)
     logger.info(f"MCP SSE server starting on :{mcp_port}")
-    _start_mcp_sse(data_dir, mcp_port)
+    _start_mcp_sse(pm, mcp_port)
 
 
-def _start_web(data_dir: str, port: int):
-    """Start FastAPI Web UI with uvicorn."""
+def _start_web(pm, port: int):
+    """Start FastAPI Web UI with uvicorn — с общим ProjectManager процесса.
+    Объект app, а не строка "src.web.app:app": uvicorn импортировал бы модуль
+    сам, и set_pm мог бы попасть не в тот экземпляр приложения."""
     try:
         import uvicorn
-        os.environ['DATA_DIR'] = data_dir
+        from .web import app as web_app
+        web_app.set_pm(pm)
         uvicorn.run(
-            "src.web.app:app",
+            web_app.app,
             host=_listen_addr(),
             port=port,
             log_level="warning",
@@ -108,7 +114,7 @@ def _idle_forever():
         time.sleep(60)
 
 
-def _start_mcp_sse(data_dir: str, port: int):
+def _start_mcp_sse(pm, port: int):
     """Start the MCP server on the (deprecated but still widely used) SSE
     transport — kept on its existing port for backward compatibility
     (Этап 6). mcp.server.mcpserver.MCPServer.sse_app() builds this itself
@@ -123,8 +129,6 @@ def _start_mcp_sse(data_dir: str, port: int):
             return
 
         import uvicorn
-        from .core.project_manager import ProjectManager
-        pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
         uvicorn.run(_sse_app(mcp), host=_listen_addr(), port=port, log_level="warning")
@@ -150,7 +154,7 @@ def _sse_app(mcp):
     return HostOriginGuard(mcp.sse_app(host="0.0.0.0", transport_security=settings), settings)
 
 
-def _start_mcp_streamable_http(data_dir: str, port: int):
+def _start_mcp_streamable_http(pm, port: int):
     """Start the MCP server on the streamable HTTP transport (Этап 6) —
     the current (non-deprecated) transport in the MCP spec."""
     try:
@@ -159,8 +163,6 @@ def _start_mcp_streamable_http(data_dir: str, port: int):
             return  # already logged/idled by _start_mcp_sse in the main thread
 
         import uvicorn
-        from .core.project_manager import ProjectManager
-        pm = ProjectManager(data_dir, _index_dir())
         mcp = create_mcp_server(pm)
 
         from .security import mcp_transport_security
