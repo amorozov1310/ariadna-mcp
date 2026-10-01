@@ -16,6 +16,10 @@
 - **Удаление проекта под нагрузкой MCP:** запрос, заставший удаление, иногда
   получал «Cannot operate on a closed database» вместо обычного «проект
   удалён» — теперь всегда второе.
+- Для разработчика: при запуске без Docker на Windows шум ProactorEventLoop
+  (`ConnectionResetError [WinError 10054]` из `_call_connection_lost`, когда
+  клиент резко закрыл соединение) понижен с ERROR до DEBUG; другие ошибки
+  asyncio не затронуты.
 - Для разработчика: Web UI и MCP в одном процессе используют один
   `ProjectManager` — общий реестр и пул индексов (`main.build_shared_state`,
   `web/app.py:set_pm`). Механизмы, нужные только нескольким экземплярам в

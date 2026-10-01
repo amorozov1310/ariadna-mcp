@@ -297,6 +297,7 @@ def test_main_blocks_on_mcp_and_runs_web_ui_in_thread(monkeypatch):
                         lambda pm, port: calls.append(('web', port)) or web_started.set())
     monkeypatch.setattr(main_module, '_start_mcp_streamable_http',
                         lambda pm, port: calls.append(('mcp', port, threading.current_thread())))
+    monkeypatch.setattr(main_module, '_quiet_proactor_connection_reset', lambda: None)
     monkeypatch.delenv('MCP_HTTP_PORT', raising=False)
     monkeypatch.delenv('WEB_PORT', raising=False)
     monkeypatch.delenv('INDEX_DIR', raising=False)

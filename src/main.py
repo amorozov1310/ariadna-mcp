@@ -3,6 +3,7 @@
 """
 
 import os
+import sys
 import logging
 import threading
 from pathlib import Path
@@ -13,6 +14,33 @@ logging.basicConfig(
     datefmt='%H:%M:%S',
 )
 logger = logging.getLogger('ariadna')
+
+
+class ProactorConnectionResetFilter(logging.Filter):
+    """Понижает до DEBUG шум ProactorEventLoop (Windows, запуск без Docker):
+    клиент резко закрыл соединение — asyncio пишет ERROR «Exception in
+    callback _ProactorBasePipeTransport._call_connection_lost()» с
+    трассировкой ConnectionResetError [WinError 10054]. Известное поведение
+    CPython, на работу не влияет. Только этот случай: другие ошибки asyncio
+    (и ConnectionResetError из других мест) проходят как есть."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        if (isinstance(exc, ConnectionResetError)
+                and '_call_connection_lost' in record.getMessage()):
+            record.levelno, record.levelname = logging.DEBUG, 'DEBUG'
+            return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
+        return True
+
+
+def _quiet_proactor_connection_reset(platform: str = sys.platform) -> None:
+    """Ставит ProactorConnectionResetFilter на логгер asyncio — только на
+    Windows (ProactorEventLoop есть только там)."""
+    if platform != 'win32':
+        return
+    asyncio_logger = logging.getLogger('asyncio')
+    if not any(isinstance(f, ProactorConnectionResetFilter) for f in asyncio_logger.filters):
+        asyncio_logger.addFilter(ProactorConnectionResetFilter())
 
 
 def _index_dir() -> str | None:
@@ -61,6 +89,7 @@ def main():
     mcp_http_port = int(os.environ.get('MCP_HTTP_PORT', '9879'))
     web_port = int(os.environ.get('WEB_PORT', '9878'))
 
+    _quiet_proactor_connection_reset()
     pm = build_shared_state(data_dir)
 
     logger.info(f"Data directory: {data_dir}")
