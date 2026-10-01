@@ -124,6 +124,13 @@ _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list
 DIAGNOSE_MISSING_SHOWN = 100
 
 
+def is_error_text(text: str) -> bool:
+    """Ответ execute_tool — ожидаемая ошибка («Error: …»). Одно правило для
+    MCP (server.py: такой ответ уходит клиенту с isError=true) и playground
+    Web UI (показывается как ошибка)."""
+    return text.startswith('Error')
+
+
 def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
     """Execute a tool and return text result."""
     requested = args.get('limit')
@@ -134,7 +141,7 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
     if not capped:
         return _execute_tool(pm, tool, args)
     text = _execute_tool(pm, tool, {**args, 'limit': MAX_LIMIT})
-    if text.startswith('Error'):
+    if is_error_text(text):
         return text
     return (f"{text}\n(limit={requested} урезан до {MAX_LIMIT} — больше за один вызов не "
             f"выдаётся; остальное — через offset)")
