@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 import sys
 import logging
 import tempfile
@@ -25,7 +26,12 @@ ROOT = Path(__file__).parent.parent
 
 def test_version_single_source():
     assert src.__version__ == (ROOT / 'src' / 'VERSION').read_text(encoding='utf-8').strip()
-    assert src.__version__ == '0.2.1'
+    # Не конкретный номер (его пришлось бы править при каждом выпуске), а то,
+    # что у текущей версии есть раздел в CHANGELOG: выпуск без записи о нём
+    # не пройдёт.
+    changelog = (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
+    assert re.search(rf'^## {re.escape(src.__version__)}\s*$', changelog, re.M), \
+        f"в CHANGELOG.md нет раздела «## {src.__version__}»"
     pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     assert 'dynamic = ["version"]' in pyproject
     assert 'version = {file = "src/VERSION"}' in pyproject
