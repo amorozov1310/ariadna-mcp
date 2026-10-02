@@ -39,7 +39,14 @@ MCP-сервер + Web UI: индексируют XML-выгрузку конф�
 python -m pytest tests -q          # быстрые тесты, ~10 с, должны быть зелёными
 python -m pytest tests -q -m slow  # только при наличии data/projects (локально)
 python -m src.main                 # Web UI :9878, MCP :9879/mcp
+python scripts/live_check.py       # проверка работающего сервера по сети (--quick, --project ID)
 ```
+
+`scripts/live_check.py` — регрессия, гонки удаления, playground против MCP и
+стресс против уже запущенного сервера; временный проект `zz_live_…`
+удаляет сам. `python -m pytest tests -q -m live` поднимает для него
+`python -m src.main` на свободных портах. В CI он идёт и против
+Docker-образа (Linux), и против запуска без Docker (Windows).
 
 Зависимости: `pip install -e ".[dev]"`, генерация отчёта из XML —
 `pip install -e ".[xml-report]"`.

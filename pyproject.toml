@@ -45,9 +45,10 @@ xml-report = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-m", "not slow"]
+addopts = ["-m", "not slow and not live"]
 markers = [
     "slow: full-corpus indexing tests (bshp, 1idm2); run with -m slow",
+    "live: scripts/live_check.py против запущенного сервера (python -m src.main); run with -m live",
 ]
 
 # Версия — из src/VERSION (единственный источник, см. src/__init__.py).
