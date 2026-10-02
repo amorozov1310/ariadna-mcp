@@ -206,6 +206,21 @@ pip install -e ".[dev]"
 ```bash
 python -m pytest tests -q            # быстрые, ~10 с
 python -m pytest tests -q -m slow    # полные корпуса из data/projects (bshp, 1idm2)
+python -m pytest tests -q -m live    # scripts/live_check.py против python -m src.main на свободных портах
+```
+
+### Проверка работающего сервера
+
+`scripts/live_check.py` проверяет уже запущенный сервер по сети: регрессию,
+индексацию, совпадение playground и MCP, удаление под нагрузкой, стресс
+реестра (подробно — README, «Разработка»). Работает на временном проекте
+`zz_live_…` из фикстуры и удаляет его сам; ваши проекты не трогает. После
+обновления:
+
+```bash
+python scripts/live_check.py --project erp                    # Docker
+python scripts/live_check.py --docker-container ariadna       # + лог и том контейнера
+python scripts/live_check.py --quick --web http://127.0.0.1:9878 --mcp http://127.0.0.1:9879/mcp   # без Docker
 ```
 
 Slow-тесты читают выгрузки из `data/projects`, но ничего в `data/` не

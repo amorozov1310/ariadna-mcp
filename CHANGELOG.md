@@ -2,6 +2,9 @@
 
 ## 0.3.0 (не выпущен)
 
+- Для разработчика: `scripts/live_check.py` — проверка работающего сервера
+  по сети (регрессия, гонки удаления, playground против MCP, стресс); в CI —
+  Docker-образ целиком на Linux и запуск без Docker на Windows.
 - **Playground Web UI вызывает тот же код, что MCP:** все 16 инструментов
   (добавлены `list_projects`, `list_sources`, `get_procedure_code`,
   `reindex`, `remove_source`), ответы совпадают с тем, что видит агент, —
