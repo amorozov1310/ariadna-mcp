@@ -26,7 +26,7 @@ except ImportError:
 
 from .. import __version__
 from ..core.project_manager import PROJECT_GONE, PROJECT_GONE_MESSAGE, ProjectManager
-from .tools import execute_tool
+from .tools import execute_tool, is_error_text
 
 _PID = "ID проекта (необязательно, если в реестре только один проект)"
 _SID = "ID источника (пусто = все источники)"
@@ -87,7 +87,7 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         except Exception as e:
             logger.exception("Инструмент %s упал", name)
             raise ToolError(str(e)) from e
-        if text.startswith('Error'):
+        if is_error_text(text):
             # Ожидаемая ошибка (проект не найден и т.п.) — без трассировки.
             raise ToolError(text.removeprefix('Error:').strip())
         return text
