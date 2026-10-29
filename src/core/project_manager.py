@@ -12,8 +12,6 @@ import sqlite3
 import time
 import os
 import threading
-import zipfile
-import tarfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -21,6 +19,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from . import parser_fingerprint
+from .archives import extract_archive
 from .db import Database, IndexRemovedError
 from .search import SearchEngine
 
@@ -622,22 +621,9 @@ class ProjectManager:
         elif (source_dir / 'report.txt').exists():
             report_path = f'sources/{source_id}/report.txt'
 
-        # Extract XML archive
+        # Extract XML archive (проверка путей и пределов — src/core/archives.py)
         if xml_archive is not None:
-            xml_dest = source_dir / 'xml'
-            xml_dest.mkdir(exist_ok=True)
-            fname = xml_archive_filename.lower()
-            if fname.endswith('.zip'):
-                self._extract_zip(xml_archive, xml_dest)
-            elif fname.endswith('.tar.gz') or fname.endswith('.tgz'):
-                self._extract_tar(xml_archive, xml_dest)
-            else:
-                # Try zip first, then tar
-                try:
-                    self._extract_zip(xml_archive, xml_dest)
-                except zipfile.BadZipFile:
-                    xml_archive.seek(0)
-                    self._extract_tar(xml_archive, xml_dest)
+            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
             xml_path = f'sources/{source_id}/xml'
         elif (source_dir / 'xml').exists():
             xml_path = f'sources/{source_id}/xml'
@@ -703,22 +689,9 @@ class ProjectManager:
 
         # Replace XML archive
         if xml_archive is not None:
-            xml_dest = source_dir / 'xml'
-            # Wipe existing xml/ folder so old files don't linger
-            if xml_dest.exists():
-                shutil.rmtree(xml_dest)
-            xml_dest.mkdir()
-            fname = xml_archive_filename.lower()
-            if fname.endswith('.zip'):
-                self._extract_zip(xml_archive, xml_dest)
-            elif fname.endswith('.tar.gz') or fname.endswith('.tgz'):
-                self._extract_tar(xml_archive, xml_dest)
-            else:
-                try:
-                    self._extract_zip(xml_archive, xml_dest)
-                except zipfile.BadZipFile:
-                    xml_archive.seek(0)
-                    self._extract_tar(xml_archive, xml_dest)
+            # Старый xml/ заменяется целиком (без остатков прежних файлов) и
+            # только после успешной проверки и распаковки нового архива.
+            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
             changes['xml_path'] = f'sources/{source_id}/xml'
 
         # Update metadata fields
@@ -1365,32 +1338,6 @@ class ProjectManager:
     # ============================================
     # HELPERS
     # ============================================
-
-    def _extract_zip(self, fileobj: BinaryIO, dest: Path):
-        """Extract zip archive to destination."""
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
-            while chunk := fileobj.read(8192):
-                tmp.write(chunk)
-            tmp_path = tmp.name
-        try:
-            with zipfile.ZipFile(tmp_path, 'r') as zf:
-                zf.extractall(dest)
-        finally:
-            os.unlink(tmp_path)
-
-    def _extract_tar(self, fileobj: BinaryIO, dest: Path):
-        """Extract tar.gz archive to destination."""
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:
-            while chunk := fileobj.read(8192):
-                tmp.write(chunk)
-            tmp_path = tmp.name
-        try:
-            with tarfile.open(tmp_path, 'r:*') as tf:
-                tf.extractall(dest)
-        finally:
-            os.unlink(tmp_path)
 
     def close_all(self):
         """Close all open database connections."""
