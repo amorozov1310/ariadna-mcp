@@ -1,0 +1,50 @@
+# Имя проекта задано явно: иначе compose берёт его из имени каталога
+# клона и подставляет в группу контейнеров и в имя образа —
+# в Docker Desktop мелькало бы случайное имя каталога.
+name: ariadna
+
+services:
+  ariadna:
+    build: .
+    image: ariadna
+    container_name: ariadna
+    # Порты публикуются только на 127.0.0.1: авторизации нет. Доступ с других
+    # машин — явно, BIND_ADDR=0.0.0.0 (и MCP_ALLOWED_HOSTS), только в
+    # доверенной сети. Внутри контейнера серверы слушают 0.0.0.0 — это нужно
+    # для проброса портов.
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${MCP_HTTP_HOST_PORT:-19879}:9879"   # MCP streamable HTTP
+      - "${BIND_ADDR:-127.0.0.1}:${WEB_HOST_PORT:-19878}:9878"        # Web UI
+    volumes:
+      - ./data:/data                       # Выгрузки и projects.json
+      # Индексы SQLite — на именованном томе, а не в ./data: на Docker Desktop
+      # под Windows ./data монтируется через 9p, где полный проход по индексу
+      # перечитывает файл при каждом вызове (секунды вместо 0,1 с) и не
+      # работают WAL и блокировки SQLite. Пересобрать индексы с нуля:
+      # docker compose down && docker volume rm ariadna-index.
+      - ariadna-index:/index
+    environment:
+      # Контейнер по умолчанию живёт в UTC, и даты в UI (время индексации)
+      # расходились с часами на стене.
+      - TZ=${TZ:-Europe/Moscow}
+      - DATA_DIR=/data
+      - INDEX_DIR=/index
+      # Имена/адреса, под которыми к серверу обращаются с других машин (при
+      # BIND_ADDR=0.0.0.0), через запятую; без них чужой Host отклоняется —
+      # защита от DNS rebinding (src/security.py).
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-}
+      - MCP_HTTP_PORT=9879
+      - WEB_PORT=9878
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9878/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  ariadna-index:
+    # Явное имя: иначе compose добавит префикс проекта (ariadna_ariadna-index),
+    # и команда из документации `docker volume rm ariadna-index` не сработает.
+    name: ariadna-index

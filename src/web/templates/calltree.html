@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Дерево вызовов — {{ project.name }}{% endblock %}
+{% block active_nav %}graph{% endblock %}
+{% block content %}
+{#
+  Этап U0/U6: «Дерево вызовов» и «Граф» — одна задача, поэтому один раздел
+  «Граф» с переключателем текст/визуал. Полное слияние в одну страницу с
+  табами — этап U3.
+#}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
+    Граф вызовов
+</h1>
+<div class="view-switch">
+    <a class="view-tab" href="/projects/{{ project.id }}/graph{% if procedure %}?procedure={{ procedure }}&module={{ module }}&direction={{ direction }}&depth={{ depth }}{% if source_id %}&source_id={{ source_id }}{% endif %}{% endif %}">Визуальный</a>
+    <span class="view-tab active">Текстовое дерево</span>
+</div>
+
+<div class="card">
+    <form method="get" action="/projects/{{ project.id }}/calltree">
+        <div class="form-row">
+            <div class="form-group" style="flex:2">
+                <label>Имя процедуры</label>
+                <input name="procedure" placeholder="напр. ОбработкаПроведения" value="{{ procedure }}" autofocus>
+                <div class="form-hint">Точное имя процедуры или функции, без скобок.</div>
+            </div>
+            <div class="form-group" style="flex:2">
+                <label>Модуль — необязательно</label>
+                <input name="module" placeholder="напр. Документ.Реализация.МодульОбъекта" value="{{ module }}">
+                <div class="form-hint">Нужен, только если процедура с таким именем есть в нескольких модулях.</div>
+            </div>
+            <div class="form-group" style="flex:1">
+                <label>Направление</label>
+                <select name="direction">
+                    <option value="down" {% if direction != 'up' %}selected{% endif %}>Вниз — кого вызывает</option>
+                    <option value="up" {% if direction == 'up' %}selected{% endif %}>Вверх — кто вызывает</option>
+                </select>
+                <div class="form-hint">Вниз — что делает процедура. Вверх — кто на неё завязан.</div>
+            </div>
+            <div class="form-group" style="flex:0.5">
+                <label>Глубина</label>
+                <input type="number" name="depth" value="{{ depth or 3 }}" min="1" max="10">
+                <div class="form-hint">Уровней вызовов, 1–10.</div>
+            </div>
+            {% if sources and sources|length > 1 %}
+            <div class="form-group" style="flex:1">
+                <label>Источник</label>
+                <select name="source_id">
+                    <option value="">Все источники</option>
+                    {% for s in sources %}
+                    <option value="{{ s.id }}" {% if source_id == s.id %}selected{% endif %}>
+                        {{ s.label }}{% if s.source_type == 'extension' %} (ext){% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+        </div>
+        <div class="btn-row" style="margin-top:var(--space-2)">
+            <button type="submit" class="btn btn-primary">Построить</button>
+            {% if procedure and tree_node %}
+            <a href="/projects/{{ project.id }}/graph?procedure={{ procedure }}&module={{ module }}&direction={{ direction }}&depth={{ depth }}{% if source_id %}&source_id={{ source_id }}{% endif %}"
+               class="btn btn-secondary">
+               <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
+               Показать визуально</a>
+            {% endif %}
+        </div>
+    </form>
+</div>
+
+{% if error %}
+<div class="notice notice-danger mb-8">
+    <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <span>{{ error }}</span>
+</div>
+{% endif %}
+
+{% if tree %}
+<div class="card">
+    <div class="flex-between mb-8">
+        <h3>
+            {% if direction == 'up' %}Кто вызывает{% else %}Что вызывает{% endif %}
+            <span class="mono">{{ procedure }}</span>
+        </h3>
+        <span class="text-muted">глубина {{ depth }}</span>
+    </div>
+    <pre class="result-box" style="font-family:var(--mono);font-size:var(--fs-base);line-height:1.6">{{ tree }}</pre>
+</div>
+{% elif not_ready %}
+<div class="card">
+    <div class="empty-state">
+        <p>Дерево вызовов доступно после индексации BSL-кода.</p>
+        <p class="muted">Загрузите XML-выгрузку с .bsl файлами для анализа кода.</p>
+    </div>
+</div>
+{% endif %}
+
+<style>
+.view-switch { display:flex; gap:0; margin-bottom:var(--space-4); border-bottom:2px solid var(--border); }
+.view-tab { padding:8px var(--space-4); font-size:var(--fs-base); font-weight:500; color:var(--text2);
+            border-bottom:2px solid transparent; margin-bottom:-2px; }
+.view-tab:hover { color:var(--text); text-decoration:none; }
+.view-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+</style>
+{% endblock %}

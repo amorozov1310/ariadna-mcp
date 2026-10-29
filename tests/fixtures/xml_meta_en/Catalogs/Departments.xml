@@ -1,0 +1,37 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Catalog uuid="406d1339-a4b6-521f-89c0-2414480a16fe">
+		<Properties>
+			<Name>Departments</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Подразделения</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="7cbbac32-d08c-542e-a333-ae0492eadcf7">
+				<Properties>
+					<Name>Head</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>en</v8:lang>
+							<v8:content>Руководитель</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Employees</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Form>ItemForm</Form>
+			<Command uuid="6afd0fe0-fcac-5d71-8f3c-a3de7f3d8760"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>

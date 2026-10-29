@@ -1,0 +1,60 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Configuration uuid="c0cd3e88-7f7e-5a7c-9213-58b96398bb1d">
+		<Properties>
+			<Name>DemoApp</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Demo application</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment>Synthetic configuration for tests</Comment>
+			<ScriptVariant>English</ScriptVariant>
+			<Version>2.0.1</Version>
+			<CompatibilityMode>DontUse</CompatibilityMode>
+		</Properties>
+		<ChildObjects>
+			<Language>English</Language>
+			<Style>MainStyle</Style>
+			<Role>FullAccess</Role>
+			<Role>Operator</Role>
+			<Role>Auditor</Role>
+			<CommonPicture>Logo</CommonPicture>
+			<CommonPicture>TaskIcon</CommonPicture>
+			<SessionParameter>CurrentUser</SessionParameter>
+			<Constant>ServiceUrl</Constant>
+			<CommonModule>ServerCommon</CommonModule>
+			<CommonModule>ClientCommon</CommonModule>
+			<CommonModule>GlobalHelpers</CommonModule>
+			<CommonModule>IntegrationServer</CommonModule>
+			<CommonModule>NotificationsServer</CommonModule>
+			<CommonModule>JobsServer</CommonModule>
+			<Enum>UserType</Enum>
+			<Enum>Priority</Enum>
+			<Enum>Channel</Enum>
+			<Catalog>Users</Catalog>
+			<Catalog>Roles</Catalog>
+			<Catalog>Departments</Catalog>
+			<Catalog>Employees</Catalog>
+			<Catalog>Products</Catalog>
+			<Catalog>Units</Catalog>
+			<Catalog>Customers</Catalog>
+			<Catalog>Warehouses</Catalog>
+			<Catalog>Currencies</Catalog>
+			<Catalog>Projects</Catalog>
+			<Catalog>Tags</Catalog>
+			<Catalog>EventKinds</Catalog>
+			<InformationRegister>JobStatus</InformationRegister>
+			<Task>Approval</Task>
+			<Report>UserActivity</Report>
+			<DataProcessor>ImportUsers</DataProcessor>
+			<CommonForm>JobsLog</CommonForm>
+			<ScheduledJob>RunJobs</ScheduledJob>
+			<HTTPService>Api</HTTPService>
+			<Subsystem>Administration</Subsystem>
+			<Subsystem>Operations</Subsystem>
+			<Subsystem>Sales</Subsystem>
+		</ChildObjects>
+	</Configuration>
+</MetaDataObject>

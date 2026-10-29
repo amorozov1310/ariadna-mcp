@@ -1,0 +1,72 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<InformationRegister uuid="1cbfe11c-3348-5b97-afdb-fbf76eee4240">
+		<Properties>
+			<Name>КурсыВалют</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Курсы валют</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Dimension uuid="b0abc895-5489-5c9d-a5ad-44bd615fd574">
+				<Properties>
+					<Name>Валюта</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Валюта</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Валюты</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Indexing>Index</Indexing>
+				</Properties>
+			</Dimension>
+			<Resource uuid="e80081c7-620f-5ad7-9876-18033818c965">
+				<Properties>
+					<Name>Курс</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Курс</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:decimal</v8:Type>
+						<v8:NumberQualifiers><v8:Digits>10</v8:Digits><v8:FractionDigits>4</v8:FractionDigits><v8:AllowedSign>Any</v8:AllowedSign></v8:NumberQualifiers>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Resource>
+			<Resource uuid="bc30a4b9-7dc1-5e79-b305-eb41c37cb876">
+				<Properties>
+					<Name>Кратность</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Кратность</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:decimal</v8:Type>
+						<v8:NumberQualifiers><v8:Digits>10</v8:Digits><v8:FractionDigits>0</v8:FractionDigits><v8:AllowedSign>Any</v8:AllowedSign></v8:NumberQualifiers>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Resource>
+			<Form>ФормаСписка</Form>
+			<Command uuid="7ae2e8cd-6961-5f55-9fc9-e9ca526a5313"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</InformationRegister>
+</MetaDataObject>

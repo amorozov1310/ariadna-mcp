@@ -1,0 +1,70 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<InformationRegister uuid="e893a21c-32e8-5534-afad-ee96bfe63d83">
+		<Properties>
+			<Name>ЦеныНоменклатуры</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Цены номенклатуры</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Dimension uuid="4f7ee787-abd9-5d1a-91cd-1e9b36ed93c3">
+				<Properties>
+					<Name>Номенклатура</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Номенклатура</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Номенклатура</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Indexing>Index</Indexing>
+				</Properties>
+			</Dimension>
+			<Dimension uuid="ff2e2124-f6a2-5361-8520-15cd103bdaaf">
+				<Properties>
+					<Name>ТипЦены</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>ТипЦены</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:EnumRef.ТипыЦен</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Indexing>Index</Indexing>
+				</Properties>
+			</Dimension>
+			<Resource uuid="8537270c-bd43-5573-9d99-097d67e384ea">
+				<Properties>
+					<Name>Цена</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Цена</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:TypeSet>cfg:DefinedType.Сумма</v8:TypeSet>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Resource>
+			<Form>ФормаСписка</Form>
+			<Command uuid="af707657-f48c-585b-9f96-e3c872f27e44"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</InformationRegister>
+</MetaDataObject>

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ariadna"
+dynamic = ["version"]
+description = "MCP server for fast 1C configuration metadata search and BSL code analysis"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Этап 6: migrated off the low-level Server API (list_tools()/call_tool()
+    # decorators, gone in 2.x) onto mcp.server.mcpserver.MCPServer — see
+    # src/mcp_server/server.py. The <2 pin was a 2026-09-03 hotfix for a
+    # container crash when pip resolved an unpinned 2.1.1 against 1.x code.
+    "mcp>=2,<3",
+    "pydantic>=2",
+    "fastapi>=0.110",
+    # 1.7: TrustedHostMiddleware разбирает Host с IPv6 ([::1]:19878); в более
+    # старых он резал заголовок по первому «:», и разрешённый [::1] получал 400.
+    "starlette>=1.7",
+    "uvicorn[standard]",
+    "jinja2",
+    "aiosqlite",
+    "python-multipart",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[project.scripts]
+"ariadna-index" = "src.core.indexer:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-m", "not slow and not live"]
+markers = [
+    "slow: полная переиндексация своих проектов из data/ (ARIADNA_CORPUS=id1,id2); run with -m slow",
+    "live: scripts/live_check.py против запущенного сервера (python -m src.main); run with -m live",
+]
+
+# Версия — из src/VERSION (единственный источник, см. src/__init__.py).
+[tool.setuptools.dynamic]
+version = {file = "src/VERSION"}
+
+# Пакеты — явно: код импортируется как `src.…`, а автопоиск setuptools
+# принимал каталог src/ за src-раскладку и клал в колесо core/, web/… на
+# верхний уровень без пакета src — установленный пакет не импортировался.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src", "src.*"]
+
+# Не-.py файлы, которые код читает во время работы (поиск: read_text, open,
+# Path(__file__), Jinja2Templates, StaticFiles, FileResponse).
+[tool.setuptools.package-data]
+"src" = ["VERSION"]                                   # src/__init__.py
+"src.web" = ["templates/*.html", "static/*", "static/fonts/*"]   # web/app.py

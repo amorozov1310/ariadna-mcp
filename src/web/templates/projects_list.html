@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Проекты — Ариадна{% endblock %}
+{% block active_nav %}projects{% endblock %}
+
+{% block content %}
+{% if projects %}
+{% for p in projects %}
+<a href="/projects/{{ p.id }}" style="text-decoration:none;color:inherit">
+<div class="card">
+    <div class="card-header">
+        <h2>{{ p.name }}</h2>
+        <span class="badge badge-{{ p.status }}">
+            {% if p.status == 'ready' %}Готов{% elif p.status == 'indexing' %}Индексация…{% elif p.status == 'error' %}Ошибка{% else %}Пусто{% endif %}
+        </span>
+    </div>
+    <div class="text-muted">
+        {{ p.id }}
+        · {{ p.sources|length }} источник(ов)
+        {% if p.index_stats.total_objects %}
+        · {{ p.index_stats.total_objects|num }} объектов
+        {% endif %}
+        {% if p.description %}· {{ p.description }}{% endif %}
+    </div>
+    {% if p.index_stats.last_indexed %}
+    <div class="text-muted" style="margin-top:var(--space-1)">Обновлён: {{ p.index_stats.last_indexed[:19].replace('T', ' ') }}</div>
+    {% endif %}
+</div>
+</a>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>Нет проектов</p>
+    <a href="/projects/new" class="btn btn-primary">Создать первый проект</a>
+</div>
+{% endif %}
+{% endblock %}

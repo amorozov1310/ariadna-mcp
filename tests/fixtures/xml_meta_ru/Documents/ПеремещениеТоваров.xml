@@ -1,0 +1,97 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Document uuid="ef9a08ca-839c-56ae-9a70-b5b4e395712b">
+		<Properties>
+			<Name>ПеремещениеТоваров</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Перемещение товаров</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="39a1657d-9da8-525e-a95a-9be0a7cc20e2">
+				<Properties>
+					<Name>СкладОтправитель</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Склад-отправитель</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Склады</v8:Type>
+					</Type>
+					<FillChecking>ShowError</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="64aad5b3-822c-5afe-9f6d-12621335e20b">
+				<Properties>
+					<Name>СкладПолучатель</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Склад-получатель</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Склады</v8:Type>
+					</Type>
+					<FillChecking>ShowError</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<TabularSection uuid="4162d5f5-64ca-5037-b36d-82d2a06e2086">
+				<Properties>
+					<Name>Товары</Name>
+					<Synonym/>
+					<Comment/>
+				</Properties>
+				<ChildObjects>
+					<Attribute uuid="99e4b515-3093-53fa-b0ed-be9cfe27ca85">
+						<Properties>
+							<Name>Номенклатура</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Номенклатура</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:Type>cfg:CatalogRef.Номенклатура</v8:Type>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="46e57e5c-7bb6-51da-be9d-351096d8013f">
+						<Properties>
+							<Name>Количество</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Количество</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:TypeSet>cfg:DefinedType.Количество</v8:TypeSet>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+				</ChildObjects>
+			</TabularSection>
+			<Form>ФормаДокумента</Form>
+			<Form>ФормаСписка</Form>
+			<Command uuid="f59a8c9f-9000-5b34-93e9-029ffcf03a38"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</Document>
+</MetaDataObject>

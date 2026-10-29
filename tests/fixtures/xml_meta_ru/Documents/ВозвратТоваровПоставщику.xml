@@ -1,0 +1,131 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Document uuid="4f259220-645a-5b6b-8651-44f8518e71fa">
+		<Properties>
+			<Name>ВозвратТоваровПоставщику</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Возврат товаров поставщику</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="7c503bcb-abf5-5fdd-9c36-8ba17516ca40">
+				<Properties>
+					<Name>Контрагент</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Контрагент</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Контрагенты</v8:Type>
+					</Type>
+					<FillChecking>ShowError</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="d46394c1-3787-5c3e-8ee8-0e23f23a9ab3">
+				<Properties>
+					<Name>ДокументПоступления</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Документ поступления</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:DocumentRef.ПоступлениеТоваров</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<TabularSection uuid="4cb572f5-c57e-536e-a55a-3beb60890363">
+				<Properties>
+					<Name>Товары</Name>
+					<Synonym/>
+					<Comment/>
+				</Properties>
+				<ChildObjects>
+					<Attribute uuid="99e4b515-3093-53fa-b0ed-be9cfe27ca85">
+						<Properties>
+							<Name>Номенклатура</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Номенклатура</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:Type>cfg:CatalogRef.Номенклатура</v8:Type>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="46e57e5c-7bb6-51da-be9d-351096d8013f">
+						<Properties>
+							<Name>Количество</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Количество</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:TypeSet>cfg:DefinedType.Количество</v8:TypeSet>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="b13ee41a-feb3-5fc9-8e5f-8d00f0802b7b">
+						<Properties>
+							<Name>Цена</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Цена</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:TypeSet>cfg:DefinedType.Сумма</v8:TypeSet>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="7ed460e4-fdf4-55d6-8460-2ebd8f009d1e">
+						<Properties>
+							<Name>Сумма</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Сумма</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:TypeSet>cfg:DefinedType.Сумма</v8:TypeSet>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+				</ChildObjects>
+			</TabularSection>
+			<Form>ФормаДокумента</Form>
+			<Form>ФормаСписка</Form>
+			<Command uuid="180e0fc8-2c6a-5ad2-9714-774f661107eb"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</Document>
+</MetaDataObject>

@@ -1,0 +1,114 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Catalog uuid="b3777922-b534-55e4-9a65-77805d783db6">
+		<Properties>
+			<Name>Users</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Пользователи</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="19794d53-4405-55ed-b7e6-ae5c93dacb34">
+				<Properties>
+					<Name>Login</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>en</v8:lang>
+							<v8:content>Логин</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+						<v8:StringQualifiers><v8:Length>50</v8:Length><v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers>
+					</Type>
+					<FillChecking>ShowError</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>Index</Indexing>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="e3aeef03-56d2-5365-a854-bd38d2719dfc">
+				<Properties>
+					<Name>FullName</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>en</v8:lang>
+							<v8:content>Полное имя</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+						<v8:StringQualifiers><v8:Length>150</v8:Length><v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="99b63d71-520a-5ed1-a1ea-af6574838c66">
+				<Properties>
+					<Name>Department</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>en</v8:lang>
+							<v8:content>Подразделение</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Departments</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="60ff0dd0-77b1-5f20-add2-7224298a2dcf">
+				<Properties>
+					<Name>UserType</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>en</v8:lang>
+							<v8:content>Тип пользователя</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:EnumRef.UserType</v8:Type>
+					</Type>
+					<FillChecking>ShowError</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="cbb65ad3-6117-5e97-ba35-ff6912948a98">
+				<Properties>
+					<Name>Role</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>en</v8:lang>
+							<v8:content>Роль</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Roles</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Form>ItemForm</Form>
+			<Form>ListForm</Form>
+			<Form>ChoiceForm</Form>
+			<Form>ResetPassword</Form>
+			<Command uuid="35f6d0f8-2ee5-5b7e-85b9-8abcbc5347c5"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>

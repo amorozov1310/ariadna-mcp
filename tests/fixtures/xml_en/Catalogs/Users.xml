@@ -1,0 +1,129 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Catalog uuid="2c127c8a-9e9c-53d4-81a8-59beff837afd">
+		<InternalInfo>
+			<xr:GeneratedType name="CatalogObject.Users" category="Object">
+				<xr:TypeId>de76cd86-86ab-5ab4-9288-b693559aec81</xr:TypeId>
+				<xr:ValueId>a30136a8-ec18-5599-9195-1bbec4f66233</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogRef.Users" category="Ref">
+				<xr:TypeId>4aaea904-ae89-5a35-8d78-bd98ab20207b</xr:TypeId>
+				<xr:ValueId>d315020f-1c57-526b-9465-03c9ae080090</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogSelection.Users" category="Selection">
+				<xr:TypeId>c76c6eea-18c4-5c71-a4d5-b60698a0ba1d</xr:TypeId>
+				<xr:ValueId>c5389671-3a6d-5489-ba06-d11f2c8854c0</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogList.Users" category="List">
+				<xr:TypeId>8b05e107-4d55-595b-882e-74ede2a41f20</xr:TypeId>
+				<xr:ValueId>e12a651b-7ff3-529a-afa9-cd2ccbceeaeb</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="CatalogManager.Users" category="Manager">
+				<xr:TypeId>5b462a94-7494-5621-9547-2e1f271070fa</xr:TypeId>
+				<xr:ValueId>f90b51b2-e1df-566c-8519-c7d3daec4113</xr:ValueId>
+			</xr:GeneratedType>
+		</InternalInfo>
+		<Properties>
+			<Name>Users</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Пользователи</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+			<Hierarchical>false</Hierarchical>
+			<CodeLength>9</CodeLength>
+			<DescriptionLength>50</DescriptionLength>
+			<CodeType>String</CodeType>
+			<CodeAllowedLength>Variable</CodeAllowedLength>
+			<CheckUnique>true</CheckUnique>
+			<Autonumbering>true</Autonumbering>
+			<DefaultPresentation>AsDescription</DefaultPresentation>
+			<Characteristics/>
+			<EditType>InDialog</EditType>
+			<FullTextSearch>Use</FullTextSearch>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="93a0c437-dbd0-50b5-8bfb-fd3eeb29e4c0">
+				<Properties>
+					<Name>Login</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Логин</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+					</Type>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="56be5a45-8b7b-5f00-9c54-4861ea8262eb">
+				<Properties>
+					<Name>FullName</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Полное имя</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+					</Type>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="0458c32e-d826-59ba-abc9-b372634f1c04">
+				<Properties>
+					<Name>Department</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Подразделение</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Departments</v8:Type>
+					</Type>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="b21cf9b9-3746-5110-a844-799b912d2aa8">
+				<Properties>
+					<Name>UserType</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Тип пользователя</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:EnumRef.UserType</v8:Type>
+					</Type>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="32d90c4a-235b-5a30-a888-ccd52e9fbc62">
+				<Properties>
+					<Name>Role</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Роль</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Roles</v8:Type>
+					</Type>
+				</Properties>
+			</Attribute>
+			<Form>ItemForm</Form>
+			<Form>ListForm</Form>
+			<Form>ChoiceForm</Form>
+			<Form>ResetPassword</Form>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>

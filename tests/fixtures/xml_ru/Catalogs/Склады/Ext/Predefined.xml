@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<PredefinedData xmlns="http://v8.1c.ru/8.3/xcf/predef" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Item id="a3c9ecaa-fcbd-578b-81f0-e0948a5204c7">
+		<Name>ОсновнойСклад</Name>
+		<Code>000000001</Code>
+		<Description>Основной склад</Description>
+		<IsFolder>false</IsFolder>
+	</Item>
+</PredefinedData>

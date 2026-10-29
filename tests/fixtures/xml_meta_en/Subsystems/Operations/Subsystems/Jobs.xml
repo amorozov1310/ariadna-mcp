@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Subsystem uuid="5be6b926-05d0-573b-939e-aeab029179c6">
+		<Properties>
+			<Name>Jobs</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Задания</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+			<Content>
+				<xr:Item xsi:type="xr:MDObjectRef">2881beb0-1e5c-5ab6-bafe-6856724e7d29</xr:Item>
+				<xr:Item xsi:type="xr:MDObjectRef">113fb528-eca5-570f-a849-f5a51c2dfcd6</xr:Item>
+				<xr:Item xsi:type="xr:MDObjectRef">2de39f9c-272e-5482-8cbf-d8e727a85d50</xr:Item>
+			</Content>
+		</Properties>
+		<ChildObjects/>
+	</Subsystem>
+</MetaDataObject>

@@ -1,0 +1,97 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Document uuid="ae73261b-0cf7-5921-b22d-6a8fb534f8d2">
+		<Properties>
+			<Name>ИнвентаризацияТоваров</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Инвентаризация товаров</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="fb2187d9-016d-5c8d-940f-c2801514d3da">
+				<Properties>
+					<Name>Склад</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Склад</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Склады</v8:Type>
+					</Type>
+					<FillChecking>ShowError</FillChecking>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<TabularSection uuid="8c2899b1-4c87-500c-8da4-b5220f26495b">
+				<Properties>
+					<Name>Товары</Name>
+					<Synonym/>
+					<Comment/>
+				</Properties>
+				<ChildObjects>
+					<Attribute uuid="99e4b515-3093-53fa-b0ed-be9cfe27ca85">
+						<Properties>
+							<Name>Номенклатура</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Номенклатура</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:Type>cfg:CatalogRef.Номенклатура</v8:Type>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="f0ac97cb-0612-51d9-b48d-0613380ec90f">
+						<Properties>
+							<Name>КоличествоФакт</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Количество (факт)</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:TypeSet>cfg:DefinedType.Количество</v8:TypeSet>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="2fec120c-9030-5272-aa0f-26a94fee0dcd">
+						<Properties>
+							<Name>КоличествоУчет</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>Количество (учет)</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:TypeSet>cfg:DefinedType.Количество</v8:TypeSet>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+				</ChildObjects>
+			</TabularSection>
+			<Form>ФормаДокумента</Form>
+			<Form>ФормаСписка</Form>
+			<Command uuid="ffc8202c-0d62-59fb-a682-d2d0956578bc"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</Document>
+</MetaDataObject>

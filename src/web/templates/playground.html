@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}Playground — {{ project.name }}{% endblock %}
+{% block container_class %}container-wide{% endblock %}
+{% block active_nav %}playground{% endblock %}
+{% block content %}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg>
+    MCP Tools Playground
+</h1>
+<p class="muted">Проект: <strong>{{ project.id }}</strong> — {{ project.name }}.
+    Инструменты, параметры и ответы — те же, что видит агент через MCP
+    (project_id подставляется сам).</p>
+
+<div class="playground-layout">
+    <div class="playground-form">
+        <label for="tool-select">Tool:</label>
+        <select id="tool-select" onchange="onToolChange()">
+            {% for tool in tools_meta %}
+            <option value="{{ tool.name }}">{{ tool.name }}</option>
+            {% endfor %}
+        </select>
+
+        <div id="tool-description" class="tool-desc"></div>
+
+        <div id="tool-params"></div>
+
+        <button onclick="executeTool()" class="btn btn-primary" id="run-btn">
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#play"/></svg> Выполнить</button>
+    </div>
+
+    <div class="playground-result">
+        <h3>Результат</h3>
+        <div id="result-box" class="result-box">
+            <p class="muted">Выберите tool и нажмите "Выполнить"</p>
+        </div>
+        <div id="result-meta" class="muted" style="margin-top:8px"></div>
+    </div>
+</div>
+
+<div class="playground-history">
+    <h3>История (последние 6)</h3>
+    <div id="history-list">
+        <p class="muted">Пока пусто</p>
+    </div>
+</div>
+
+<script>
+const TOOLS_META = {{ tools_meta | tojson }};
+// Подпись кнопки с иконкой из спрайта — чтобы восстановить её после выполнения.
+const RUN_BTN_HTML = document.getElementById('run-btn').innerHTML;
+const PROJECT_ID = {{ project.id | tojson }};
+let history = [];
+
+function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => (
+        {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+function onToolChange() {
+    const sel = document.getElementById('tool-select');
+    const tool = TOOLS_META.find(t => t.name === sel.value);
+    if (!tool) return;
+
+    document.getElementById('tool-description').textContent = tool.description;
+    document.getElementById('result-box').innerHTML = '<p class="muted">Нажмите "Выполнить"</p>';
+    document.getElementById('result-box').classList.remove('result-error');
+    document.getElementById('result-meta').textContent = '';
+
+    // Поля — по схеме MCP: тип, умолчание, обязательность и описание те же,
+    // что видит агент. Описание — строкой под полем.
+    let html = '';
+    for (const p of tool.params) {
+        const id = 'param-' + p.name;
+        let input;
+        if (p.type === 'select') {
+            input = `<select id="${id}" class="param-input">` + p.options.map(o =>
+                `<option value="${esc(o)}"${o === p.default ? ' selected' : ''}>${esc(o)}</option>`
+            ).join('') + '</select>';
+        } else if (p.type === 'checkbox') {
+            input = `<input type="checkbox" id="${id}"${p.default ? ' checked' : ''}>`;
+        } else if (p.type === 'number') {
+            input = `<input type="number" id="${id}" value="${esc(p.default ?? '')}" class="param-input">`;
+        } else {
+            const list = p.suggestions.length ? ` list="${id}-list"` : '';
+            input = `<input type="text" id="${id}" value="${esc(p.default ?? '')}"${list} class="param-input">`;
+            if (p.suggestions.length) {
+                input += `<datalist id="${id}-list">` +
+                    p.suggestions.map(o => `<option value="${esc(o)}">`).join('') + '</datalist>';
+            }
+        }
+        const req = p.required ? ' <span class="required">*</span>' : '';
+        const hint = p.description ? `<div class="form-hint">${esc(p.description)}</div>` : '';
+        if (p.type === 'checkbox') {
+            html += `
+            <div class="param-row">
+                <label class="param-check">${input} ${esc(p.name)}${req}</label>
+                ${hint}
+            </div>`;
+            continue;
+        }
+        html += `
+            <div class="param-row">
+                <label for="${id}">${esc(p.name)}${req}</label>
+                ${input}
+                ${hint}
+            </div>`;
+    }
+    document.getElementById('tool-params').innerHTML = html;
+}
+
+async function executeTool() {
+    const sel = document.getElementById('tool-select');
+    const toolName = sel.value;
+    const tool = TOOLS_META.find(t => t.name === toolName);
+    if (!tool) return;
+
+    const params = {};
+    for (const p of tool.params) {
+        const el = document.getElementById('param-' + p.name);
+        if (!el) continue;
+        if (p.type === 'checkbox') params[p.name] = el.checked;
+        else if (el.value !== '') params[p.name] = el.value;
+    }
+
+    const btn = document.getElementById('run-btn');
+    const resultBox = document.getElementById('result-box');
+    btn.disabled = true;
+    btn.textContent = 'Выполняется…';
+    resultBox.innerHTML = '<p class="muted">Загрузка...</p>';
+    resultBox.classList.remove('result-error');
+
+    try {
+        const resp = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/playground`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({tool: toolName, params}),
+        });
+        if (!resp.ok) {
+            const detail = await resp.json().catch(() => ({}));
+            throw new Error(detail.detail || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+
+        // Ответ — ровно текст, который получает агент. Ошибка («Error: …»,
+        // в MCP — isError=true) выделяется.
+        const pre = document.createElement('pre');
+        pre.textContent = data.result;
+        resultBox.innerHTML = '';
+        if (data.is_error) resultBox.classList.add('result-error');
+        resultBox.appendChild(pre);
+
+        document.getElementById('result-meta').textContent =
+            `${data.elapsed_ms} мс · project: ${PROJECT_ID} · ${data.timestamp}` +
+            (data.is_error ? ' · ошибка инструмента' : '');
+
+        const paramStr = Object.entries(params).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+        history.unshift({
+            time: data.timestamp, tool: toolName, params: paramStr,
+            summary: (data.result || '').split('\n')[0].substring(0, 60),
+            ms: data.elapsed_ms, error: data.is_error,
+        });
+        if (history.length > 6) history.pop();
+        renderHistory();
+    } catch (e) {
+        resultBox.classList.add('result-error');
+        resultBox.innerHTML = `<pre>${esc('Error: ' + e.message)}</pre>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = RUN_BTN_HTML;
+    }
+}
+
+function renderHistory() {
+    const div = document.getElementById('history-list');
+    if (history.length === 0) {
+        div.innerHTML = '<p class="muted">Пока пусто</p>';
+        return;
+    }
+    div.innerHTML = history.map(h => `
+        <div class="history-item" data-tool="${esc(h.tool)}">
+            <span class="history-time">${esc(h.time)}</span>
+            <span class="history-tool">${esc(h.tool)}</span>(${esc(h.params)})
+            → <span class="history-summary${h.error ? ' result-error-text' : ''}">${esc(h.summary)}</span>
+            <span class="muted">${h.ms}ms</span>
+        </div>
+    `).join('');
+    for (const item of div.querySelectorAll('.history-item')) {
+        item.addEventListener('click', () => {
+            document.getElementById('tool-select').value = item.dataset.tool;
+            onToolChange();
+        });
+    }
+}
+
+onToolChange();
+</script>
+{% endblock %}

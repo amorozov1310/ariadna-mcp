@@ -1,0 +1,56 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Catalog uuid="84695fe5-43ba-595e-9d72-f3e0c526087e">
+		<Properties>
+			<Name>Склады</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Склады</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="965767ce-c46d-5ef0-b918-f42744ae96b7">
+				<Properties>
+					<Name>ТипСклада</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Тип склада</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:EnumRef.ТипыСкладов</v8:Type>
+					</Type>
+					<FillChecking>ShowError</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Attribute uuid="7a16cb22-5a0a-51b5-b5ac-c2654ccf0cdb">
+				<Properties>
+					<Name>Ответственный</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Ответственный</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:CatalogRef.Сотрудники</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<Form>ФормаЭлемента</Form>
+			<Form>ФормаСписка</Form>
+			<Command uuid="ca3f6b91-79b6-5c67-93ba-57a4bbb215f8"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>

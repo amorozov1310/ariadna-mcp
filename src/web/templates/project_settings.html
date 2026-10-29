@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Настройки — {{ project.name }}{% endblock %}
+{% block active_nav %}settings{% endblock %}
+
+{% block content %}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#settings"/></svg>
+    Настройки проекта
+</h1>
+
+<div class="card">
+    <h3 class="section-title">Проект</h3>
+    <form action="/api/projects/{{ project.id }}/update" method="post" style="margin-top:var(--space-3)">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Название</label>
+                <input name="name" value="{{ project.name }}" required>
+            </div>
+            <div class="form-group">
+                <label>ID (не меняется)</label>
+                <input value="{{ project.id }}" disabled>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Описание</label>
+            <input name="description" value="{{ project.description }}">
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3 class="section-title">
+        <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#package"/></svg>
+        Как обновлять данные
+    </h3>
+    <p class="text-muted" style="margin-top:var(--space-2)">
+        Выгрузите конфигурацию из Конфигуратора («Конфигурация → Выгрузить конфигурацию
+        в файлы») и загрузите XML на <a href="/projects/{{ project.id }}">странице обзора</a> —
+        через «Изменить» у источника или «Добавить источник». Отчёт по конфигурации
+        выгружать не нужно, он строится из XML сам. После загрузки нажмите
+        «Переиндексировать».
+    </p>
+</div>
+{% endblock %}

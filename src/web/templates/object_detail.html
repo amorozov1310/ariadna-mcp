@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% set obj = details.object %}
+{% block title %}{{ obj.full_name }} — {{ project.name }}{% endblock %}
+
+{% block active_nav %}search{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+    <a href="/projects/{{ project.id }}">{{ project.name }}</a> /
+    <a href="/projects/{{ project.id }}/search">Поиск</a> / {{ obj.full_name }}
+</div>
+
+<div class="card">
+    <h2>{{ obj.full_name }}</h2>
+    <span class="result-kind">{{ obj.kind }}</span>
+    {% if details.source_label or details.source_id %}
+    <span class="badge badge-source" title="Источник данных">{{ details.source_label or details.source_id }}</span>
+    {% endif %}
+    {% if obj.synonym and obj.synonym != obj.name %}
+    <span class="text-muted" style="margin-left:8px">{{ obj.synonym }}</span>
+    {% endif %}
+    {% if obj.comment %}<div class="text-muted mt-16">{{ obj.comment }}</div>{% endif %}
+
+    {% if details.matches and details.matches|length > 1 %}
+    <div class="source-switcher mt-16">
+        <div class="text-muted" style="font-size:12px;margin-bottom:6px">Тот же объект в других источниках:</div>
+        {% for m in details.matches %}
+            {% if m.source_id == current_source_id %}
+            <span class="source-pill active">{{ m.source_label }}</span>
+            {% else %}
+            <a href="/projects/{{ project.id }}/object/{{ obj.full_name }}?source_id={{ m.source_id }}"
+               class="source-pill">{{ m.source_label }}{% if m.source_type == 'extension' %} (ext){% endif %}</a>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if details.module %}
+    <div class="mt-16">
+        <strong>Флаги модуля:</strong>
+        {% if details.module.is_server %}<span class="badge badge-ready">Сервер</span>{% endif %}
+        {% if details.module.is_client %}<span class="badge badge-accent">Клиент</span>{% endif %}
+        {% if details.module.is_global %}<span class="badge badge-warning">Глобальный</span>{% endif %}
+        {% if details.module.is_privileged %}<span class="badge badge-danger">Привилегированный</span>{% endif %}
+        {% if details.module.server_call %}<span class="badge badge-info">ВызовСервера</span>{% endif %}
+    </div>
+    {% endif %}
+</div>
+
+{% if details.attributes %}
+<div class="card detail-section">
+    <h3>Реквизиты ({{ details.attributes|length }})</h3>
+    <div class="table-scroll">
+    <table class="detail-table">
+        <tr><th>Имя</th><th>Тип</th><th>Вид</th></tr>
+        {% for a in details.attributes %}
+        <tr>
+            <td>{{ a.name }}{% if a.synonym and a.synonym != a.name %} <span class="text-muted">({{ a.synonym }})</span>{% endif %}</td>
+            <td class="mono">{{ a.type_desc }}</td>
+            <td>{% if a.kind != 'Реквизит' %}<span class="result-kind">{{ a.kind }}</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    </div>
+</div>
+{% endif %}
+
+{% if details.tabular_sections %}
+<div class="card detail-section">
+    <h3>Табличные части ({{ details.tabular_sections|length }})</h3>
+    {% for ts_name, ts_attrs in details.tabular_sections.items() %}
+    <h3 style="margin-top:12px;font-size:14px">{{ ts_name }}</h3>
+    {% if ts_attrs %}
+    <table class="detail-table">
+        <tr><th>Имя</th><th>Тип</th></tr>
+        {% for a in ts_attrs %}
+        <tr>
+            <td>{{ a.name.replace('ТЧ.' + ts_name + '.', '') }}</td>
+            <td class="mono">{{ a.type_desc }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if details.forms %}
+<div class="card detail-section">
+    <h3>Формы ({{ details.forms|length }})</h3>
+    {% for f in details.forms %}
+    <div style="padding:4px 0">{{ f.name }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if details.enum_values %}
+<div class="card detail-section">
+    <h3>Значения перечисления ({{ details.enum_values|length }})</h3>
+    {% for e in details.enum_values %}
+    <div style="padding:4px 0">
+        {{ e.name }}
+        {% if e.synonym and e.synonym != e.name %}<span class="text-muted">({{ e.synonym }})</span>{% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<style>
+.source-switcher { padding:var(--space-3); background:var(--bg-inset); border-radius:var(--radius-sm); }
+.source-pill { display:inline-block; padding:4px var(--space-3); margin-right:6px; font-size:var(--fs-sm);
+               background:var(--bg2); color:var(--text); border:1px solid var(--border); border-radius:var(--radius-pill); }
+.source-pill:hover { background:var(--accent-soft); border-color:var(--accent); text-decoration:none; }
+.source-pill.active { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
+</style>
+{% endblock %}

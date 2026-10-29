@@ -1,0 +1,23 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Subsystem uuid="5de7b41f-17fe-5672-894f-d57c7c2e0206">
+		<Properties>
+			<Name>Operations</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Операции</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+			<Content>
+				<xr:Item xsi:type="xr:MDObjectRef">Catalog.Projects</xr:Item>
+				<xr:Item xsi:type="xr:MDObjectRef">InformationRegister.JobStatus</xr:Item>
+				<xr:Item xsi:type="xr:MDObjectRef">Task.Approval</xr:Item>
+			</Content>
+		</Properties>
+		<ChildObjects>
+			<Subsystem>Jobs</Subsystem>
+		</ChildObjects>
+	</Subsystem>
+</MetaDataObject>
