@@ -222,7 +222,11 @@ BIND_ADDR=0.0.0.0 MCP_ALLOWED_HOSTS=192.168.1.10,ariadna.lan docker compose up -
 > get_call_tree(project_id="demo", procedure_name="ЗначениеРеквизитаОбъекта",
                 module_name="ОбщегоНазначения", direction="up", depth=2)
 > search_code(project_id="demo", query="ВЫБРАТЬ ПЕРВЫЕ 1")
+> semantic_search_code(project_id="demo", query="где рассчитывается себестоимость")
 ```
+
+Без своих правил ничего настраивать не нужно: инструкция сервера уже
+объясняет агенту и поиск по описанию (`semantic_search_code`).
 
 **Правила для агента в проекте 1С.** Если в проекте уже есть свои правила
 (Cursor rules, `CLAUDE.md`, `AGENTS.md`) и другие MCP-серверы для 1С, агенту
