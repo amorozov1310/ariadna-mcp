@@ -307,6 +307,18 @@ def has_configuration(xml_root: str | Path) -> bool:
     return (Path(xml_root) / 'Configuration.xml').is_file()
 
 
+def is_russian_dump(xml_root: str | Path) -> bool:
+    """Язык встроенного языка выгрузки (ScriptVariant в Configuration.xml);
+    без Configuration.xml (выгрузка только модулей) — русский."""
+    try:
+        root = ET.parse(str(Path(xml_root) / 'Configuration.xml')).getroot()
+    except (OSError, ET.ParseError):
+        return True
+    for obj in root:
+        return _text(_child(obj, 'Properties'), 'ScriptVariant') != 'English'
+    return True
+
+
 def parse_xml_dump(xml_root: str | Path) -> tuple[ConfigInfo, list[MetadataObject]]:
     """ConfigInfo и объекты метаданных из корня XML-выгрузки.
 

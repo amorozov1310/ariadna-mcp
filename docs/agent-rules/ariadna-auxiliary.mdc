@@ -22,7 +22,7 @@ alwaysApply: true
    | Структура модуля без чтения файла | `get_module_outline(module_name)` |
    | Кто вызывает / что вызывает, с учётом перехватов расширений | `get_call_tree(procedure_name, module_name, direction)` — `direction="up"` или `"down"` |
    | Где объект используется как тип реквизита | `find_references(object_name)` — имя без вида |
-   | Реквизиты определённого типа | `search_attributes(query, type_filter)` |
+   | Реквизиты определённого типа, реквизиты форм | `search_attributes(query, type_filter)` |
    | Текст внутри кода (запросы, литералы, присваивания) | `search_code(query, file_pattern)` — подстрока, не regex |
    | Процедура по описанию своими словами | `semantic_search_code(query)`, затем `get_procedure_code(module_name, procedure_name)` |
 
