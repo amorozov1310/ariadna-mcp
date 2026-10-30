@@ -1,0 +1,454 @@
+{
+  "diagnose_index": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "find_references": {
+    "params": {
+      "object_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 50
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "get_call_tree": {
+    "params": {
+      "procedure_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "module_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "direction": {
+        "type": "string",
+        "required": false,
+        "default": "down",
+        "enum": [
+          "down",
+          "up"
+        ]
+      },
+      "depth": {
+        "type": "integer",
+        "required": false,
+        "default": 3
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "max_nodes": {
+        "type": "integer",
+        "required": false,
+        "default": 200
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "get_index_status": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "get_module_outline": {
+    "params": {
+      "module_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "get_object_details": {
+    "params": {
+      "full_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "detail": {
+        "type": "string",
+        "required": false,
+        "default": "brief"
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "get_procedure_code": {
+    "params": {
+      "module_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "procedure_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "list_objects": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "kind": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 100
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "list_projects": {
+    "params": {},
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "list_sources": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "reindex": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": false,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "remove_source": {
+    "params": {
+      "source_id": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "confirm": {
+        "type": "boolean",
+        "required": false,
+        "default": false
+      }
+    },
+    "read_only": false,
+    "destructive": true,
+    "output": {
+      "result": "string"
+    }
+  },
+  "search_attributes": {
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "type_filter": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 30
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "search_code": {
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "file_pattern": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 30
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "search_metadata": {
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "kind": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 20
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "search_procedures": {
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "module_filter": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "export_only": {
+        "type": "boolean",
+        "required": false,
+        "default": false
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 30
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  }
+}
