@@ -140,3 +140,15 @@ def test_chunk_body_keeps_every_line_within_limit():
 
 def test_card_format_is_part_of_the_hash():
     assert isinstance(CARD_FORMAT, int) and CARD_FORMAT >= 1
+
+
+@pytest.mark.parametrize('name, words', [
+    ('ТипСкладаПоУмолчанию', 'тип склада по умолчанию'),
+    ('НДСЗаписиКнигиПродаж', 'ндс записи книги продаж'),
+    ('ЗаписатьВЖурнал2', 'записать в журнал 2'),
+    ('GetIntegrationSettings', 'get integration settings'),
+    ('XMLПакет', 'xml пакет'),
+])
+def test_split_identifier(name, words):
+    from src.core.cards import split_identifier
+    assert split_identifier(name) == words
