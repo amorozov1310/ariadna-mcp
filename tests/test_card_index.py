@@ -140,3 +140,42 @@ def test_removed_source_leaves_no_cards(pm):
     pm.remove_source('p1', 'main')
     for table in ('card_chunks', 'card_fts', 'card_modules'):
         assert _count(pm, f'SELECT COUNT(*) FROM {table}') == 0, table
+
+
+def test_word_forms_match_through_roots(pm):
+    """«оформление» ↔ ОформитьЗаказ, «регистрация» ↔ ЗарегистрироватьСобытие
+    (приставка «за-»): общий корень в заголовке карточки и в запросе."""
+    engine = pm.get_search('p1')
+    assert search_cards(engine, 'оформление заказа')[0]['procedure_name'] == 'ОформитьЗаказ'
+    hits = search_cards(engine, 'регистрация события в документообороте')
+    assert hits[0]['procedure_name'] == 'ЗарегистрироватьСобытие'
+
+
+def test_exact_name_puts_most_called_procedure_first(tmp_path):
+    """Одноимённые процедуры по точному имени — сначала та, в которую ведёт
+    больше вызовов (исходный метод), а не обёртка, хотя по алфавиту
+    «Обертка» раньше «Основной»."""
+    modules = {
+        'Основной': 'Функция Значение(Ссылка) Экспорт\n\tВозврат Ссылка;\nКонецФункции\n',
+        'Обертка': 'Функция Значение(Ссылка) Экспорт\n\tВозврат Основной.Значение(Ссылка);\nКонецФункции\n',
+        'Потребитель': ''.join(
+            f'Процедура Шаг{i}(Ссылка) Экспорт\n\tА = Основной.Значение(Ссылка);\nКонецПроцедуры\n\n'
+            for i in range(3)),
+    }
+    xml = tmp_path / 'xml'
+    for name, code in modules.items():
+        path = xml / 'CommonModules' / name / 'Ext' / 'Module.bsl'
+        path.parent.mkdir(parents=True)
+        path.write_text(code, encoding='utf-8-sig')
+    manager = ProjectManager(str(tmp_path / 'data'))
+    try:
+        manager.create_project('p2', 'p2')
+        manager.add_source('p2', 'main', 'Main', xml_archive=_zip(xml), xml_archive_filename='x.zip')
+        manager.reindex('p2')
+        hits = search_cards(manager.get_search('p2'), 'Значение')
+        assert [h['module_name'] for h in hits[:2]] == [
+            'ОбщийМодуль.Основной.Модуль', 'ОбщийМодуль.Обертка.Модуль']
+    finally:
+        manager.close_all()
+
+

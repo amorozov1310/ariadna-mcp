@@ -17,6 +17,7 @@ content_hash — отпечаток всего, что видит поиск (ф
 """
 
 import hashlib
+import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from typing import Iterator
 
 # Меняется при любом изменении состава или вида карточки: карточки (и всё,
 # что из них построено) с другим форматом считаются устаревшими.
-CARD_FORMAT = 1
+CARD_FORMAT = 2
 # Предел фрагмента тела в символах: ~500 токенов небольшой модели
 # эмбеддингов на кириллическом BSL; уточняется замером на шаге выбора модели.
 CHUNK_CHARS = 1500
@@ -76,6 +77,9 @@ class ProcedureCard:
         if obj_name:
             words += ' | ' + split_identifier(obj_name)
         lines.append(f'Слова: {words}')
+        roots = sorted({r for w in words.split() for r in word_roots(w)})
+        if roots:
+            lines.append(f'Корни: {" ".join(roots)}')
         lines.append(f'Модуль: {self.module_name}')
         if self.object_full_name:
             obj = self.object_full_name
@@ -102,6 +106,30 @@ _CAMEL = re.compile(r'[А-ЯЁA-Z]+(?![а-яёa-z])|[А-ЯЁA-Z]?[а-яёa-z]+|\
 def split_identifier(name: str) -> str:
     """«ТипСкладаПоУмолчанию» → «тип склада по умолчанию», «НДСЗаписи» → «ндс записи»."""
     return ' '.join(part.lower() for part in _CAMEL.findall(name))
+
+
+# Корни для разных форм одного слова: «отправление» и «отправить» — «отпра»,
+# «резервирование» и «зарезервировать» (без приставки) — «резер». Грубая
+# замена стемминга: длина корня и список приставок подобраны на стенде
+# оценки; общий корень у разных слов — цена за то, что формы совпадают.
+ROOT_LEN = 5
+_MIN_ROOTED = 7
+_PREFIXES = ('пере', 'пред', 'под', 'при', 'раз', 'рас', 'вы', 'за', 'на', 'об', 'от', 'до', 'из')
+_CYRILLIC = re.compile(r'^[а-яё]+$')
+
+
+def word_roots(word: str) -> set[str]:
+    """Корни слова (пусто для коротких и некириллических)."""
+    word = word.lower()
+    if len(word) < _MIN_ROOTED or not _CYRILLIC.match(word):
+        return set()
+    roots = {word[:ROOT_LEN]}
+    for prefix in _PREFIXES:
+        rest = word[len(prefix):]
+        if word.startswith(prefix) and len(rest) >= _MIN_ROOTED:
+            roots.add(rest[:ROOT_LEN])
+            break
+    return roots
 
 
 def _read_lines(path: str) -> list[str] | None:
@@ -251,8 +279,16 @@ def build_cards(engine, source_id: str | None = None, module_name: str | None = 
 # Вес заголовка карточки относительно тела в BM25-ранге card_fts: совпадение в
 # имени, синониме объекта, области или описании важнее совпадения в коде.
 # Подбирается на стенде оценки (шаг 5); замена значения на совместимость не влияет.
-HEAD_WEIGHT = 3.0
+HEAD_WEIGHT = 8.0
+# Экспортная процедура — программный интерфейс модуля, обычно то, что ищут:
+# её BM25-ранг усиливается на эту долю.
+EXPORT_BONUS = 0.15
+# Востребованность процедуры — сколько вызовов в графе ведут в неё: ранг
+# усиливается на POPULARITY_WEIGHT * ln(1 + вызывающих). У исходного метода
+# общего модуля вызывающих в десятки раз больше, чем у его обёрток.
+POPULARITY_WEIGHT = 0.03
 _WORD = re.compile(r'\w+')
+_IDENTIFIER = re.compile(r'^\w{4,}$')
 
 
 def refresh_card_index(engine, progress_cb=None, batch: int = 500) -> dict:
@@ -314,8 +350,8 @@ def refresh_card_index(engine, progress_cb=None, batch: int = 500) -> dict:
     return stats
 
 
-def card_fts_query(text: str, max_terms: int = 12) -> str:
-    """Запрос MATCH: слова запроса через OR, по префиксу (склонения, части имён).
+def card_fts_query(text: str, max_terms: int = 24) -> str:
+    """Запрос MATCH: слова запроса и их корни (word_roots) через OR, по префиксу.
 
     Слова короче трёх букв («по», «на», «в») отбрасываются, если есть другие:
     как префикс они совпадают с огромной частью словаря — ранг не улучшают,
@@ -326,7 +362,27 @@ def card_fts_query(text: str, max_terms: int = 12) -> str:
             words.append(w)
     long_words = [w for w in words if len(w) >= 3]
     words = long_words or [w for w in words if len(w) > 1]
-    return ' OR '.join(f'"{w}"*' for w in words[:max_terms])
+    terms = list(words)
+    for w in words:
+        terms += [r for r in sorted(word_roots(w)) if r not in terms]
+    return ' OR '.join(f'"{t}"*' for t in terms[:max_terms])
+
+
+def _exact_name_rows(conn, name: str, source_id: str | None, limit: int):
+    """Процедуры с именем, ровно равным запросу: сначала самые вызываемые
+    (исходный метод, а не его обёртки), затем экспортные методы общих модулей."""
+    conds, params = ['p.name_cf = ?'], [name.casefold()]
+    if source_id:
+        conds.append('m.source_id = ?')
+        params.append(source_id)
+    return conn.execute(
+        f"""SELECT p.id AS procedure_id, 0 AS chunk_no, p.start_line, p.end_line, 0.0 AS score,
+                   p.name AS procedure_name, m.name AS module_name, m.source_id,
+                   (SELECT COUNT(*) FROM calls_resolved r WHERE r.callee_id = p.id) AS callers
+            FROM procedures p JOIN modules m ON m.id = p.module_id
+            WHERE {' AND '.join(conds)}
+            ORDER BY callers DESC, p.is_export DESC, m.name_cf LIKE 'общиймодуль.%' DESC, m.name
+            LIMIT ?""", params + [limit]).fetchall()
 
 
 def search_cards(engine, query: str, source_id: str | None = None,
@@ -340,22 +396,28 @@ def search_cards(engine, query: str, source_id: str | None = None,
     if not match:
         return []
     conn = engine.db.read_conn()
+    exact = _exact_name_rows(conn, query.strip(), source_id, limit) \
+        if _IDENTIFIER.match(query.strip()) else []
     conds, params = ['card_fts MATCH ?'], [match]
     if source_id:
         conds.append('m.source_id = ?')
         params.append(source_id)
     rows = conn.execute(
         f"""SELECT c.procedure_id, c.chunk_no, c.start_line, c.end_line,
-                   bm25(card_fts, {HEAD_WEIGHT}, 1.0) AS score,
-                   p.name AS procedure_name, m.name AS module_name, m.source_id
+                   bm25(card_fts, {HEAD_WEIGHT}, 1.0) * (1 + {EXPORT_BONUS} * p.is_export) AS score,
+                   p.name AS procedure_name, m.name AS module_name, m.source_id,
+                   (SELECT COUNT(*) FROM calls_resolved r WHERE r.callee_id = p.id) AS callers
             FROM card_fts f
             JOIN card_chunks c ON c.id = f.rowid
             JOIN procedures p ON p.id = c.procedure_id
             JOIN modules m ON m.id = p.module_id
             WHERE {' AND '.join(conds)}
             ORDER BY score LIMIT ?""", params + [pool]).fetchall()
+    if POPULARITY_WEIGHT:
+        # BM25 в SQLite отрицательный: чем меньше, тем лучше — множитель > 1 поднимает.
+        rows = sorted(rows, key=lambda r: r['score'] * (1 + POPULARITY_WEIGHT * math.log1p(r['callers'])))
     results, seen = [], set()
-    for r in rows:
+    for r in list(exact) + list(rows):
         if r['procedure_id'] in seen:
             continue
         seen.add(r['procedure_id'])

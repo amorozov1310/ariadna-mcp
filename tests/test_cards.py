@@ -152,3 +152,15 @@ def test_card_format_is_part_of_the_hash():
 def test_split_identifier(name, words):
     from src.core.cards import split_identifier
     assert split_identifier(name) == words
+
+
+@pytest.mark.parametrize('word, roots', [
+    ('отправление', {'отпра', 'правл'}),
+    ('зарезервировать', {'зарез', 'резер'}),
+    ('резервирование', {'резер'}),
+    ('склад', set()),                 # короткое — без корня
+    ('GetSettings', set()),           # не кириллица
+])
+def test_word_roots(word, roots):
+    from src.core.cards import word_roots
+    assert word_roots(word) == roots
