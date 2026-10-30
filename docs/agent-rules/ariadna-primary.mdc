@@ -19,7 +19,7 @@ alwaysApply: true
 | Нужно | Инструмент `ariadna` |
 |---|---|
 | Объект по имени или синониму | `search_metadata(query)`, затем `get_object_details(full_name)` — `full_name` из выдачи; все реквизиты — `get_object_details(full_name, detail)` с `detail="full"` |
-| Реквизиты по имени или типу | `search_attributes(query, type_filter)`, например `type_filter="СправочникСсылка.Контрагенты"` |
+| Реквизиты (объектов и форм) по имени, синониму или типу | `search_attributes(query, type_filter)`, например `type_filter="СправочникСсылка.Контрагенты"`; «где на форме показывается X» — тоже он |
 | Где объект используется как тип реквизита | `find_references(object_name)` — имя без вида: `Номенклатура` |
 | Процедура по имени | `search_procedures(query)`, затем `get_procedure_code(module_name, procedure_name)` — оба из выдачи |
 | Процедура по описанию своими словами («где считается себестоимость») | `semantic_search_code(query)`, затем `get_procedure_code(module_name, procedure_name)` |

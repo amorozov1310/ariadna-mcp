@@ -269,6 +269,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS card_fts USING fts5(
 CREATE TRIGGER IF NOT EXISTS card_chunks_ad AFTER DELETE ON card_chunks BEGIN
     DELETE FROM card_fts WHERE rowid = old.id;
 END;
+-- Реквизиты форм (Form.xml) — для search_attributes: «где на форме индекс
+-- урожайности». По модулю формы: правка формы меняет хеш модуля
+-- (module_file_hash учитывает Form.xml), и её реквизиты пересобираются вместе
+-- с модулем; удаление модуля удаляет их каскадом. Таблица новая (IF NOT
+-- EXISTS) — в старом индексе она заполнится при следующем reindex без
+-- переразбора модулей (Indexer.index_bsl).
+CREATE TABLE IF NOT EXISTS form_attributes (
+    id         INTEGER PRIMARY KEY,
+    module_id  INTEGER NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    title      TEXT DEFAULT '',
+    type_desc  TEXT DEFAULT '',
+    name_cf    TEXT DEFAULT '',
+    search_cf  TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_form_attributes_module ON form_attributes(module_id);
 -- По модулю: с каким синонимом объекта и форматом карточки построены его
 -- карточки — сменился синоним или CARD_FORMAT — карточки модуля пересобираются.
 CREATE TABLE IF NOT EXISTS card_modules (
@@ -548,7 +564,7 @@ class Database:
         """Clear all data, keep schema."""
         if not self.conn:
             self.connect()
-        for table in ['card_chunks', 'card_fts', 'card_modules',
+        for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes',
                       'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:

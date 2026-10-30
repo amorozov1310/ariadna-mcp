@@ -79,8 +79,17 @@ def _local_tag(tag: str) -> str:
     return tag.rsplit('}', 1)[-1]
 
 
-def read_form_attributes(form_xml_path: str | Path) -> set[str]:
-    """Имена реквизитов формы (lower-case) из её Ext/Form.xml.
+@dataclass
+class FormAttribute:
+    name: str
+    title: str = ''
+    type_desc: str = ''
+
+
+def read_form_attribute_details(form_xml_path: str | Path,
+                                russian: bool = True) -> list[FormAttribute] | None:
+    """Реквизиты формы из её Ext/Form.xml: имя, заголовок, тип — для
+    search_attributes и для разбора модуля формы (read_form_attributes).
 
     Берутся только прямые <Attribute> внутри <Attributes> корня <Form> —
     и внутри <BaseForm>: у заимствованной формы расширения там лежит копия
@@ -90,24 +99,38 @@ def read_form_attributes(form_xml_path: str | Path) -> set[str]:
     Параметры.X / Элементы.X, поэтому их здесь нет намеренно.
 
     Имена тегов в выгрузке всегда английские, язык выгрузки влияет только
-    на значения (name="Объект" / name="Object"), так что разбор один.
-    Битый или отсутствующий файл — пустое множество: реквизиты лишь
-    подавляют фантомные вызовы, их отсутствие ничего не ломает.
+    на значения (name="Объект" / name="Object"), так что разбор один;
+    russian — на каком языке описывать тип («Число(10, 2)» / «Number(10, 2)»).
+    None — файл не читается или повреждён.
     """
+    from .xml_metadata import _Lang, _child, _localized
     try:
         root = ET.parse(str(form_xml_path)).getroot()
     except (OSError, ET.ParseError):
-        return set()
+        return None
+    lang = _Lang(russian)
     containers = [root] + [c for c in root if _local_tag(c.tag) == 'BaseForm']
-    names: set[str] = set()
+    result: list[FormAttribute] = []
+    seen: set[str] = set()
     for container in containers:
         for attrs in container:
             if _local_tag(attrs.tag) != 'Attributes':
                 continue
             for attr in attrs:
-                if _local_tag(attr.tag) == 'Attribute' and attr.get('name'):
-                    names.add(attr.get('name').lower())
-    return names
+                name = attr.get('name')
+                if _local_tag(attr.tag) != 'Attribute' or not name or name.lower() in seen:
+                    continue
+                seen.add(name.lower())
+                result.append(FormAttribute(name, _localized(_child(attr, 'Title')),
+                                            lang.render_type(_child(attr, 'Type'))))
+    return result
+
+
+def read_form_attributes(form_xml_path: str | Path) -> set[str]:
+    """Имена реквизитов формы (lower-case) — переменные модуля формы.
+    Битый или отсутствующий файл — пустое множество: реквизиты лишь
+    подавляют фантомные вызовы, их отсутствие ничего не ломает."""
+    return {a.name.lower() for a in read_form_attribute_details(form_xml_path) or []}
 
 
 class XMLWalker:

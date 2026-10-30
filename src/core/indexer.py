@@ -352,7 +352,8 @@ class Indexer:
         force_reparse — переразобрать все файлы, не глядя на хеш: результат
         разбора устарел из-за смены самого парсера (см. parser_fingerprint).
         """
-        from .xml_walker import XMLWalker, read_form_attributes
+        from .xml_walker import XMLWalker, read_form_attribute_details
+        from .xml_metadata import is_russian_dump
         from .bsl_reference import module_context_vars, module_context_methods
         from .bsl_parser import BSLParser
 
@@ -396,6 +397,12 @@ class Indexer:
                 "SELECT id, object_id, file_hash, name FROM modules WHERE source_id=?", (source_id,))
         }
         seen_names: set[str] = set()
+        # Модули форм, чьи реквизиты уже в индексе: у остальных неизменённых
+        # форм (индекс построен до таблицы form_attributes) реквизиты
+        # дочитываются без переразбора модуля.
+        with_form_attributes = {r[0] for r in conn.execute(
+            "SELECT DISTINCT module_id FROM form_attributes")}
+        russian = is_russian_dump(xml_path)
 
         stats = {'modules': 0, 'procedures': 0, 'calls': 0, 'lines': 0,
                   'files': 0, 'files_skipped': 0}
@@ -414,8 +421,13 @@ class Indexer:
             if (not force_reparse and prior is not None and file_hash
                     and prior['file_hash'] == file_hash):
                 stats['files_skipped'] += 1
+                if mf.form_xml_path and prior['id'] not in with_form_attributes:
+                    self._store_form_attributes(conn, prior['id'], read_form_attribute_details(
+                        mf.form_xml_path, russian))
             else:
-                form_attributes = (read_form_attributes(mf.form_xml_path)
+                details = (read_form_attribute_details(mf.form_xml_path, russian)
+                           if mf.form_xml_path else None)
+                form_attributes = ({a.name.lower() for a in details or []}
                                    if mf.form_xml_path else None)
                 result = parser.parse_file(
                     mf.file_path, form_attributes=form_attributes,
@@ -479,6 +491,8 @@ class Indexer:
                             'id': module_id, 'object_id': object_id, 'file_hash': file_hash}
 
                     stats['modules'] += 1
+                    if mf.form_xml_path:
+                        self._store_form_attributes(conn, module_id, details)
 
                     # FTS index for search_code (Этап 3/D6) — contentless:
                     # only the index is stored here, not the text itself
@@ -552,6 +566,19 @@ class Indexer:
         conn.commit()
         stats['duration_sec'] = round(time.time() - start, 3)
         return stats
+
+    @staticmethod
+    def _store_form_attributes(conn, module_id: int, details) -> None:
+        """Реквизиты формы модуля — заново (details из read_form_attribute_details;
+        None — Form.xml не прочитан, прежние строки остаются)."""
+        if details is None:
+            return
+        conn.execute("DELETE FROM form_attributes WHERE module_id=?", (module_id,))
+        conn.executemany(
+            """INSERT INTO form_attributes (module_id, name, title, type_desc, name_cf, search_cf)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [(module_id, a.name, a.title, a.type_desc, a.name.casefold(),
+              f'{a.name} {a.title} {a.type_desc}'.casefold()) for a in details])
 
     # ============================================
     # CALL RESOLUTION (Этап 1 — replaces name/LIKE matching with FK edges)

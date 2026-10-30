@@ -314,7 +314,46 @@ class SearchEngine:
     def search_attributes(self, query: str, type_filter: str | None = None,
                           source_id: str | None = None, limit: int = 30,
                           offset: int = 0) -> list[dict]:
-        """Search attributes by name or type."""
+        """Реквизиты по имени, синониму или типу: сначала реквизиты объектов
+        метаданных, за ними — реквизиты форм (kind «РеквизитФормы»,
+        object_full_name — форма). Постранично по общему списку."""
+        rows = self._object_attributes(query, source_id, offset + limit)
+        page = rows[offset:offset + limit]
+        if len(page) < limit:
+            # Реквизиты объектов кончились — страницу дополняют реквизиты форм.
+            page += self._form_attributes(query, source_id, limit - len(page),
+                                          max(0, offset - len(rows)))
+        rows = page
+        if type_filter:
+            rows = [r for r in rows if type_filter.lower() in (r.get('type_desc') or '').lower()]
+        return self._attach_source_labels(rows)
+
+    def _form_attributes(self, query: str, source_id: str | None, limit: int,
+                         offset: int) -> list[dict]:
+        """Реквизиты форм: каждое слово запроса — подстрока имени, заголовка
+        или типа (без учёта регистра). Сначала точное имя, затем имя с
+        начала запроса, затем по форме."""
+        words = query.casefold().split()
+        if not words or limit <= 0:
+            return []
+        conds = ["fa.search_cf LIKE '%' || ? || '%'"] * len(words)
+        params: list = list(words)
+        if source_id:
+            conds.append("m.source_id = ?")
+            params.append(source_id)
+        whole = query.strip().casefold()
+        params += [whole, whole, limit, offset]
+        rows = self.db.read_conn().execute(
+            f"""SELECT fa.name, 'РеквизитФормы' AS kind, fa.type_desc, fa.title AS synonym,
+                      m.name AS object_full_name, m.source_id
+               FROM form_attributes fa JOIN modules m ON m.id = fa.module_id
+               WHERE {' AND '.join(conds)}
+               ORDER BY fa.name_cf = ? DESC, fa.name_cf LIKE ? || '%' DESC, m.name, fa.name
+               LIMIT ? OFFSET ?""", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def _object_attributes(self, query: str, source_id: str | None, limit: int) -> list[dict]:
+        """Реквизиты объектов метаданных: FTS, без результата — LIKE."""
         conn = self.db.read_conn()
         fts_query = self._fts_query(query)
 
@@ -324,7 +363,7 @@ class SearchEngine:
             conds.append("m.source_id = ?")
             params.append(source_id)
         where = ' AND '.join(conds)
-        params.extend([limit, offset])
+        params.append(limit)
 
         rows = _fts_rows(
             conn,
@@ -334,7 +373,7 @@ class SearchEngine:
                JOIN attributes a ON a.id = f.rowid
                JOIN metadata_objects m ON m.id = a.object_id
                WHERE {where}
-               ORDER BY rank LIMIT ? OFFSET ?""", params)
+               ORDER BY rank LIMIT ?""", params)
 
         # LIKE fallback (D5: case-insensitive)
         if not rows:
@@ -346,19 +385,15 @@ class SearchEngine:
                 conds.append("m.source_id = ?")
                 p.append(source_id)
             w = ' AND '.join(conds)
-            p.extend([limit, offset])
+            p.append(limit)
             rows = conn.execute(
                 f"""SELECT a.name, a.kind, a.type_desc, a.synonym,
                           m.full_name as object_full_name, m.source_id
                    FROM attributes a
                    JOIN metadata_objects m ON m.id = a.object_id
                    WHERE {w}
-                   ORDER BY m.full_name, a.name LIMIT ? OFFSET ?""", p).fetchall()
-
-        results = [dict(r) for r in rows]
-        if type_filter:
-            results = [r for r in results if type_filter.lower() in (r.get('type_desc') or '').lower()]
-        return self._attach_source_labels(results)
+                   ORDER BY m.full_name, a.name LIMIT ?""", p).fetchall()
+        return [dict(r) for r in rows]
 
     def find_references(self, object_name: str, source_id: str | None = None,
                          limit: int = 50, offset: int = 0) -> list[dict]:

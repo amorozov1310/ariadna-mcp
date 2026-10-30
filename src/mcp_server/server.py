@@ -229,12 +229,14 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
                     source_id=source_id, detail=detail)
 
     @mcp.tool(
-        description="Поиск реквизитов по имени или типу. Находит, где используется "
-                     "определённый тип данных (например, все реквизиты типа СправочникСсылка.Контрагенты).",
+        description="Поиск реквизитов по имени, синониму или типу. Находит, где используется "
+                     "определённый тип данных (например, все реквизиты типа СправочникСсылка.Контрагенты). "
+                     "После реквизитов объектов — реквизиты форм (РеквизитФормы, с заголовком и типом): "
+                     "«где на форме показывается X» — Справочник.Поля.Форма.ФормаЭлемента.X.",
         annotations=_READ_ONLY,
     )
     def search_attributes(
-        query: Annotated[str, Field(description="Имя реквизита или часть типа")],
+        query: Annotated[str, Field(description="Имя реквизита, слова синонима (заголовка) или часть типа")],
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         type_filter: Annotated[str | None, Field(description="Фильтр по типу: СправочникСсылка.Контрагенты")] = None,
         source_id: Annotated[str | None, Field(description=_SID)] = None,

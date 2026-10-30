@@ -51,7 +51,7 @@ def test_fixture_forms_ru_and_en_expose_their_attributes():
           for m in walker.walk(FIXTURES / 'xml_ru') if m.form_xml_path}
     en = {m.form_name: read_form_attributes(m.form_xml_path)
           for m in walker.walk(FIXTURES / 'xml_en') if m.form_xml_path}
-    assert ru['ФормаЭлемента'] == {'объект'}
+    assert ru['ФормаЭлемента'] == {'объект', 'процентзаполнения'}
     assert 'список' in ru['ФормаСписка']
     assert en['ItemForm'] == {'object', 'employee'}
 
