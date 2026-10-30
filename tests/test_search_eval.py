@@ -71,7 +71,7 @@ def test_cards_beat_existing_tools_on_paraphrases(summary):
     assert para['cards']['hit@10'] > max(para['procedures']['hit@10'], para['code']['hit@10'])
     assert para['cards']['mrr'] > max(para['procedures']['mrr'], para['code']['mrr'])
     # Порог-регрессия на синтетике (не обещание качества на реальных конфигурациях).
-    assert summary['cards']['hit@10'] >= 0.8
+    assert summary['cards']['hit@10'] >= 0.9
 
 
 def test_negatives_are_counted_separately(summary):

@@ -27,6 +27,7 @@ MRR (1/место первого правильного), задержка. По
 
 import json
 import statistics
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -111,9 +112,11 @@ def _ranked(engine, method: str, query: str) -> list[tuple[str, str]]:
     return out[:DEPTH]
 
 
-def evaluate(engine, cases: list[Case], methods=METHODS) -> list[CaseResult]:
+def evaluate(engine, cases: list[Case], methods=METHODS, progress=None) -> list[CaseResult]:
     results = []
-    for case in cases:
+    for n, case in enumerate(cases, 1):
+        if progress:
+            progress(n, len(cases))
         for method in methods:
             t = time.perf_counter()
             ranked = _ranked(engine, method, case.query)
@@ -187,7 +190,12 @@ def _main(argv=None) -> int:
         raise SystemExit('Не указан проект: --project или project: в наборе')
     pm = ProjectManager(args.data_dir, args.index_dir)
     try:
-        results = evaluate(pm.get_search(project), cases, tuple(args.methods.split(',')))
+        # Прогресс — в stderr: без него медленный метод (code на крупной
+        # конфигурации — секунды на вопрос) выглядит как зависание.
+        results = evaluate(pm.get_search(project), cases, tuple(args.methods.split(',')),
+                           progress=lambda n, total: print(f'\rвопрос {n}/{total}', end='',
+                                                           file=sys.stderr, flush=True))
+        print(file=sys.stderr)
     finally:
         pm.close_all()
     print(f'Проект {project}, вопросов {len(cases)}')
