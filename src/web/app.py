@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..core.db import IndexRemovedError
+from ..core.manifest import project_manifest as build_manifest, project_readiness, readiness
 from ..core.project_manager import ProjectManager, ProjectNotFoundError
 from ..security import web_allowed_hosts
 
@@ -184,7 +185,37 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # Health check
 @app.get("/health")
 def health():
+    """Процесс жив — без обращения к индексам (healthcheck контейнера).
+    Готовность проектов — /ready."""
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready(project: str | None = None):
+    """Готовность проектов отвечать на запросы (docs/operations.md): 200 —
+    готовы, 503 — нет (идёт переиндексация, ошибка, не проиндексирован).
+    ?project=ID — один проект, 404 — его нет. Только реестр и строка
+    index_state — годится для частого опроса."""
+    if project is None:
+        body = readiness(get_pm())
+    else:
+        try:
+            body = project_readiness(get_pm(), project)
+        except (KeyError, ProjectNotFoundError, IndexRemovedError):
+            # JSON и без Accept: /ready опрашивают curl и оркестраторы.
+            return JSONResponse({'detail': f'проект {project} не найден'}, status_code=404)
+    return JSONResponse(body, status_code=200 if body['ready'] else 503)
+
+
+@app.get("/api/projects/{project_id}/manifest")
+def project_manifest(project_id: str):
+    """Из чего и чем построен индекс проекта: источники, версии
+    конфигураций, время индексации, отпечаток парсера, покрытие карточками
+    (src/core/manifest.py, docs/operations.md)."""
+    try:
+        return build_manifest(get_pm(), project_id)
+    except KeyError:
+        raise StarletteHTTPException(404, f"проект {project_id} не найден")
 
 
 @app.get("/favicon.ico", include_in_schema=False)

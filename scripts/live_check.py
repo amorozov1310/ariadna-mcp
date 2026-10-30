@@ -298,6 +298,13 @@ def check_indexing(ctx: LiveContext) -> list[Result]:
     procs = int(m.group(1)) if (m := re.search(r'^Procedures: (\d+)', stats, re.M)) else 0
     out.append(check('затем ready, процедур > 0', final == 'ready' and procs > 0,
                      f"status={final}, procedures={procs}"))
+    ready = ctx.web_get('/ready', params={'project': pid})
+    out.append(check('/ready?project → 200, ready', ready.status_code == 200
+                     and ready.json().get('ready') is True, f"HTTP {ready.status_code}"))
+    manifest = ctx.web_get(f'/api/projects/{pid}/manifest')
+    issues = manifest.json().get('issues') if manifest.status_code == 200 else None
+    out.append(check('манифест без замечаний', issues == [],
+                     f"HTTP {manifest.status_code}, issues={issues}"))
     return out
 
 
