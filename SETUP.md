@@ -243,6 +243,7 @@ docker restart ariadna               # если MCP/Web UI отвечают «un
 docker compose down && docker volume rm ariadna-index   # удалить индексы Docker; затем up -d и reindex проектов
 docker compose exec ariadna bash     # зайти внутрь
 curl http://127.0.0.1:19878/health   # здоровье
+curl http://127.0.0.1:19878/ready    # проекты готовы: 200, нет — 503
 ```
 
 ---
@@ -270,3 +271,4 @@ data/
 в `docker compose logs`; старые файлы после этого можно удалить вручную.
 Индекс с нуля — `reindex` проекта или `docker volume rm ariadna-index`
 (при остановленном контейнере). Подробнее — README, «Индексы в Docker».
+Резервная копия и перенос на другую машину — [docs/operations.md](docs/operations.md).
