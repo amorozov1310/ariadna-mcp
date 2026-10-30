@@ -243,6 +243,39 @@ CREATE TABLE IF NOT EXISTS parser_state (
     last_full_reparse_at     TEXT DEFAULT '',
     last_full_reparse_reason TEXT DEFAULT ''
 );
+
+-- Поисковые карточки процедур (src/core/cards.py, docs/hybrid-search.md):
+-- фрагмент = заголовок карточки + кусок тела. Текст не хранится —
+-- card_fts contentless, как module_text_fts; но detail=full: без позиций
+-- BM25 не различает документы (замер на крупной конфигурации: ~800 тыс.
+-- фрагментов — 192 МБ против 89 МБ у detail=none, зато ранг осмысленный).
+-- Удаление процедуры каскадом удаляет её фрагменты, триггер — их строки
+-- в card_fts. Таблицы новые (IF NOT EXISTS) — старый индекс пересоздавать
+-- не нужно, карточки построятся при следующем reindex.
+CREATE TABLE IF NOT EXISTS card_chunks (
+    -- AUTOINCREMENT: id пересобранного фрагмента всегда новый — по нему
+    -- видно, что фрагмент пересчитан (и к нему не привязан старый вектор).
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    procedure_id INTEGER NOT NULL REFERENCES procedures(id) ON DELETE CASCADE,
+    chunk_no     INTEGER NOT NULL DEFAULT 0,
+    start_line   INTEGER DEFAULT 0,
+    end_line     INTEGER DEFAULT 0,
+    content_hash TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_card_chunks_proc ON card_chunks(procedure_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS card_fts USING fts5(
+    head, body, tokenize='unicode61', detail=full, content='', contentless_delete=1
+);
+CREATE TRIGGER IF NOT EXISTS card_chunks_ad AFTER DELETE ON card_chunks BEGIN
+    DELETE FROM card_fts WHERE rowid = old.id;
+END;
+-- По модулю: с каким синонимом объекта и форматом карточки построены его
+-- карточки — сменился синоним или CARD_FORMAT — карточки модуля пересобираются.
+CREATE TABLE IF NOT EXISTS card_modules (
+    module_id      INTEGER PRIMARY KEY REFERENCES modules(id) ON DELETE CASCADE,
+    object_synonym TEXT DEFAULT '',
+    card_format    INTEGER DEFAULT 0
+);
 """
 
 
@@ -515,7 +548,8 @@ class Database:
         """Clear all data, keep schema."""
         if not self.conn:
             self.connect()
-        for table in ['calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
+        for table in ['card_chunks', 'card_fts', 'card_modules',
+                      'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:
             self.conn.execute(f"DELETE FROM {table}")

@@ -69,6 +69,13 @@ class ProcedureCard:
         lines = [self.signature or f'{self.kind} {self.procedure_name}()']
         if self.directive:
             lines[0] = f'{self.directive} {lines[0]}'
+        # Имена 1С слитные (ТипСкладаПоУмолчанию) — для полнотекстового поиска
+        # это одно слово; разбитое на слова имя находится и по фразе запроса.
+        words = split_identifier(self.procedure_name)
+        obj_name = self.object_full_name.split('.', 1)[-1] if self.object_full_name else ''
+        if obj_name:
+            words += ' | ' + split_identifier(obj_name)
+        lines.append(f'Слова: {words}')
         lines.append(f'Модуль: {self.module_name}')
         if self.object_full_name:
             obj = self.object_full_name
@@ -87,6 +94,14 @@ class ProcedureCard:
         if not self.chunks:
             return [head]
         return [f'{head}\n\n{c.text}' for c in self.chunks]
+
+
+_CAMEL = re.compile(r'[А-ЯЁA-Z]+(?![а-яёa-z])|[А-ЯЁA-Z]?[а-яёa-z]+|\d+')
+
+
+def split_identifier(name: str) -> str:
+    """«ТипСкладаПоУмолчанию» → «тип склада по умолчанию», «НДСЗаписи» → «ндс записи»."""
+    return ' '.join(part.lower() for part in _CAMEL.findall(name))
 
 
 def _read_lines(path: str) -> list[str] | None:
@@ -159,8 +174,24 @@ def _object_of(module_name: str) -> str:
     return '.'.join(parts[:2]) if len(parts) >= 2 and parts[0] != 'Конфигурация' else ''
 
 
-def build_cards(engine, source_id: str | None = None,
-                module_name: str | None = None) -> Iterator[ProcedureCard]:
+def _synonym_lookup(conn):
+    """(source_id, имя модуля) → синоним его объекта; объект расширения без
+    своего синонима берёт его из любого источника (заимствованный объект)."""
+    synonyms: dict[tuple[str, str], str] = {}
+    for r in conn.execute('SELECT source_id, full_name_cf, synonym FROM metadata_objects'):
+        synonyms[(r['source_id'], r['full_name_cf'])] = r['synonym'] or ''
+    any_source: dict[str, str] = defaultdict(str)
+    for (_src, fn), syn in synonyms.items():
+        any_source[fn] = any_source[fn] or syn
+
+    def lookup(source_id: str, module_name: str) -> str:
+        obj_cf = _object_of(module_name).casefold()
+        return synonyms.get((source_id, obj_cf)) or any_source.get(obj_cf, '')
+    return lookup
+
+
+def build_cards(engine, source_id: str | None = None, module_name: str | None = None,
+                module_ids: set[int] | None = None) -> Iterator[ProcedureCard]:
     """Карточки процедур индекса (SearchEngine engine), по модулю за раз.
 
     Файл модуля читается один раз на модуль; недоступный файл даёт карточки
@@ -182,16 +213,11 @@ def build_cards(engine, source_id: str | None = None,
             FROM procedures p JOIN modules m ON m.id = p.module_id
             {where} ORDER BY m.source_id, m.name, p.start_line""", params).fetchall()
 
-    synonyms: dict[tuple[str, str], str] = {}
-    for r in conn.execute('SELECT source_id, full_name_cf, synonym FROM metadata_objects'):
-        synonyms[(r['source_id'], r['full_name_cf'])] = r['synonym'] or ''
-    any_source = defaultdict(str)
-    for (src, fn), syn in synonyms.items():
-        any_source[fn] = any_source[fn] or syn
-
+    synonym_of = _synonym_lookup(conn)
     by_module: dict[int, list] = defaultdict(list)
     for r in rows:
-        by_module[r['module_id']].append(r)
+        if module_ids is None or r['module_id'] in module_ids:
+            by_module[r['module_id']].append(r)
 
     for procs in by_module.values():
         first = procs[0]
@@ -199,8 +225,7 @@ def build_cards(engine, source_id: str | None = None,
         lines = _read_lines(path) if path else None
         regions = _regions(lines) if lines is not None else []
         obj = _object_of(first['module_name'])
-        obj_cf = obj.casefold()
-        synonym = synonyms.get((first['source_id'], obj_cf)) or any_source.get(obj_cf, '')
+        synonym = synonym_of(first['source_id'], first['module_name'])
         for p in procs:
             card = ProcedureCard(
                 procedure_id=p['id'], source_id=p['source_id'], module_name=p['module_name'],
@@ -221,6 +246,125 @@ def build_cards(engine, source_id: str | None = None,
                 digest.update(b'\x00')
             card.content_hash = 'sha256:' + digest.hexdigest()
             yield card
+
+
+# Вес заголовка карточки относительно тела в BM25-ранге card_fts: совпадение в
+# имени, синониме объекта, области или описании важнее совпадения в коде.
+# Подбирается на стенде оценки (шаг 5); замена значения на совместимость не влияет.
+HEAD_WEIGHT = 3.0
+_WORD = re.compile(r'\w+')
+
+
+def refresh_card_index(engine, progress_cb=None, batch: int = 500) -> dict:
+    """Пересобрать карточки в card_chunks/card_fts там, где они устарели.
+
+    Устаревшим считается модуль, у которого есть процедура без фрагментов
+    (модуль перепарсен — процедуры пересозданы), сменился синоним объекта
+    или формат карточки (CARD_FORMAT). Остальные модули не трогаются —
+    повторный reindex без изменений почти ничего не стоит.
+    Возвращает {'modules': пересобрано модулей, 'chunks': вставлено фрагментов}.
+    """
+    db = engine.db
+    conn = db.conn
+    synonym_of = _synonym_lookup(conn)
+    missing = {r[0] for r in conn.execute(
+        """SELECT DISTINCT p.module_id FROM procedures p
+           WHERE NOT EXISTS (SELECT 1 FROM card_chunks c WHERE c.procedure_id = p.id)""")}
+    recorded = {r[0]: (r[1], r[2]) for r in conn.execute(
+        'SELECT module_id, object_synonym, card_format FROM card_modules')}
+    stale: dict[int, str] = {}
+    for r in conn.execute(
+            """SELECT m.id, m.name, m.source_id FROM modules m
+               WHERE EXISTS (SELECT 1 FROM procedures p WHERE p.module_id = m.id)"""):
+        synonym = synonym_of(r[2], r[1])
+        if r[0] in missing or recorded.get(r[0]) != (synonym, CARD_FORMAT):
+            stale[r[0]] = synonym
+
+    stats = {'modules': 0, 'chunks': 0}
+    if not stale:
+        return stats
+    ids = list(stale)
+    for i in range(0, len(ids), batch):
+        part = ids[i:i + batch]
+        marks = ','.join('?' * len(part))
+        conn.execute(f"""DELETE FROM card_chunks WHERE procedure_id IN
+                         (SELECT id FROM procedures WHERE module_id IN ({marks}))""", part)
+        conn.commit()
+        for card in build_cards(engine, module_ids=set(part)):
+            head = card.header()
+            bodies = [(c.chunk_no, c.start_line, c.end_line, c.text) for c in card.chunks] \
+                or [(0, card.start_line, card.end_line, '')]
+            for no, start, end, body in bodies:
+                cur = conn.execute(
+                    """INSERT INTO card_chunks (procedure_id, chunk_no, start_line, end_line, content_hash)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (card.procedure_id, no, start, end, card.content_hash))
+                conn.execute('INSERT INTO card_fts (rowid, head, body) VALUES (?, ?, ?)',
+                             (cur.lastrowid, head, body))
+                stats['chunks'] += 1
+        conn.executemany(
+            """INSERT INTO card_modules (module_id, object_synonym, card_format) VALUES (?, ?, ?)
+               ON CONFLICT(module_id) DO UPDATE SET object_synonym=excluded.object_synonym,
+                   card_format=excluded.card_format""",
+            [(m, stale[m], CARD_FORMAT) for m in part])
+        conn.commit()
+        stats['modules'] += len(part)
+        if progress_cb:
+            progress_cb(stats['modules'], len(ids))
+    return stats
+
+
+def card_fts_query(text: str, max_terms: int = 12) -> str:
+    """Запрос MATCH: слова запроса через OR, по префиксу (склонения, части имён).
+
+    Слова короче трёх букв («по», «на», «в») отбрасываются, если есть другие:
+    как префикс они совпадают с огромной частью словаря — ранг не улучшают,
+    а запрос на крупной конфигурации замедляют в разы."""
+    words = []
+    for w in _WORD.findall(text.lower()):
+        if w not in words:
+            words.append(w)
+    long_words = [w for w in words if len(w) >= 3]
+    words = long_words or [w for w in words if len(w) > 1]
+    return ' OR '.join(f'"{w}"*' for w in words[:max_terms])
+
+
+def search_cards(engine, query: str, source_id: str | None = None,
+                 limit: int = 20, pool: int = 200) -> list[dict]:
+    """Лексический поиск по карточкам с рангом BM25 — по процедурам.
+
+    Из пула лучших фрагментов (pool) у каждой процедуры остаётся лучший;
+    rank — место процедуры с 1 (для слияния рангов на шаге гибридного поиска).
+    """
+    match = card_fts_query(query)
+    if not match:
+        return []
+    conn = engine.db.read_conn()
+    conds, params = ['card_fts MATCH ?'], [match]
+    if source_id:
+        conds.append('m.source_id = ?')
+        params.append(source_id)
+    rows = conn.execute(
+        f"""SELECT c.procedure_id, c.chunk_no, c.start_line, c.end_line,
+                   bm25(card_fts, {HEAD_WEIGHT}, 1.0) AS score,
+                   p.name AS procedure_name, m.name AS module_name, m.source_id
+            FROM card_fts f
+            JOIN card_chunks c ON c.id = f.rowid
+            JOIN procedures p ON p.id = c.procedure_id
+            JOIN modules m ON m.id = p.module_id
+            WHERE {' AND '.join(conds)}
+            ORDER BY score LIMIT ?""", params + [pool]).fetchall()
+    results, seen = [], set()
+    for r in rows:
+        if r['procedure_id'] in seen:
+            continue
+        seen.add(r['procedure_id'])
+        item = dict(r)
+        item['rank'] = len(results) + 1
+        results.append(item)
+        if len(results) >= limit:
+            break
+    return results
 
 
 def _stats_main(argv=None) -> int:

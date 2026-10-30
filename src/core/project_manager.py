@@ -1038,6 +1038,24 @@ class ProjectManager:
             db.update_state(progress_phase='resolving')
             indexer.resolve_calls()
 
+            # Поисковые карточки процедур — только для изменившихся модулей
+            # (src/core/cards.py). Вспомогательный индекс: его сбой пишется в
+            # лог и не делает весь индекс ошибочным.
+            db.update_state(progress_phase='cards', progress_current=0, progress_total=0)
+            try:
+                from .cards import refresh_card_index
+                roots = {s.id: str(self.source_path(project_id, s.xml_path))
+                         for s in project.sources if s.xml_path}
+                card_stats = refresh_card_index(
+                    SearchEngine(db, source_roots=roots),
+                    progress_cb=lambda done, total: db.update_state(
+                        progress_current=done, progress_total=total))
+                if card_stats['modules']:
+                    logger.info('Проект %s: карточки процедур пересобраны для %d модулей (%d фрагментов)',
+                                project_id, card_stats['modules'], card_stats['chunks'])
+            except Exception:
+                logger.exception('Проект %s: карточки процедур не построены', project_id)
+
             total_stats.last_indexed = datetime.now().isoformat()
             total_stats.duration_sec = round(total_stats.duration_sec, 2)
             project.index_stats = total_stats
