@@ -169,7 +169,14 @@ async def playground_execute(request: Request, project_id: str):
     except KeyError:
         raise HTTPException(404)
 
-    body = await request.json()
+    # Некорректное тело (не JSON, не UTF-8, не объект) — ошибка клиента, 400;
+    # раньше это был 500 с трассировкой в логе.
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, 'Тело запроса — JSON-объект {"tool": ..., "params": {...}} в UTF-8')
+    if not isinstance(body, dict):
+        raise HTTPException(400, 'Тело запроса — JSON-объект {"tool": ..., "params": {...}}')
     tool_name = body.get('tool', '')
     params = body.get('params') or {}
     schemas = {t['name']: t['input_schema'] for t in await mcp_tool_schemas()}

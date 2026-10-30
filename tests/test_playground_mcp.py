@@ -251,3 +251,17 @@ def test_project_id_is_not_a_form_field_and_page_project_is_used(web):
     # Чужой project_id из запроса игнорируется — проект страницы.
     got = _play(client, 'list_sources', {'project_id': 'p2'})
     assert got['result'] == execute_tool(pm, 'list_sources', {'project_id': 'p1'})
+
+
+@pytest.mark.parametrize('content, body', [
+    ('application/x-www-form-urlencoded', b'tool=search_code&query=x'),   # не JSON
+    ('application/json', '{"tool": "search_code", "params": {"query": "курс"}}'.encode('cp1251')),
+    ('application/json', b'["search_code"]'),                                # не объект
+])
+def test_malformed_body_is_400_not_500(web, content, body):
+    """Некорректное тело запроса — 400 с подсказкой формата, а не 500 с
+    трассировкой в логе (по логу контейнера проверяет live_check)."""
+    _, client = web
+    r = client.post('/api/projects/p1/playground', content=body, headers={'Content-Type': content})
+    assert r.status_code == 400, r.text
+    assert 'JSON' in r.json()['detail']
