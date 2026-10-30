@@ -77,9 +77,13 @@ def test_reindex_builds_cards_for_every_procedure(pm):
 
 def test_search_cards_ranks_by_relevance(pm):
     engine = pm.get_search('p1')
+    # Формы слов совпадают («склада» — «склад»), поэтому рядом и экспортная
+    # СкладПоУмолчанию из модуля менеджера; искомая — в первой двойке.
     hits = search_cards(engine, 'тип склада по умолчанию')
-    assert hits[0]['procedure_name'] == 'ТипСкладаПоУмолчанию'
-    assert hits[0]['module_name'] == 'Справочник.Склады.МодульОбъекта'
+    top = [(h['module_name'], h['procedure_name']) for h in hits[:2]]
+    assert ('Справочник.Склады.МодульОбъекта', 'ТипСкладаПоУмолчанию') in top
+    # Точное имя — первым.
+    assert search_cards(engine, 'ТипСкладаПоУмолчанию')[0]['procedure_name'] == 'ТипСкладаПоУмолчанию'
     assert [h['rank'] for h in hits] == list(range(1, len(hits) + 1))
     assert len({h['procedure_id'] for h in hits}) == len(hits)   # по процедуре — одна строка
 

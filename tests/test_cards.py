@@ -164,3 +164,26 @@ def test_split_identifier(name, words):
 def test_word_roots(word, roots):
     from src.core.cards import word_roots
     assert word_roots(word) == roots
+
+
+@pytest.mark.parametrize('word, stems', [
+    ('заказу', ['заказ']),
+    ('почтовых', ['почтов']),
+    ('отправить', ['отправи']),
+    ('скидок', ['скидок', 'скидк']),        # беглая гласная: скидка, скидки
+    ('расчет', ['расч', 'рассч']),          # чередование: рассчитать
+    ('образец', ['образец', 'образц']),
+    ('тип', ['тип']),                       # основа короче 4 букв не режется
+    ('XML', []),                            # не кириллица
+])
+def test_query_stems(word, stems):
+    from src.core.cards import query_stems
+    assert query_stems(word) == stems
+
+
+def test_card_fts_query_stems_and_drops_redundant_terms():
+    from src.core.cards import card_fts_query
+    # «отправлени» продолжает корень «отпра» — в многословном запросе лишний.
+    assert card_fts_query('отправление почтовых') == '"отпра"* OR "правл"* OR "почто"*'
+    # В запросе из одного слова точная основа остаётся рядом с корнями.
+    assert card_fts_query('ЗаписьСклада') == '"записьсклад"* OR "запис"* OR "письс"*'
