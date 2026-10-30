@@ -132,6 +132,47 @@ def word_roots(word: str) -> set[str]:
     return roots
 
 
+# Основа слова запроса: без окончания (падеж, число, форма глагола) — как
+# префикс она находит и другие формы: «скидок» → «скидк» (беглая гласная),
+# «заказу» → «заказ», «почтовых» → «почтов». Только для запроса: в карточке
+# слова целиком, префиксный запрос FTS их и так находит, — поэтому правка
+# не меняет CARD_FORMAT и не требует переиндексации. Окончания, длина основы
+# и чередования подобраны на стенде оценки (docs/hybrid-search.md).
+_ENDINGS = sorted(set("""
+ыми ими ого его ому ему ых их ой ей ий ый ая яя ое ее ую юю ые ие
+ами ями ах ях ов ев ом ем ам ям а я о е и ы у ю ь
+ться тись ть ти ит ет ют ат ят ил ла ло ли
+ение ений ения ению ением ениях ание аний ания анию анием
+""".split()), key=len, reverse=True)
+_MIN_STEM = 4
+_VOWELS = set('аеёиоуыэюя')
+# Суффиксы с беглой гласной: «скидок» — «скидки», «образец» — «образцы».
+_FLEETING = ('ок', 'ек', 'ец')
+# Чередования, частые в именах 1С: «расчет» — «рассчитать».
+_ALTERNATIONS = (('расч', 'рассч'),)
+
+
+def query_stems(word: str) -> list[str]:
+    """Основы кириллического слова запроса для префиксного поиска (пусто
+    для прочих слов): без окончания; без беглой гласной («скидок» →
+    «скидк»); с чередованием («расчет» → «рассчет»)."""
+    word = word.lower()
+    if not _CYRILLIC.match(word):
+        return []
+    stem = word
+    for ending in _ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= _MIN_STEM:
+            stem = word[:-len(ending)]
+            break
+    stems = [stem]
+    if len(stem) >= 5 and stem[-2:] in _FLEETING and stem[-3] not in _VOWELS:
+        stems.append(stem[:-2] + stem[-1])
+    for short, full in _ALTERNATIONS:
+        if stem.startswith(short):
+            stems.append(full + stem[len(short):])
+    return stems
+
+
 def _read_lines(path: str) -> list[str] | None:
     try:
         raw = Path(path).read_bytes()
@@ -351,20 +392,30 @@ def refresh_card_index(engine, progress_cb=None, batch: int = 500) -> dict:
 
 
 def card_fts_query(text: str, max_terms: int = 24) -> str:
-    """Запрос MATCH: слова запроса и их корни (word_roots) через OR, по префиксу.
+    """Запрос MATCH: основы слов запроса (query_stems, у некириллических —
+    слово целиком) и их корни (word_roots) через OR, по префиксу.
 
     Слова короче трёх букв («по», «на», «в») отбрасываются, если есть другие:
     как префикс они совпадают с огромной частью словаря — ранг не улучшают,
-    а запрос на крупной конфигурации замедляют в разы."""
+    а запрос на крупной конфигурации замедляют в разы. По той же причине
+    в запросе из нескольких слов терм, который продолжает другой терм
+    («отправл» при «отпра»), убирается: найденное он не расширяет, а время
+    запроса растёт (на стенде это ещё и подняло качество). В запросе из
+    одного слова термы остаются: там важнее точность — «записьсклад» не
+    должен растворяться в «запис»."""
     words = []
     for w in _WORD.findall(text.lower()):
         if w not in words:
             words.append(w)
     long_words = [w for w in words if len(w) >= 3]
     words = long_words or [w for w in words if len(w) > 1]
-    terms = list(words)
+    terms: list[str] = []
+    for w in words:
+        terms += [t for t in (query_stems(w) or [w]) if t not in terms]
     for w in words:
         terms += [r for r in sorted(word_roots(w)) if r not in terms]
+    if len(words) > 1:
+        terms = [t for t in terms if not any(o != t and t.startswith(o) for o in terms)]
     return ' OR '.join(f'"{t}"*' for t in terms[:max_terms])
 
 
@@ -408,8 +459,7 @@ def search_cards(engine, query: str, source_id: str | None = None,
     if not match:
         return []
     conn = engine.db.read_conn()
-    exact = _exact_name_rows(conn, query.strip(), source_id, limit) \
-        if _IDENTIFIER.match(query.strip()) else []
+    exact = _exact_name_rows(conn, query.strip(), source_id, limit)         if _IDENTIFIER.match(query.strip()) else []
     conds, params = ['card_fts MATCH ?'], [match]
     if source_id:
         conds.append('m.source_id = ?')
