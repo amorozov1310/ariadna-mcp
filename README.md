@@ -152,7 +152,7 @@ claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp
 читает** — конфигурация, положенная туда, молча игнорируется.
 
 Проверка: в Claude Code команда `/mcp` показывает `ariadna` со статусом
-connected и 16 инструментами.
+connected и 17 инструментами.
 
 **Cursor** — `.cursor/mcp.json` в проекте или `~/.cursor/mcp.json`:
 
@@ -265,7 +265,7 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 
 ## MCP Tools
 
-16 инструментов. Все, кроме `reindex` и `remove_source`, только читают
+17 инструментов. Все, кроме `reindex` и `remove_source`, только читают
 (помечены `readOnlyHint`), `remove_source` помечен `destructiveHint`.
 
 | Tool                | Для какого вопроса                                |
@@ -282,6 +282,7 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 | `get_module_outline`| Оглавление модуля без чтения кода                 |
 | `get_call_tree`     | Кто вызывает (`direction="up"`) / что вызывает (`"down"`) |
 | `search_code`       | Строка внутри кода: запросы, присваивания, комментарии |
+| `semantic_search_code` | Процедура по описанию своими словами; ответ — текст и `structuredContent` с режимом поиска, строками и отпечатками |
 | `get_index_status`  | Статистика индекса и прогресс переиндексации      |
 | `reindex`           | Переиндексировать (в фоне, инкрементально)        |
 | `diagnose_index`    | Полнота индекса и качество графа вызовов (медленно на крупных конфигурациях) |
@@ -409,9 +410,9 @@ python scripts/live_check.py --project demo
 запущенного сервера. `live_check.py` проверяет сервер по сети — так, как его
 видят агент (MCP, streamable HTTP) и браузер (Web UI):
 
-- регрессия: версия, 16 инструментов, ошибки, проверка `Host`/`Origin`;
+- регрессия: версия, 17 инструментов, ошибки, проверка `Host`/`Origin`;
 - индексация: сразу после `reindex` статус `indexing`, затем `ready`;
-- playground против MCP: для всех 16 инструментов ответы совпадают;
+- playground против MCP: для всех 17 инструментов ответы совпадают;
 - пересоздание и удаление проекта под нагрузкой MCP и Web UI (ни одного 500,
   только «not found»/«проект удалён»);
 - стресс: создание и удаление проектов рядом с чтением реестра;

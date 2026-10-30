@@ -15,8 +15,8 @@
 >    `search_procedures(query)` → `get_procedure_code(module_name, procedure_name)`,
 >    `get_module_outline(module_name)`,
 >    `get_call_tree(procedure_name, module_name, direction)`,
->    `search_code(query, file_pattern)`. Смысловой поиск по описанию — не здесь:
->    в Ариадне полнотекстовый поиск без семантики.
+>    `search_code(query, file_pattern)`; процедура по описанию своими словами —
+>    `semantic_search_code(query)` (режим `lexical`: по тексту, без векторов).
 
 ## Вариант B — Ариадна перед Grep (последний MCP-шаг)
 

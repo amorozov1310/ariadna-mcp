@@ -11,6 +11,7 @@ project_id anyway; a single-project registry now just defaults to it).
 
 from ..core.project_manager import ProjectManager, ReindexInProgressError
 from ..core.search import format_search_results, format_object_details
+from . import semantic_search
 
 
 # ============================================
@@ -129,6 +130,21 @@ def is_error_text(text: str) -> bool:
     MCP (server.py: такой ответ уходит клиенту с isError=true) и playground
     Web UI (показывается как ошибка)."""
     return text.startswith('Error')
+
+
+def semantic_search_payload(pm: ProjectManager, args: dict) -> dict | str:
+    """Результат semantic_search_code как данные (structuredContent в server.py)
+    или текст ошибки «Error: …» — с той же проверкой проекта и источника."""
+    project_id, error = _resolve_project_id(pm, args)
+    if error:
+        return error
+    source_id = (args.get('source_id') or '').strip() or None
+    if source_id:
+        error = _unknown_source_error(pm, project_id, source_id)
+        if error:
+            return error
+    return semantic_search.search(pm.get_search(project_id), project_id, args.get('query', ''),
+                                  source_id, args.get('limit'), args.get('offset', 0))
 
 
 def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
@@ -457,6 +473,10 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     f"[{p['start_line']}-{p['end_line']}]"
                 )
             return '\n'.join(lines)
+
+        case 'semantic_search_code':
+            data = semantic_search_payload(pm, args)
+            return data if isinstance(data, str) else semantic_search.format_text(data)
 
         case 'diagnose_index':
             from ..core.search import diagnose_index

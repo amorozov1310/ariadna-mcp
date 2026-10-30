@@ -450,5 +450,50 @@
     "output": {
       "result": "string"
     }
+  },
+  "semantic_search_code": {
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 10
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "schema_version": "string",
+      "project_id": "string",
+      "query": "string",
+      "search_mode": "string",
+      "mode_reason": "string",
+      "freshness": "any",
+      "items": "array",
+      "offset": "integer",
+      "limit": "integer",
+      "has_more": "boolean",
+      "next_offset": "integer|null",
+      "warnings": "array"
+    }
   }
 }

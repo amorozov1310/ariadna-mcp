@@ -17,8 +17,8 @@ logger = logging.getLogger('ariadna')
 try:
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
-    from mcp.types import ToolAnnotations
-    from pydantic import Field
+    from mcp.types import CallToolResult, TextContent, ToolAnnotations
+    from pydantic import BaseModel, Field
     HAS_MCP = True
 except ImportError:
     HAS_MCP = False
@@ -26,7 +26,8 @@ except ImportError:
 
 from .. import __version__
 from ..core.project_manager import PROJECT_GONE, PROJECT_GONE_MESSAGE, ProjectManager
-from .tools import execute_tool, is_error_text
+from . import semantic_search
+from .tools import execute_tool, is_error_text, semantic_search_payload
 
 _PID = "ID проекта (необязательно, если в реестре только один проект)"
 _SID = "ID источника (пусто = все источники)"
@@ -55,12 +56,56 @@ INSTRUCTIONS = """\
   структура модуля без чтения кода — get_module_outline;
 - «кто вызывает / что вызывает»: get_call_tree (direction=up/down); передавайте
   module_name, если имя процедуры встречается в нескольких модулях;
-- текст внутри кода (запросы, присваивания, строки, комментарии): search_code.
+- текст внутри кода (запросы, присваивания, строки, комментарии): search_code;
+- процедура по описанию своими словами («где считается себестоимость»):
+  semantic_search_code → get_procedure_code.
 
 Имена — как в конфигураторе, RU или EN (Справочник == Catalog), регистр не важен.
 Выдача постраничная: строка «use offset=N for more» означает, что есть продолжение.
 reindex не блокирует — прогресс в get_index_status. remove_source необратим и без
 confirm=true только показывает, что будет удалено."""
+
+
+if HAS_MCP:
+    class SemanticItem(BaseModel):
+        """Процедура в выдаче semantic_search_code."""
+        rank: int = Field(description='Место в выдаче с 1 (с учётом offset)')
+        entity_id: str = Field(description='Устойчивый идентификатор процедуры (не меняется при переиндексации)')
+        source_id: str
+        kind: str = Field(description='procedure | function')
+        module_name: str
+        procedure_name: str
+        is_export: bool
+        relative_path: str = Field(description='Файл модуля относительно корня выгрузки источника')
+        start_line: int = Field(description='Первая строка процедуры')
+        end_line: int = Field(description='Последняя строка процедуры')
+        match_start_line: int = Field(description='Начало найденного фрагмента')
+        match_end_line: int = Field(description='Конец найденного фрагмента')
+        content_hash: str = Field(description='Отпечаток карточки процедуры (sha256)')
+        match_methods: list[str] = Field(description='Как найдено: exact_name — имя равно запросу, fts — по тексту карточки')
+        evidence_kind: str = Field(description='source_excerpt — фрагмент из файла; card_header — файл недоступен')
+        snippet: str = Field(description='Строка кода рядом с совпадением')
+        snippet_line: int
+
+    class Freshness(BaseModel):
+        index_state: str = Field(description='ready | indexing | error | empty')
+        indexed_at: str
+        card_format: int = Field(description='Версия формата карточек процедур')
+
+    class SemanticSearchResult(BaseModel):
+        """Ответ semantic_search_code (docs/adr/0002-semantic-search-code.md)."""
+        schema_version: str
+        project_id: str
+        query: str
+        search_mode: str = Field(description='lexical | hybrid | vector — фактический режим поиска')
+        mode_reason: str
+        freshness: Freshness
+        items: list[SemanticItem]
+        offset: int
+        limit: int
+        has_more: bool
+        next_offset: int | None
+        warnings: list[str]
 
 
 def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
@@ -305,6 +350,39 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     ) -> str:
         return run('search_code', project_id=project_id, query=query,
                     file_pattern=file_pattern, source_id=source_id, limit=limit, offset=offset)
+
+    @mcp.tool(
+        description="Поиск процедур по смыслу — вопрос своими словами: «где рассчитывается "
+                     "себестоимость», «отправить письмо по почте», «курс валюты на дату». Ищет по "
+                     "имени, объекту и его синониму, области, комментарию и коду процедуры; разные "
+                     "формы слов совпадают, точное имя процедуры находится первым. Режим поиска — в "
+                     "ответе (search_mode; сейчас lexical — ранжирование по тексту, без векторов). "
+                     "Дальше — get_procedure_code(module_name, procedure_name) из строки результата. "
+                     "Для известного имени быстрее search_procedures, для точной строки в коде — search_code.",
+        annotations=_READ_ONLY,
+    )
+    def semantic_search_code(
+        query: Annotated[str, Field(description="Что ищем, своими словами или именем процедуры")],
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        source_id: Annotated[str | None, Field(description=_SID)] = None,
+        limit: Annotated[int, Field(description="Макс. результатов на страницу (не больше 50; дальше — через offset)")] = 10,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+    ) -> Annotated[CallToolResult, SemanticSearchResult]:
+        args = dict(project_id=project_id, query=query, source_id=source_id, limit=limit, offset=offset)
+        try:
+            data = semantic_search_payload(pm, args)
+        except PROJECT_GONE:
+            logger.info("Инструмент semantic_search_code: проект удалён во время запроса")
+            raise ToolError(PROJECT_GONE_MESSAGE) from None
+        except Exception as e:
+            logger.exception("Инструмент semantic_search_code упал")
+            raise ToolError(str(e)) from e
+        if isinstance(data, str):
+            raise ToolError(data.removeprefix('Error:').strip())
+        # Текст и structuredContent — один и тот же результат: текст для модели,
+        # структура (схема SemanticSearchResult) — для программных клиентов.
+        return CallToolResult(content=[TextContent(type='text', text=semantic_search.format_text(data))],
+                              structured_content=data)
 
     @mcp.tool(
         description="Структура модуля: список процедур/функций с директивами, экспортностью, "

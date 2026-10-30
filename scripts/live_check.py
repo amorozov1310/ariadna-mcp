@@ -51,7 +51,7 @@ FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
 # Отчёт по конфигурации к той же выгрузке: в фикстуре кода xml_ru нет
 # Configuration.xml, метаданные берутся из отчёта.
 FIXTURE_REPORT = ROOT / 'tests' / 'fixtures' / 'report_ru.txt'
-EXPECTED_TOOLS = 16
+EXPECTED_TOOLS = 17
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
 
@@ -71,6 +71,7 @@ PARITY_CASES = {
     'get_module_outline': {'module_name': 'ЦеныСервер'},
     'get_call_tree': {'procedure_name': 'РассчитатьЦену', 'direction': 'up', 'depth': 2},
     'search_code': {'query': 'Возврат'},
+    'semantic_search_code': {'query': 'расчет цены со скидкой', 'limit': 3},
     'diagnose_index': {},
     'reindex': {},
     'remove_source': {'source_id': 'main'},          # без confirm — только предпросмотр
