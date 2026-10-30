@@ -26,6 +26,7 @@
 >    нужного: код процедуры с номерами строк — `get_procedure_code(module_name, procedure_name)`,
 >    кто вызывает / что вызывает — `get_call_tree(procedure_name, module_name, direction)`,
 >    где объект используется как тип — `find_references(object_name)`,
+>    процедура по описанию — `semantic_search_code(query)`,
 >    текст в коде — `search_code(query, file_pattern)`.
 
 ## В таблицу «что вызывать для какой задачи»
