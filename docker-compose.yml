@@ -36,6 +36,9 @@ services:
       - MCP_HTTP_PORT=9879
       - WEB_PORT=9878
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Пределы загружаемого архива выгрузки (пусто — 1 млн файлов, 64 ГБ).
+      - ARIADNA_ARCHIVE_MAX_FILES=${ARIADNA_ARCHIVE_MAX_FILES:-}
+      - ARIADNA_ARCHIVE_MAX_BYTES=${ARIADNA_ARCHIVE_MAX_BYTES:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9878/health"]
       interval: 30s
