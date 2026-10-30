@@ -13,7 +13,7 @@ body:
     attributes:
       label: Версия Ариадны
       description: serverInfo.version в клиенте или src/VERSION
-      placeholder: 1.0.0
+      placeholder: 1.1.0
     validations:
       required: true
   - type: input
