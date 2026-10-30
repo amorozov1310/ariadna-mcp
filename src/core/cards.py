@@ -368,6 +368,12 @@ def card_fts_query(text: str, max_terms: int = 24) -> str:
     return ' OR '.join(f'"{t}"*' for t in terms[:max_terms])
 
 
+# Общие поля выдачи search_cards: границы процедуры и файл модуля — для
+# ссылки на источник (semantic_search_code), чтения фрагмента и get_procedure_code.
+_RESULT_COLUMNS = ('p.start_line AS proc_start, p.end_line AS proc_end, p.is_export, '
+                   'p.kind AS proc_kind, m.file_path, m.abs_path')
+
+
 def _exact_name_rows(conn, name: str, source_id: str | None, limit: int):
     """Процедуры с именем, ровно равным запросу: сначала самые вызываемые
     (исходный метод, а не его обёртки), затем экспортные методы общих модулей."""
@@ -378,7 +384,11 @@ def _exact_name_rows(conn, name: str, source_id: str | None, limit: int):
     return conn.execute(
         f"""SELECT p.id AS procedure_id, 0 AS chunk_no, p.start_line, p.end_line, 0.0 AS score,
                    p.name AS procedure_name, m.name AS module_name, m.source_id,
-                   (SELECT COUNT(*) FROM calls_resolved r WHERE r.callee_id = p.id) AS callers
+                   (SELECT COUNT(*) FROM calls_resolved r WHERE r.callee_id = p.id) AS callers,
+                   {_RESULT_COLUMNS},
+                   (SELECT c.content_hash FROM card_chunks c WHERE c.procedure_id = p.id
+                    ORDER BY c.chunk_no LIMIT 1) AS content_hash,
+                   'exact_name' AS match
             FROM procedures p JOIN modules m ON m.id = p.module_id
             WHERE {' AND '.join(conds)}
             ORDER BY callers DESC, p.is_export DESC, m.name_cf LIKE 'общиймодуль.%' DESC, m.name
@@ -391,6 +401,8 @@ def search_cards(engine, query: str, source_id: str | None = None,
 
     Из пула лучших фрагментов (pool) у каждой процедуры остаётся лучший;
     rank — место процедуры с 1 (для слияния рангов на шаге гибридного поиска).
+    start_line/end_line — строки найденного фрагмента, proc_start/proc_end —
+    всей процедуры; match — 'exact_name' (имя равно запросу) или 'fts'.
     """
     match = card_fts_query(query)
     if not match:
@@ -406,7 +418,8 @@ def search_cards(engine, query: str, source_id: str | None = None,
         f"""SELECT c.procedure_id, c.chunk_no, c.start_line, c.end_line,
                    bm25(card_fts, {HEAD_WEIGHT}, 1.0) * (1 + {EXPORT_BONUS} * p.is_export) AS score,
                    p.name AS procedure_name, m.name AS module_name, m.source_id,
-                   (SELECT COUNT(*) FROM calls_resolved r WHERE r.callee_id = p.id) AS callers
+                   (SELECT COUNT(*) FROM calls_resolved r WHERE r.callee_id = p.id) AS callers,
+                   {_RESULT_COLUMNS}, c.content_hash, 'fts' AS match
             FROM card_fts f
             JOIN card_chunks c ON c.id = f.rowid
             JOIN procedures p ON p.id = c.procedure_id
