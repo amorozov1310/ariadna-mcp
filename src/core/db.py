@@ -273,8 +273,9 @@ END;
 -- урожайности». По модулю формы: правка формы меняет хеш модуля
 -- (module_file_hash учитывает Form.xml), и её реквизиты пересобираются вместе
 -- с модулем; удаление модуля удаляет их каскадом. Таблица новая (IF NOT
--- EXISTS) — в старом индексе она заполнится при следующем reindex без
--- переразбора модулей (Indexer.index_bsl).
+-- EXISTS) — в старом индексе она заполнится при следующем reindex: у
+-- неизменённых модулей форм реквизиты дочитываются без переразбора
+-- (Indexer.index_bsl), если не сменился отпечаток парсера.
 CREATE TABLE IF NOT EXISTS form_attributes (
     id         INTEGER PRIMARY KEY,
     module_id  INTEGER NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
