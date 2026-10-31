@@ -10,6 +10,9 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<RegisterRecords>
+				<xr:Item xsi:type="xr:MDObjectRef">AccumulationRegister.ТоварыНаСкладах</xr:Item>
+			</RegisterRecords>
 		</Properties>
 		<ChildObjects>
 			<Attribute uuid="39a1657d-9da8-525e-a95a-9be0a7cc20e2">

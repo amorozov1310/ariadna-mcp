@@ -89,6 +89,9 @@ class MetadataObject:
     type_desc: str = ''
     # Raw properties
     properties: dict[str, str] = field(default_factory=dict)
+    # Документ: регистры, по которым он делает движения («РегистрНакопления.X»);
+    # только из XML-выгрузки (RegisterRecords), см. register_info.
+    register_records: list[str] = field(default_factory=list)
 
 
 # ============================================

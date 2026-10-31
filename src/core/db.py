@@ -269,6 +269,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS card_fts USING fts5(
 CREATE TRIGGER IF NOT EXISTS card_chunks_ad AFTER DELETE ON card_chunks BEGIN
     DELETE FROM card_fts WHERE rowid = old.id;
 END;
+-- Свойства объекта для запроса к данным (src/core/register_info.py): вид
+-- регистра, периодичность, режим записи, план счетов; у документа —
+-- регистры, по которым он делает движения (ключ «Движения», строка на
+-- регистр). Новая таблица (IF NOT EXISTS) — заполнится при следующем reindex.
+CREATE TABLE IF NOT EXISTS object_properties (
+    object_id  INTEGER NOT NULL REFERENCES metadata_objects(id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_properties_object ON object_properties(object_id);
+CREATE INDEX IF NOT EXISTS idx_object_properties_value ON object_properties(key, value);
 -- Реквизиты форм (Form.xml) — для search_attributes: «где на форме индекс
 -- урожайности». По модулю формы: правка формы меняет хеш модуля
 -- (module_file_hash учитывает Form.xml), и её реквизиты пересобираются вместе
@@ -565,7 +576,7 @@ class Database:
         """Clear all data, keep schema."""
         if not self.conn:
             self.connect()
-        for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes',
+        for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes', 'object_properties',
                       'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:
