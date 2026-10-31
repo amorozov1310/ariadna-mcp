@@ -1,5 +1,5 @@
 """
-Стенд оценки поиска процедур (шаг 5, docs/hybrid-search.md).
+Стенд оценки поиска процедур и метаданных (шаг 5, docs/hybrid-search.md).
 
 Набор вопросов — YAML или JSON (реальные наборы — в data/eval/, вне Git):
 
@@ -11,11 +11,23 @@
         expect:                 # правильные ответы; [] — в конфигурации этого нет
           - module: "ОбщийМодуль.РасчетСебестоимости"   # «.Модуль» можно не писать
             procedure: "РассчитатьСебестоимость"         # без procedure — любой из модуля
+      - id: 2
+        kind: data
+        query: "сколько должны пайщикам"
+        expect:                 # ответ — объект метаданных (вопрос к данным базы)
+          - object: "РегистрНакопления.ВзаиморасчетыПоАренде"
+            attribute: "Сумма"  # необязательно: реквизит, измерение, ресурс
 
 Методы — как агент вызвал бы поиск одним запросом:
   procedures — search_procedures(query): подстрока в имени процедуры;
   code       — search_code(query): фраза в тексте модулей, строка → процедура;
-  cards      — search_cards(query): BM25 по карточкам процедур.
+  cards      — search_cards(query): BM25 по карточкам процедур;
+  metadata   — search_metadata(query): объект метаданных (реквизит ответа не
+               проверяется — объект найден, дальше get_object_details);
+  attributes — search_attributes(query): реквизит объекта или его формы.
+
+По умолчанию — методы процедур; для вопросов к метаданным:
+--methods metadata,attributes.
 
 Метрики по вопросам с ответом: hit@1/@5/@10 (правильный ответ в топ-K),
 MRR (1/место первого правильного), задержка. По отрицательным — сколько
@@ -35,6 +47,7 @@ from pathlib import Path
 from .cards import search_cards
 
 METHODS = ('procedures', 'code', 'cards')
+METADATA_METHODS = ('metadata', 'attributes')
 DEPTH = 10
 
 
@@ -43,7 +56,8 @@ class Case:
     id: str
     kind: str
     query: str
-    expect: list[tuple[str, str]]   # (модуль casefold, процедура casefold или '')
+    # (модуль или объект casefold, процедура или реквизит casefold или '')
+    expect: list[tuple[str, str]]
 
 
 @dataclass
@@ -74,16 +88,23 @@ def load_cases(path: str | Path) -> tuple[str, list[Case]]:
         data = json.loads(text)
     cases = []
     for i, c in enumerate(data.get('cases') or [], 1):
-        expect = [(_norm_module(e['module']), (e.get('procedure') or '').strip().casefold())
+        expect = [(_norm_module(e.get('module') or e.get('object') or ''),
+                   (e.get('procedure') or e.get('attribute') or '').strip().casefold())
                   for e in (c.get('expect') or [])]
         cases.append(Case(str(c.get('id', i)), c.get('kind', ''), str(c['query']), expect))
     return data.get('project', ''), cases
 
 
-def _matches(module: str, procedure: str, expect: list[tuple[str, str]]) -> bool:
+def _matches(module: str, procedure: str, expect: list[tuple[str, str]],
+             any_member: bool = False) -> bool:
+    """module/procedure — строка выдачи: модуль и процедура или объект и
+    реквизит. Реквизит формы объекта (Справочник.X.Форма.Y) — ответ про
+    объект Справочник.X. any_member — член объекта не сверяется (metadata:
+    найден объект — дальше get_object_details)."""
     mod = _norm_module(module)
     proc = procedure.casefold()
-    return any(mod == em and (not ep or proc == ep) for em, ep in expect)
+    return any((mod == em or mod.startswith(em + '.форма.'))
+               and (any_member or not ep or proc == ep) for em, ep in expect)
 
 
 def _ranked(engine, method: str, query: str) -> list[tuple[str, str]]:
@@ -92,6 +113,10 @@ def _ranked(engine, method: str, query: str) -> list[tuple[str, str]]:
         rows = [(r['module_name'], r['name']) for r in engine.search_procedures(query, limit=DEPTH * 3)]
     elif method == 'cards':
         rows = [(r['module_name'], r['procedure_name']) for r in search_cards(engine, query, limit=DEPTH)]
+    elif method == 'metadata':
+        rows = [(r['full_name'], '') for r in engine.search_metadata(query, limit=DEPTH)]
+    elif method == 'attributes':
+        rows = [(r['object_full_name'], r['name']) for r in engine.search_attributes(query, limit=DEPTH)]
     elif method == 'code':
         conn = engine.db.read_conn()
         rows = []
@@ -121,9 +146,10 @@ def evaluate(engine, cases: list[Case], methods=METHODS, progress=None) -> list[
             t = time.perf_counter()
             ranked = _ranked(engine, method, case.query)
             ms = (time.perf_counter() - t) * 1000
-            rank = next((i for i, (m, p) in enumerate(ranked, 1) if _matches(m, p, case.expect)), None)
+            rank = next((i for i, (m, p) in enumerate(ranked, 1)
+                         if _matches(m, p, case.expect, any_member=method == 'metadata')), None)
             results.append(CaseResult(case, method, rank, len(ranked), ms,
-                                      [f'{m}.{p}' for m, p in ranked[:3]]))
+                                      [f'{m}.{p}' if p else m for m, p in ranked[:3]]))
     return results
 
 
@@ -178,7 +204,8 @@ def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog='python -m src.core.search_eval', description=__doc__.splitlines()[1])
     ap.add_argument('cases', help='набор вопросов .yaml/.json')
     ap.add_argument('--project', help='id проекта (по умолчанию — project из набора)')
-    ap.add_argument('--methods', default=','.join(METHODS))
+    ap.add_argument('--methods', default=','.join(METHODS),
+                    help=f"через запятую: {', '.join(METHODS + METADATA_METHODS)}")
     ap.add_argument('--details', action='store_true', help='построчно: место и топ-3 по каждому вопросу')
     ap.add_argument('--data-dir', default=os.environ.get('DATA_DIR', './data'))
     ap.add_argument('--index-dir', default=os.environ.get('INDEX_DIR') or None)

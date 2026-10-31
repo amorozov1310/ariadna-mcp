@@ -119,3 +119,37 @@ def test_cli_runs_against_a_data_dir(data_dir, capsys):
     assert _main([str(FIXTURES / 'eval_ru.json'), '--data-dir', data_dir, '--details']) == 0
     out = capsys.readouterr().out
     assert 'Проект p1, вопросов 20' in out and 'cards' in out and '[1 exact] cards: #1' in out
+
+
+def test_metadata_and_attribute_cases(data_dir, tmp_path):
+    """Вопросы к данным: ответ — объект метаданных (metadata) или его
+    реквизит, в том числе реквизит формы объекта (attributes)."""
+    path = tmp_path / 'meta.yaml'
+    path.write_text('''project: p1
+cases:
+  - id: m1
+    kind: data
+    query: "склады"
+    expect:
+      - {object: "Справочник.Склады", attribute: "ПроцентЗаполнения"}
+  - id: m2
+    kind: data
+    query: "процент заполнения склада"
+    expect:
+      - {object: "Справочник.Склады", attribute: "ПроцентЗаполнения"}
+  - id: m3
+    kind: negative
+    query: "ипотека"
+    expect: []
+''', encoding='utf-8')
+    _, cases = load_cases(path)
+    assert cases[0].expect == [('справочник.склады', 'процентзаполнения')]
+    pm = ProjectManager(data_dir)
+    try:
+        results = evaluate(pm.get_search('p1'), cases, ('metadata', 'attributes'))
+    finally:
+        pm.close_all()
+    rank = {(r.case.id, r.method): r.rank for r in results}
+    assert rank[('m1', 'metadata')] == 1            # объект найден — реквизит не сверяется
+    assert rank[('m2', 'attributes')] == 1          # реквизит формы — ответ про объект
+    assert rank[('m3', 'metadata')] is None

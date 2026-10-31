@@ -31,6 +31,26 @@ SEARCH_CODE_FTS_MODULES = 50         # модулей-кандидатов из 
 SEARCH_CODE_FALLBACK_MODULES = 300   # модулей в резервном просмотре без FTS
 SEARCH_CODE_MAX_PER_MODULE = 5       # вхождений из одного модуля
 
+# Ранжированный поиск объектов метаданных (search_metadata): вопрос своими
+# словами — «сколько должны пайщикам», «где сейчас техника» — по основам слов
+# (cards.card_fts_query), с весом синонима выше имени и с учётом реквизитов
+# объекта: «расход горючего», «себестоимость» — это ресурсы регистра, а не
+# его синоним. Подобрано на наборе вопросов к данным (docs/hybrid-search.md).
+METADATA_FTS_WEIGHTS = (1.0, 3.0, 6.0, 1.0)      # full_name, name, synonym, comment
+ATTRIBUTE_FTS_WEIGHTS = (2.0, 4.0, 0.5, 1.0)     # name, synonym, type_desc, comment
+METADATA_ATTRIBUTE_WEIGHT = 0.5                  # доля лучшего реквизита в ранге объекта
+METADATA_DATA_KIND_BOOST = 1.3                   # объекты, в которых лежат данные
+METADATA_DATA_KINDS = ('РегистрНакопления', 'РегистрСведений', 'РегистрБухгалтерии',
+                       'РегистрРасчета', 'Документ', 'Справочник', 'ПланВидовХарактеристик',
+                       'ПланСчетов', 'Перечисление')
+# Одноимённые объекты разных видов (Справочник.Номенклатура и
+# ОпределяемыйТип.Номенклатура): сначала те, в которых лежат данные, в порядке
+# METADATA_DATA_KINDS.
+_DATA_KIND_ORDER = ('CASE m.kind ' + ' '.join(f"WHEN '{k}' THEN {i}" for i, k in enumerate(METADATA_DATA_KINDS))
+                    + f' ELSE {len(METADATA_DATA_KINDS)} END')
+METADATA_POOL = 200                              # кандидатов-объектов из FTS
+METADATA_ATTRIBUTE_POOL = 400                    # кандидатов-реквизитов из FTS
+
 
 class CodeSearchResult(NamedTuple):
     """Результат search_code_limited: вхождения и оговорки к ним."""
@@ -161,36 +181,63 @@ class SearchEngine:
 
         ``kind`` accepts either the internal RU canonical name or its EN
         alias, any case (D11/Этап 2) — e.g. "Catalog" == "справочник" == "Справочник".
+
+        Порядок выдачи: объект с именем, равным запросу; объекты, где есть
+        все слова запроса (как раньше); затем ранжированный поиск по основам
+        слов с учётом реквизитов (_ranked_metadata) — для вопросов своими
+        словами. Резервный LIKE — только если не нашлось ничего.
         """
         conn = self.db.read_conn()
         kind = canonicalize_kind(kind) if kind else kind
-
-        # Try FTS5 first
-        fts_query = self._fts_query(query)
-        conditions = ["metadata_fts MATCH ?"]
-        params: list = [fts_query]
+        filters, filter_params = [], []
         if kind:
-            conditions.append("m.kind = ?")
-            params.append(kind)
+            filters.append("m.kind = ?")
+            filter_params.append(kind)
         if source_id:
-            conditions.append("m.source_id = ?")
-            params.append(source_id)
-        where = ' AND '.join(conditions)
-        params.extend([limit, offset])
+            filters.append("m.source_id = ?")
+            filter_params.append(source_id)
+        columns = "m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id"
+        need = offset + limit
 
-        rows = _fts_rows(
+        q_cf = query.strip().casefold()
+        exact = conn.execute(
+            f"""SELECT {columns} FROM metadata_objects m
+                WHERE (m.name_cf = ? OR m.full_name_cf = ?)
+                {''.join(' AND ' + f for f in filters)}
+                ORDER BY {_DATA_KIND_ORDER}, m.full_name LIMIT ?""",
+            [q_cf, q_cf] + filter_params + [need]).fetchall()
+
+        where = ' AND '.join(["metadata_fts MATCH ?"] + filters)
+        precise = _fts_rows(
             conn,
-            f"""SELECT m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id
+            f"""SELECT {columns}
                 FROM metadata_fts f JOIN metadata_objects m ON m.id = f.rowid
                 WHERE {where}
-                ORDER BY rank LIMIT ? OFFSET ?""",
-            params)
+                ORDER BY rank LIMIT ?""",
+            [self._fts_query(query)] + filter_params + [need])
+
+        rows, seen = [], set()
+        for r in list(exact) + list(precise):
+            key = (r['full_name'], r['source_id'])
+            if key not in seen:
+                seen.add(key)
+                rows.append(dict(r))
+        if len(rows) < need:
+            for r in self._ranked_metadata(query, filters, filter_params):
+                key = (r['full_name'], r['source_id'])
+                if key not in seen:
+                    seen.add(key)
+                    rows.append(r)
+                    if len(rows) >= need:
+                        break
+        found = bool(rows)
+        rows = rows[offset:offset + limit]
 
         # LIKE fallback: progressively shorter prefixes (helps with inflection,
         # primarily Russian endings, but works language-agnostically). D5:
         # matched against the case-folded columns so Cyrillic (and EN) case
         # doesn't matter — SQLite's built-in NOCASE only folds ASCII.
-        if not rows:
+        if not found:
             for q in self._like_variants(query):
                 q_cf = q.casefold()
                 conds = ["(name_cf LIKE '%' || ? || '%' OR "
@@ -213,6 +260,56 @@ class SearchEngine:
                     break
 
         return self._attach_source_labels([dict(r) for r in rows])
+
+    def _ranked_metadata(self, query: str, filters: list[str], filter_params: list) -> list[dict]:
+        """Объекты по любому из слов запроса (основы и корни, как у карточек
+        процедур), BM25 с весами METADATA_FTS_WEIGHTS; к рангу объекта
+        добавляется лучший из его реквизитов (METADATA_ATTRIBUTE_WEIGHT), а
+        объекты с данными получают METADATA_DATA_KIND_BOOST. Объект, найденный
+        только по реквизиту, тоже попадает в выдачу."""
+        from .cards import card_fts_query
+        match = card_fts_query(query)
+        if not match:
+            return []
+        conn = self.db.read_conn()
+        extra = ''.join(' AND ' + f for f in filters)
+        a, b, c, d = METADATA_FTS_WEIGHTS
+        scored: dict[int, tuple[float, dict]] = {}
+        for r in _fts_rows(conn, f"""
+                SELECT m.id, m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id,
+                       bm25(metadata_fts, {a}, {b}, {c}, {d}) AS score
+                FROM metadata_fts f JOIN metadata_objects m ON m.id = f.rowid
+                WHERE metadata_fts MATCH ?{extra}
+                ORDER BY score LIMIT ?""", [match] + filter_params + [METADATA_POOL]):
+            row = dict(r)
+            scored[row.pop('id')] = (row.pop('score'), row)
+
+        a, b, c, d = ATTRIBUTE_FTS_WEIGHTS
+        best: dict[int, float] = {}
+        for r in _fts_rows(conn, f"""
+                SELECT a.object_id, bm25(attributes_fts, {a}, {b}, {c}, {d}) AS score
+                FROM attributes_fts f JOIN attributes a ON a.id = f.rowid
+                JOIN metadata_objects m ON m.id = a.object_id
+                WHERE attributes_fts MATCH ?{extra}
+                ORDER BY score LIMIT ?""", [match] + filter_params + [METADATA_ATTRIBUTE_POOL]):
+            best[r['object_id']] = min(best.get(r['object_id'], 0.0), r['score'])
+        missing = [oid for oid in best if oid not in scored]
+        if missing:
+            marks = ','.join('?' * len(missing))
+            for r in conn.execute(
+                    f"""SELECT m.id, m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id
+                        FROM metadata_objects m WHERE m.id IN ({marks})""", missing):
+                row = dict(r)
+                scored[row.pop('id')] = (0.0, row)
+
+        def rank(item):
+            oid, (score, row) = item
+            # BM25 в SQLite отрицательный: меньше — лучше.
+            score += METADATA_ATTRIBUTE_WEIGHT * best.get(oid, 0.0)
+            if row['kind'] in METADATA_DATA_KINDS:
+                score *= METADATA_DATA_KIND_BOOST
+            return score
+        return [row for _, (_, row) in sorted(scored.items(), key=rank)]
 
     def get_object_details(self, full_name: str,
                             source_id: str | None = None) -> dict | None:
