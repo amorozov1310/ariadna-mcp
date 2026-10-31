@@ -10,6 +10,8 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<InformationRegisterPeriodicity>Second</InformationRegisterPeriodicity>
+			<WriteMode>Independent</WriteMode>
 		</Properties>
 		<ChildObjects>
 			<Dimension uuid="df8e4c91-c693-55ec-9088-d243523fccf4">

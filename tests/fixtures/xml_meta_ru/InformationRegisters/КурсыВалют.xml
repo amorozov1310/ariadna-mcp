@@ -10,6 +10,8 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<InformationRegisterPeriodicity>Day</InformationRegisterPeriodicity>
+			<WriteMode>Independent</WriteMode>
 		</Properties>
 		<ChildObjects>
 			<Dimension uuid="b0abc895-5489-5c9d-a5ad-44bd615fd574">

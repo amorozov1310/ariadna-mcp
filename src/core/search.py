@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .db import Database
+from .register_info import RECORDS, query_hints
 from .report_parser import canonicalize_kind
 
 logger = logging.getLogger('ariadna')
@@ -30,6 +31,7 @@ logger = logging.getLogger('ariadna')
 SEARCH_CODE_FTS_MODULES = 50         # модулей-кандидатов из FTS
 SEARCH_CODE_FALLBACK_MODULES = 300   # модулей в резервном просмотре без FTS
 SEARCH_CODE_MAX_PER_MODULE = 5       # вхождений из одного модуля
+RECORDED_BY_BRIEF = 15               # документов-регистраторов в detail="brief"
 
 # Ранжированный поиск объектов метаданных (search_metadata): вопрос своими
 # словами — «сколько должны пайщикам», «где сейчас техника» — по основам слов
@@ -393,6 +395,18 @@ class SearchEngine:
             """SELECT name, is_server, is_client, is_global, is_privileged, server_call
                FROM modules WHERE object_id = ?""", (obj_id,)).fetchone()
 
+        # Для запроса к данным (register_info): свойства регистра, движения
+        # документа и, для регистра, документы, которые делают по нему движения.
+        properties: dict[str, list[str]] = {}
+        for r in conn.execute("SELECT key, value FROM object_properties WHERE object_id = ? "
+                              "ORDER BY rowid", (obj_id,)):
+            properties.setdefault(r['key'], []).append(r['value'])
+        recorded_by = [r['full_name'] for r in conn.execute(
+            """SELECT DISTINCT m.full_name FROM object_properties p
+               JOIN metadata_objects m ON m.id = p.object_id
+               WHERE p.key = ? AND p.value = ? ORDER BY m.full_name""",
+            (RECORDS, obj['full_name']))]
+
         obj_dict = dict(obj)
         # Ambiguity info (multiple sources have this full_name)
         other_matches = [
@@ -408,6 +422,8 @@ class SearchEngine:
             'forms': [dict(f) for f in forms],
             'enum_values': [dict(e) for e in enum_values],
             'module': dict(module) if module else None,
+            'properties': properties,
+            'recorded_by': recorded_by,
             'source_id': obj['source_id'],
             'source_label': obj['source_label'] or obj['source_id'],
             'matches': other_matches,       # all sources that have this full_name
@@ -896,6 +912,22 @@ def format_object_details(details: dict, detail: str = 'brief') -> str:
         other = [m['source_label'] for m in matches if m['source_id'] != details.get('source_id')]
         if other:
             lines.append(f"⚠ Этот объект есть также в источниках: {', '.join(other)}")
+
+    resources = [a['name'] for a in details.get('attributes', []) if a['kind'] == 'Ресурс']
+    hints = query_hints(obj['full_name'], obj.get('kind', ''), details.get('properties') or {},
+                        resources)
+    if hints:
+        lines.append('')
+        lines.extend(hints)
+    records = (details.get('properties') or {}).get(RECORDS) or []
+    if records:
+        lines.append(f"\nДвижения по регистрам ({len(records)}): {', '.join(records)}")
+    recorded_by = details.get('recorded_by') or []
+    if recorded_by:
+        shown = recorded_by if detail == 'full' else recorded_by[:RECORDED_BY_BRIEF]
+        more = (f" … и ещё {len(recorded_by) - len(shown)} (detail=\"full\")"
+                if len(shown) < len(recorded_by) else '')
+        lines.append(f"\nДвижения делают документы ({len(recorded_by)}): {', '.join(shown)}{more}")
 
     if details.get('module'):
         m = details['module']

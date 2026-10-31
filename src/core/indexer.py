@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 from .db import Database
+from .register_info import object_properties
 from .report_parser import parse_report, ConfigInfo, MetadataObject
 
 
@@ -106,6 +107,10 @@ class Indexer:
             conn.execute("DELETE FROM attributes WHERE object_id=?", (obj_id,))
             conn.execute("DELETE FROM forms WHERE object_id=?", (obj_id,))
             conn.execute("DELETE FROM subsystem_content WHERE subsystem_id=?", (obj_id,))
+            conn.execute("DELETE FROM object_properties WHERE object_id=?", (obj_id,))
+            conn.executemany(
+                "INSERT INTO object_properties (object_id, key, value) VALUES (?, ?, ?)",
+                [(obj_id, k, v) for k, v in object_properties(obj)])
 
             # Attributes
             for attr in obj.attributes:

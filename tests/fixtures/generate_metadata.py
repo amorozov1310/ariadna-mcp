@@ -351,7 +351,7 @@ def build_ru() -> Report:
         r.line(3, 'СтандартныеРеквизиты')
         r.line(3, 'Характеристики')
         r.line(3, 'ВводитсяНаОсновании:')
-        r.array(3, 'Движения', ['РегистрНакопления.ТоварыНаСкладах'])
+        r.array(3, 'Движения', _RECORDS_RU.get(path, []))
         for aname, asyn, types, check in attrs:
             r.field(3, f'{path}.Реквизиты.{aname}', aname, asyn, types, check)
         tspath = f'{path}.ТабличныеЧасти.Товары'
@@ -611,6 +611,21 @@ _UUID_NS = uuid.UUID('0b7c1d8e-5f3a-4c2e-9a61-2d4e8f0a1b3c')
 # Обратные таблицы — только для того, что встречается в модели выше.
 _REF_EN = {'СправочникСсылка': 'CatalogRef', 'ДокументСсылка': 'DocumentRef',
            'ПеречислениеСсылка': 'EnumRef', 'ОпределяемыйТип': 'DefinedType'}
+# Движения документов (отчёт: «Движения», выгрузка: RegisterRecords).
+_RECORDS_RU = {
+    'Документ.РеализацияТоваров': ['РегистрНакопления.ТоварыНаСкладах', 'РегистрНакопления.Продажи'],
+}
+for _doc in ('ПоступлениеТоваров', 'ПеремещениеТоваров', 'ИнвентаризацияТоваров',
+             'ВозвратТоваровПоставщику'):
+    _RECORDS_RU[f'Документ.{_doc}'] = ['РегистрНакопления.ТоварыНаСкладах']
+# Свойства регистров: ключ отчёта (RU/EN) → (тег выгрузки, значения RU → EN).
+_REGISTER_PROPS = {
+    'ВидРегистра': ('RegisterType', {'Остатки': 'Balance', 'Обороты': 'Turnovers'}),
+    'RegisterType': ('RegisterType', {}),
+    'ПериодичностьРегистраСведений': ('InformationRegisterPeriodicity',
+                                      {'День': 'Day', 'Непериодический': 'Nonperiodical'}),
+    'InformationRegisterPeriodicity': ('InformationRegisterPeriodicity', {}),
+}
 _VALUE_EN = {'ВыдаватьОшибку': 'ShowError', 'НеПроверять': 'DontCheck', 'ДляЭлемента': 'ForItem',
              'НеИспользовать': 'DontUse'}
 _MODULE_FLAGS = ('Global', 'ClientManagedApplication', 'Server', 'ExternalConnection',
@@ -683,6 +698,17 @@ def _object_xml(obj, kind_en, lang, nested_subsystems, english):
         props += f'{t}<ReturnValuesReuse>{_VALUE_EN.get(mi.reuse, mi.reuse)}</ReturnValuesReuse>\n'
     if obj.type_desc:
         props += _type_xml(obj.type_desc, t)
+    for key, value in obj.properties.items():
+        if key in _REGISTER_PROPS:
+            tag, values = _REGISTER_PROPS[key]
+            props += f'{t}<{tag}>{values.get(value, value)}</{tag}>\n'
+    if kind_en == 'InformationRegister':
+        props += f'{t}<WriteMode>Independent</WriteMode>\n'
+    records = _RECORDS_RU.get(obj.full_name, [])
+    if records:
+        items = [f'{_KIND_EN[r.split(".", 1)[0]]}.{r.split(".", 1)[1]}' for r in records]
+        props += f'{t}<RegisterRecords>\n' + ''.join(
+            f'{t}\t<xr:Item xsi:type="xr:MDObjectRef">{i}</xr:Item>\n' for i in items) + f'{t}</RegisterRecords>\n'
     if obj.subsystem_info is not None:
         items = []
         for ref in obj.subsystem_info.content:

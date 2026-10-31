@@ -253,6 +253,12 @@ _MODULE_FLAGS = {
 }
 
 
+_REGISTER_KINDS = ('AccumulationRegister', 'InformationRegister', 'AccountingRegister',
+                   'CalculationRegister')
+_REGISTER_PROPERTIES = ('RegisterType', 'InformationRegisterPeriodicity', 'WriteMode',
+                        'ChartOfAccounts', 'Correspondence')
+
+
 def _build_object(el, kind_en: str, kind_ru: str, full_name: str, lang: _Lang) -> MetadataObject:
     props = _child(el, 'Properties')
     obj = MetadataObject(
@@ -280,6 +286,21 @@ def _build_object(el, kind_en: str, kind_ru: str, full_name: str, lang: _Lang) -
         obj.subsystem_info = SubsystemInfo(name=obj.name, content=content)
     elif kind_en in ('DefinedType', 'SessionParameter', 'Constant'):
         obj.type_desc = lang.render_type(_child(props, 'Type'))
+    elif kind_en in _REGISTER_KINDS:
+        # Как строить запрос к регистру (register_info): исходные значения,
+        # к одному виду их приводит register_info.object_properties.
+        for prop in _REGISTER_PROPERTIES:
+            value = _text(props, prop)
+            if value:
+                obj.properties[prop] = value
+    elif kind_en == 'Document':
+        for item in _children(_child(props, 'RegisterRecords'), 'Item'):
+            ref = (item.text or '').strip()
+            if not ref or _UUID.match(ref):
+                continue
+            head, dot, tail = ref.partition('.')
+            # Полное имя — с русским видом, как у объектов в индексе.
+            obj.register_records.append(_KIND_RU.get(head, head) + dot + tail)
 
     for child in _children_of(el, 'ChildObjects'):
         tag = _local(child.tag)

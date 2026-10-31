@@ -10,6 +10,7 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<RegisterType>Balance</RegisterType>
 		</Properties>
 		<ChildObjects>
 			<Dimension uuid="4f7ee787-abd9-5d1a-91cd-1e9b36ed93c3">
