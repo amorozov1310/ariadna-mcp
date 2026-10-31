@@ -182,7 +182,8 @@ class SearchEngine:
         ``kind`` accepts either the internal RU canonical name or its EN
         alias, any case (D11/Этап 2) — e.g. "Catalog" == "справочник" == "Справочник".
 
-        Порядок выдачи: объект с именем, равным запросу; объекты, где есть
+        Порядок выдачи: объект с именем, равным запросу, затем с таким
+        синонимом (Справочник.схПоля — «Поля»); объекты, где есть
         все слова запроса (как раньше); затем ранжированный поиск по основам
         слов с учётом реквизитов (_ranked_metadata) — для вопросов своими
         словами. Резервный LIKE — только если не нашлось ничего.
@@ -202,10 +203,10 @@ class SearchEngine:
         q_cf = query.strip().casefold()
         exact = conn.execute(
             f"""SELECT {columns} FROM metadata_objects m
-                WHERE (m.name_cf = ? OR m.full_name_cf = ?)
+                WHERE (m.name_cf = ? OR m.full_name_cf = ? OR m.synonym_cf = ?)
                 {''.join(' AND ' + f for f in filters)}
-                ORDER BY {_DATA_KIND_ORDER}, m.full_name LIMIT ?""",
-            [q_cf, q_cf] + filter_params + [need]).fetchall()
+                ORDER BY m.synonym_cf = ?, {_DATA_KIND_ORDER}, m.full_name LIMIT ?""",
+            [q_cf, q_cf, q_cf] + filter_params + [q_cf, need]).fetchall()
 
         where = ' AND '.join(["metadata_fts MATCH ?"] + filters)
         precise = _fts_rows(
@@ -237,7 +238,11 @@ class SearchEngine:
         # primarily Russian endings, but works language-agnostically). D5:
         # matched against the case-folded columns so Cyrillic (and EN) case
         # doesn't matter — SQLite's built-in NOCASE only folds ASCII.
-        if not found:
+        # Только для запроса из одного слова: у фразы обрезается вся строка
+        # («сколько телят» → … → «ско»), и находилось случайное («НесКОЛЬко»).
+        # Вопросу, на который ничего не нашлось, честнее пустой ответ —
+        # агент переформулирует его словами предметной области.
+        if not found and len(query.split()) == 1:
             for q in self._like_variants(query):
                 q_cf = q.casefold()
                 conds = ["(name_cf LIKE '%' || ? || '%' OR "
