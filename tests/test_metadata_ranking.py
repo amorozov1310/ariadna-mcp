@@ -79,3 +79,22 @@ def test_paging_is_consistent(engine):
 def test_nothing_found_falls_back_to_like(engine):
     # Ни одно слово не совпадает как префикс — остаётся резервный LIKE.
     assert 'Справочник.Номенклатура' in _names(engine, 'менклатур')
+
+
+def test_question_words_are_ignored(engine):
+    """«сколько», «где», «какие» не ищутся: как префиксы они совпадают с
+    чужими именами, а предмет вопроса не уточняют."""
+    assert _names(engine, 'сколько товаров на складах')[:3] == _names(engine, 'товаров на складах')[:3]
+    assert 'РегистрСведений.КурсыВалют' in _names(engine, 'где хранится курс валюты')[:3]
+
+
+def test_unknown_phrase_gives_nothing_instead_of_noise(engine):
+    """Фразе без совпадений — пустой ответ: резервный LIKE по обрезанной
+    фразе («сколько тел» → «ско») находил случайное."""
+    assert _names(engine, 'сколько телят родилось') == []
+    assert 'Справочник.Номенклатура' in _names(engine, 'менклатур')   # одно слово — как раньше
+
+
+def test_synonym_equal_to_query_counts_as_exact(engine):
+    assert _names(engine, 'Курсы валют')[0] == 'РегистрСведений.КурсыВалют'
+    assert _names(engine, 'товары на складах')[0] == 'РегистрНакопления.ТоварыНаСкладах'
