@@ -1,4 +1,33 @@
 {
+  "add_glossary_term": {
+    "params": {
+      "target": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "terms": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "note": {
+        "type": "string",
+        "required": false,
+        "default": ""
+      }
+    },
+    "read_only": false,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
   "diagnose_index": {
     "params": {
       "project_id": {
@@ -220,6 +249,35 @@
       "result": "string"
     }
   },
+  "list_glossary": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "query": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 50
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
   "list_objects": {
     "params": {
       "project_id": {
@@ -291,6 +349,25 @@
     },
     "read_only": false,
     "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
+  "remove_glossary_term": {
+    "params": {
+      "entry_id": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": false,
+    "destructive": true,
     "output": {
       "result": "string"
     }

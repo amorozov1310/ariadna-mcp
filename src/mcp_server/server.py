@@ -64,7 +64,9 @@ INSTRUCTIONS = """\
   такие объекты называют в 1С, без «сколько/где»: «взаиморасчеты аренда земельных
   долей», «приплод животных», «текущая позиция основного средства»; показатель
   («расход горючего», «себестоимость») — search_attributes, это реквизит или ресурс.
-  Пусто или мимо — переформулируйте синонимами и повторите; дальше get_object_details:
+  Пусто или мимо — переформулируйте синонимами и повторите; когда нашли, а пользователь
+  называл объект иначе, — add_glossary_term (слова пользователя → объект), и в следующий
+  раз поиск найдёт его сразу; дальше get_object_details:
   у регистра там вид, периодичность и готовое обращение для запроса (.Остатки(&Период),
   .СрезПоследних, поля «РесурсОстаток»), у документа — регистры его движений.
 
@@ -90,7 +92,7 @@ if HAS_MCP:
         match_start_line: int = Field(description='Начало найденного фрагмента')
         match_end_line: int = Field(description='Конец найденного фрагмента')
         content_hash: str = Field(description='Отпечаток карточки процедуры (sha256)')
-        match_methods: list[str] = Field(description='Как найдено: exact_name — имя равно запросу, fts — по тексту карточки')
+        match_methods: list[str] = Field(description='Как найдено: exact_name — имя равно запросу, fts — по тексту карточки, glossary — по словарю проекта')
         evidence_kind: str = Field(description='source_excerpt — фрагмент из файла; card_header — файл недоступен')
         snippet: str = Field(description='Строка кода рядом с совпадением')
         snippet_line: int
@@ -185,6 +187,51 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         source_id: Annotated[str | None, Field(description="ID источника (пусто = все)")] = None,
     ) -> str:
         return run('reindex', project_id=project_id, source_id=source_id)
+
+    @mcp.tool(
+        description="Записать в словарь проекта, какими словами пользователи называют объект, "
+                     "реквизит или процедуру: «пайщики, долги пайщикам» → "
+                     "РегистрНакопления.ВзаиморасчетыПоАренде. Дальше search_metadata, "
+                     "search_attributes и semantic_search_code находят цель по этим словам "
+                     "первой, с пометкой «словарь». Записывай, когда выяснил, что пользователь "
+                     "называет объект не так, как он назван в конфигурации. Цель — полное имя "
+                     "из выдачи поиска (проверяется по индексу); термины добавляются к "
+                     "прежним; словарь хранится вне индекса и переживает переиндексацию.",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    )
+    def add_glossary_term(
+        target: Annotated[str, Field(description="Полное имя: Справочник.X, РегистрНакопления.X.Сумма (реквизит), ОбщийМодуль.X.Модуль.Процедура")],
+        terms: Annotated[str, Field(description="Слова пользователей через запятую: «пайщики, долги пайщикам»")],
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        note: Annotated[str, Field(description="Пояснение: что это и когда так говорят (необязательно)")] = '',
+    ) -> str:
+        return run('add_glossary_term', project_id=project_id, target=target, terms=terms, note=note)
+
+    @mcp.tool(
+        description="Записи словаря проекта: слова пользователей → объекты, реквизиты, процедуры "
+                     "(id, цель, термины, примечание, кто и когда записал). query — только "
+                     "записи, чьи термины есть в запросе.",
+        annotations=_READ_ONLY,
+    )
+    def list_glossary(
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        query: Annotated[str | None, Field(description="Слова для отбора записей (необязательно)")] = None,
+        limit: Annotated[int, Field(description=_LIMIT)] = 50,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+    ) -> str:
+        return run('list_glossary', project_id=project_id, query=query, limit=limit, offset=offset)
+
+    @mcp.tool(
+        description="Удалить запись из словаря проекта по id (id — в list_glossary). Для "
+                     "ошибочной записи; чтобы добавить термины, удалять не нужно — "
+                     "add_glossary_term дописывает.",
+        annotations=ToolAnnotations(destructiveHint=True),
+    )
+    def remove_glossary_term(
+        entry_id: Annotated[str, Field(description="id записи из list_glossary")],
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+    ) -> str:
+        return run('remove_glossary_term', project_id=project_id, entry_id=entry_id)
 
     @mcp.tool(
         description="Удалить источник из проекта — файлы на диске И данные в индексе. "

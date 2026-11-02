@@ -116,8 +116,12 @@ def resolve_module_ids(conn, module_name: str, source_id: str | None = None) -> 
 class SearchEngine:
     """Search over indexed 1C configuration metadata."""
 
-    def __init__(self, db: Database, source_roots: dict[str, str] | None = None):
+    def __init__(self, db: Database, source_roots: dict[str, str] | None = None,
+                 glossary=None):
         self.db = db
+        # Словарь проекта (glossary.Glossary) — слова пользователей → объекты и
+        # процедуры; None — без словаря (движок построен не через ProjectManager).
+        self.glossary = glossary
         # {source_id: XML dump root on THIS machine} — module files are
         # located from here, not from modules.abs_path: that column holds
         # the path as seen by whichever process built the index, which is
@@ -220,7 +224,7 @@ class SearchEngine:
             [self._fts_query(query)] + filter_params + [need])
 
         rows, seen = [], set()
-        for r in list(exact) + list(precise):
+        for r in list(exact) + self._glossary_objects(query, filters, filter_params) + list(precise):
             key = (r['full_name'], r['source_id'])
             if key not in seen:
                 seen.add(key)
@@ -427,6 +431,7 @@ class SearchEngine:
             'source_id': obj['source_id'],
             'source_label': obj['source_label'] or obj['source_id'],
             'matches': other_matches,       # all sources that have this full_name
+            'glossary': self._glossary_for_object(obj['full_name']),
         }
 
     def search_attributes(self, query: str, type_filter: str | None = None,
@@ -435,7 +440,10 @@ class SearchEngine:
         """Реквизиты по имени, синониму или типу: сначала реквизиты объектов
         метаданных, за ними — реквизиты форм (kind «РеквизитФормы»,
         object_full_name — форма). Постранично по общему списку."""
-        rows = self._object_attributes(query, source_id, offset + limit)
+        rows = self._glossary_attributes(query, source_id)
+        known = {(r['object_full_name'], r['name']) for r in rows}
+        rows += [r for r in self._object_attributes(query, source_id, offset + limit)
+                 if (r['object_full_name'], r['name']) not in known]
         page = rows[offset:offset + limit]
         if len(page) < limit:
             # Реквизиты объектов кончились — страницу дополняют реквизиты форм.
@@ -445,6 +453,118 @@ class SearchEngine:
         if type_filter:
             rows = [r for r in rows if type_filter.lower() in (r.get('type_desc') or '').lower()]
         return self._attach_source_labels(rows)
+
+    # ---------------------------------------------------------- словарь
+    def _glossary_for_object(self, full_name: str) -> list[dict]:
+        """Записи словаря об объекте и о его реквизитах (для карточки объекта)."""
+        if self.glossary is None:
+            return []
+        key = full_name.casefold()
+        return [{'target': e.target, 'terms': e.terms, 'note': e.note}
+                for e in self.glossary.entries()
+                if e.target.casefold() == key or e.target.casefold().startswith(key + '.')]
+
+    def _glossary_matches(self, query: str, kinds: tuple[str, ...]):
+        if self.glossary is None or not query.strip():
+            return []
+        return self.glossary.match(query, kinds)
+
+    def _glossary_objects(self, query: str, filters: list[str], filter_params: list) -> list[dict]:
+        """Объекты из словаря (и объекты реквизитов из словаря) — с пометкой
+        glossary: совпавший термин."""
+        from .glossary import TARGET_ATTRIBUTE, TARGET_OBJECT
+        rows = []
+        conn = self.db.read_conn()
+        for entry, term in self._glossary_matches(query, (TARGET_OBJECT, TARGET_ATTRIBUTE)):
+            name = entry.target if entry.target_kind == TARGET_OBJECT else entry.target.rsplit('.', 1)[0]
+            for r in conn.execute(
+                    f"""SELECT m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id
+                        FROM metadata_objects m WHERE m.full_name_cf = ?
+                        {''.join(' AND ' + f for f in filters)}""",
+                    [name.casefold()] + filter_params):
+                rows.append({**dict(r), 'glossary': term})
+        return rows
+
+    def _glossary_attributes(self, query: str, source_id: str | None) -> list[dict]:
+        from .glossary import TARGET_ATTRIBUTE
+        rows = []
+        for entry, term in self._glossary_matches(query, (TARGET_ATTRIBUTE,)):
+            attr = self.find_attribute(entry.target, source_id)
+            if attr:
+                rows.append({**attr, 'glossary': term})
+        return rows
+
+    def find_attribute(self, target: str, source_id: str | None = None) -> dict | None:
+        """Реквизит по полному имени: «РегистрНакопления.X.Сумма»,
+        «Документ.X.ТЧ.Товары.Цена» (реквизит табличной части) или
+        «Справочник.X.Форма.Y.Реквизит» (реквизит формы). Строка в виде выдачи
+        search_attributes или None."""
+        conn = self.db.read_conn()
+        parts = target.split('.')
+        src = ' AND m.source_id = ?' if source_id else ''
+        extra = [source_id] if source_id else []
+        for cut in range(len(parts) - 1, 1, -1):
+            owner, name = '.'.join(parts[:cut]), '.'.join(parts[cut:])
+            r = conn.execute(
+                f"""SELECT a.name, a.kind, a.type_desc, a.synonym,
+                           m.full_name AS object_full_name, m.source_id
+                    FROM attributes a JOIN metadata_objects m ON m.id = a.object_id
+                    WHERE m.full_name_cf = ? AND a.name_cf = ?{src} LIMIT 1""",
+                [owner.casefold(), name.casefold()] + extra).fetchone()
+            if r:
+                return dict(r)
+            r = conn.execute(
+                f"""SELECT fa.name, 'РеквизитФормы' AS kind, fa.type_desc, fa.title AS synonym,
+                           m.name AS object_full_name, m.source_id
+                    FROM form_attributes fa JOIN modules m ON m.id = fa.module_id
+                    WHERE m.name_cf = ? AND fa.name_cf = ?{src} LIMIT 1""",
+                [owner.casefold(), name.casefold()] + extra).fetchone()
+            if r:
+                return dict(r)
+        return None
+
+    def resolve_glossary_target(self, target: str) -> tuple[str, str] | None:
+        """Цель записи словаря — как она называется в индексе: (полное имя,
+        вид: object | attribute | procedure) или None, если такого нет.
+        Объект — «Справочник.X»; реквизит — «Объект.Реквизит» (и реквизит
+        табличной части или формы); процедура — «Модуль.Процедура», модуль
+        можно коротким именем общего модуля."""
+        from .glossary import TARGET_ATTRIBUTE, TARGET_OBJECT, TARGET_PROCEDURE
+        target = target.strip().strip('.')
+        if not target:
+            return None
+        conn = self.db.read_conn()
+        r = conn.execute("SELECT full_name FROM metadata_objects WHERE full_name_cf = ? LIMIT 1",
+                         (target.casefold(),)).fetchone()
+        if r:
+            return r['full_name'], TARGET_OBJECT
+        if '.' in target:
+            module, proc = target.rsplit('.', 1)
+            ids = resolve_module_ids(conn, module)
+            if ids:
+                r = conn.execute(
+                    """SELECT m.name AS module, p.name AS proc FROM procedures p
+                       JOIN modules m ON m.id = p.module_id
+                       WHERE p.module_id = ? AND p.name_cf = ?""", (ids[0], proc.casefold())).fetchone()
+                if r:
+                    return f"{r['module']}.{r['proc']}", TARGET_PROCEDURE
+        attr = self.find_attribute(target)
+        if attr:
+            return f"{attr['object_full_name']}.{attr['name']}", TARGET_ATTRIBUTE
+        return None
+
+    def _glossary_procedure_ids(self, query: str) -> list[tuple[int, str]]:
+        """(id процедуры, термин) для записей словаря о процедурах."""
+        from .glossary import TARGET_PROCEDURE
+        out = []
+        conn = self.db.read_conn()
+        for entry, term in self._glossary_matches(query, (TARGET_PROCEDURE,)):
+            module, proc = entry.target.rsplit('.', 1)
+            for r in conn.execute(
+                    """SELECT p.id FROM procedures p JOIN modules m ON m.id = p.module_id
+                       WHERE m.name_cf = ? AND p.name_cf = ?""", (module.casefold(), proc.casefold())):
+                out.append((r['id'], term))
+        return out
 
     def _form_attributes(self, query: str, source_id: str | None, limit: int,
                          offset: int) -> list[dict]:
@@ -692,9 +812,11 @@ class SearchEngine:
                WHERE c.caller_id = ? AND NOT EXISTS
                      (SELECT 1 FROM calls_resolved r WHERE r.call_id = c.id)
                GROUP BY c.callee_name ORDER BY MIN(c.line)""", (proc['id'],))]
+        entry = self.glossary.for_target(f"{mod['name']}.{proc['name']}") if self.glossary else None
         return {
             'module': dict(mod),
             'procedure': dict(proc),
+            'glossary': {'terms': entry.terms, 'note': entry.note} if entry else None,
             'source_label': mod['source_label'] or mod['source_id'],
             'region': region,
             'comment': comment,
@@ -944,6 +1066,8 @@ def format_search_results(results: list[dict], max_items: int = 20, start_index:
             full_name = f"{full_name}.{name}"
         type_desc = r.get('type_desc', '')
         comment = r.get('comment', '')
+        if r.get('glossary'):
+            comment = f"словарь: «{r['glossary']}»" + (f"; {comment}" if comment else '')
         parts = [f"{i}. {full_name}"]
         if synonym and synonym != name:
             parts.append(f"({synonym})")
@@ -996,6 +1120,16 @@ def format_object_details(details: dict, detail: str = 'brief') -> str:
         more = (f" … и ещё {len(recorded_by) - len(shown)} (detail=\"full\")"
                 if len(shown) < len(recorded_by) else '')
         lines.append(f"\nДвижения делают документы ({len(recorded_by)}): {', '.join(shown)}{more}")
+
+    glossary = details.get('glossary') or []
+    if glossary:
+        lines.append('')
+        for g in glossary:
+            target = obj['full_name']
+            what = 'Словарь' if g['target'].casefold() == target.casefold() \
+                else f"Словарь, {g['target'][len(target) + 1:]}"
+            note = f" — {g['note']}" if g.get('note') else ''
+            lines.append(f"{what}: {', '.join('«' + t + '»' for t in g['terms'])}{note}")
 
     if details.get('module'):
         m = details['module']

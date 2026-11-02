@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Словарь — {{ project.name }}{% endblock %}
+{% block active_nav %}glossary{% endblock %}
+
+{% block content %}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#file-text"/></svg>
+    Словарь проекта
+</h1>
+
+<p class="text-muted">
+    Какими словами пользователи называют объекты, реквизиты и процедуры конфигурации:
+    «пайщики» → регистр взаиморасчётов по аренде. Поиск (и агент через MCP) находит цель по этим
+    словам первой. Записи добавляют здесь или агент инструментом <span class="mono">add_glossary_term</span>;
+    словарь хранится вне индекса и переживает переиндексацию.
+</p>
+
+{% if error %}
+<div class="card" style="border-color:var(--danger)">
+    <svg class="icon icon-sm" style="color:var(--danger)"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    {{ error }}
+</div>
+{% elif saved %}
+<div class="card" style="border-color:var(--success)">
+    <svg class="icon icon-sm" style="color:var(--success)"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
+    Сохранено: <span class="mono">{{ saved }}</span>
+</div>
+{% endif %}
+
+<div class="card">
+    <h3 class="section-title" id="glossary-form-title">Новая запись</h3>
+    <form id="glossary-form" action="/api/projects/{{ project.id }}/glossary" method="post"
+          style="margin-top:var(--space-3)">
+        <input type="hidden" name="entry_id" value="">
+        <div class="form-group">
+            <label>Цель — полное имя</label>
+            <input name="target" required class="mono"
+                   placeholder="РегистрНакопления.ВзаиморасчетыПоАренде, Справочник.Поля.Площадь, ОбщийМодуль.X.Модуль.Процедура">
+            <div class="form-hint">Объект, реквизит («Объект.Реквизит», в том числе реквизит формы) или
+                процедура («Модуль.Процедура»). Имя берите из поиска.</div>
+        </div>
+        <div class="form-group">
+            <label>Термины — через запятую</label>
+            <input name="terms" required placeholder="пайщики, долги пайщикам">
+        </div>
+        <div class="form-group">
+            <label>Примечание</label>
+            <input name="note" placeholder="Что это и когда так говорят (необязательно)">
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+        {# display, а не hidden: у .btn свой display, он перебивает атрибут hidden #}
+        <button type="button" class="btn btn-secondary btn-sm" id="glossary-cancel" style="display:none">Отменить правку</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3 class="section-title">Записи ({{ entries|length }})</h3>
+    {% if entries %}
+    <div class="table-scroll">
+    <table class="detail-table" style="width:100%">
+        <tr><th>Цель</th><th>Термины</th><th>Примечание</th><th>Кто, когда</th><th></th></tr>
+        {% for e in entries %}
+        <tr>
+            <td><span class="mono">{{ e.target }}</span>
+                <span class="result-kind">{{ kind_label.get(e.target_kind, e.target_kind) }}</span></td>
+            <td>{{ e.terms|join(', ') }}</td>
+            <td class="text-muted">{{ e.note }}</td>
+            <td class="text-muted">{{ e.author }}{% if e.updated_at %}, {{ e.updated_at.replace('T', ' ') }}{% endif %}</td>
+            <td style="white-space:nowrap">
+                <button type="button" class="btn btn-secondary btn-sm btn-icon glossary-edit" title="Изменить"
+                        data-id="{{ e.id }}" data-target="{{ e.target }}"
+                        data-terms="{{ e.terms|join(', ') }}" data-note="{{ e.note }}">
+                    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
+                </button>
+                <form action="/api/projects/{{ project.id }}/glossary/{{ e.id }}/delete" method="post"
+                      style="display:inline" onsubmit="return confirm('Удалить запись словаря?')">
+                    <button type="submit" class="btn btn-danger btn-sm btn-icon" title="Удалить">
+                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#trash"/></svg>
+                    </button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    </div>
+    {% else %}
+    <p class="text-muted" style="margin-top:var(--space-2)">Словарь пуст.</p>
+    {% endif %}
+</div>
+
+<script>
+(function () {
+    const form = document.getElementById('glossary-form');
+    const title = document.getElementById('glossary-form-title');
+    const cancel = document.getElementById('glossary-cancel');
+    document.querySelectorAll('.glossary-edit').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            form.entry_id.value = btn.dataset.id;
+            form.target.value = btn.dataset.target;
+            form.terms.value = btn.dataset.terms;
+            form.note.value = btn.dataset.note;
+            title.textContent = 'Правка записи';
+            cancel.style.display = '';
+            form.scrollIntoView({behavior: 'smooth'});
+        });
+    });
+    cancel.addEventListener('click', function () {
+        form.reset();
+        form.entry_id.value = '';
+        title.textContent = 'Новая запись';
+        cancel.style.display = 'none';
+    });
+})();
+</script>
+{% endblock %}

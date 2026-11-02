@@ -884,7 +884,12 @@ class ProjectManager:
         for src in (project.sources if project else []):
             if src.xml_path:
                 roots[src.id] = str(self.source_path(project_id, src.xml_path))
-        return SearchEngine(db, source_roots=roots)
+        return SearchEngine(db, source_roots=roots, glossary=self.get_glossary(project_id))
+
+    def get_glossary(self, project_id: str):
+        """Словарь проекта (src/core/glossary.py): data/projects/{id}/glossary.json."""
+        from .glossary import FILENAME, Glossary
+        return Glossary(self.projects_dir / project_id / FILENAME)
 
     # ============================================
     # INDEXING

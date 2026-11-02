@@ -107,6 +107,20 @@ def _stale_module_warning(path: str, mod: dict) -> str:
             "(reindex).\n")
 
 
+_GLOSSARY_KIND = {'object': 'объект', 'attribute': 'реквизит', 'procedure': 'процедура'}
+
+
+def format_glossary_entry(entry, prefix: str = '', with_author: bool = True) -> str:
+    """Строка записи словаря: id, цель, термины, примечание, кто и когда.
+    with_author=False — подтверждение записи: повторная запись того же даёт
+    тот же текст (время в нём менялось бы)."""
+    note = f" — {entry.note}" if entry.note else ''
+    who = ', '.join(x for x in (entry.author, entry.updated_at.replace('T', ' ')) if x) \
+        if with_author else ''
+    return (f"{prefix}[{entry.id}] {entry.target} ({_GLOSSARY_KIND.get(entry.target_kind, entry.target_kind)}): "
+            f"{', '.join('«' + t + '»' for t in entry.terms)}{note}" + (f"  ({who})" if who else ''))
+
+
 def _call_list(rows: list[dict], shown: int) -> list[str]:
     out = []
     for r in rows[:shown]:
@@ -137,6 +151,10 @@ def format_procedure_context(ctx: dict) -> str:
         if mod.get('object_synonym'):
             obj += f" — {mod['object_synonym']}"
         lines.append(f"Объект: {obj}")
+    if ctx.get('glossary'):
+        g = ctx['glossary']
+        note = f" — {g['note']}" if g.get('note') else ''
+        lines.append(f"Словарь: {', '.join('«' + t + '»' for t in g['terms'])}{note}")
     if ctx.get('region'):
         lines.append(f"Область: {ctx['region']}")
     if ctx.get('comment'):
@@ -359,6 +377,41 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                 f"Reindex started for '{project_id}'. "
                 f"Track progress via get_index_status."
             )
+
+        case 'add_glossary_term':
+            from ..core.glossary import split_terms
+            target = (args.get('target') or '').strip()
+            terms = split_terms(args.get('terms') or '')
+            if not target or not terms:
+                return "Error: нужны target (полное имя объекта, реквизита или процедуры) и terms (слова через запятую)"
+            resolved = engine.resolve_glossary_target(target)
+            if resolved is None:
+                return (f"Error: «{target}» нет в индексе проекта. Укажите полное имя: объект — "
+                        f"Справочник.X, реквизит — РегистрНакопления.X.Сумма, процедура — "
+                        f"ОбщийМодуль.X.Модуль.Процедура (найти: search_metadata, "
+                        f"search_attributes, search_procedures)")
+            full_name, kind = resolved
+            entry = engine.glossary.save(full_name, kind, terms, note=(args.get('note') or '').strip(),
+                                         author='агент')
+            return format_glossary_entry(entry, prefix='Записано в словарь: ', with_author=False)
+
+        case 'list_glossary':
+            query = (args.get('query') or '').strip()
+            glossary = engine.glossary
+            entries = [e for e, _ in glossary.match(query)] if query else glossary.entries()
+            if not entries:
+                return ("Словарь пуст." if not query else f"В словаре нет записей для «{query}».")
+            limit = int(limit_arg or 50)
+            shown = entries[offset:offset + limit]
+            text = '\n'.join(format_glossary_entry(e) for e in shown)
+            return f"{text}\n{_page_trailer(len(shown), offset, limit, offset + limit < len(entries))}"
+
+        case 'remove_glossary_term':
+            entry_id = (args.get('entry_id') or '').strip()
+            entry = engine.glossary.remove(entry_id) if entry_id else None
+            if entry is None:
+                return f"Error: записи «{entry_id}» в словаре нет — id есть в list_glossary"
+            return format_glossary_entry(entry, prefix='Удалено из словаря: ', with_author=False)
 
         case 'remove_source':
             target = args.get('source_id', '')

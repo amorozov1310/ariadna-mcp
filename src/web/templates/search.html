@@ -139,6 +139,10 @@
             {% if r.synonym and r.synonym != r.name %}
             <span class="text-muted" style="margin-left:6px">{{ r.synonym }}</span>
             {% endif %}
+            {% if r.glossary %}
+            <a href="/projects/{{ project.id }}/glossary" class="badge badge-accent" style="margin-left:6px"
+               title="Найдено по словарю проекта">словарь: «{{ r.glossary }}»</a>
+            {% endif %}
             {% if r.comment %}
             <div class="result-comment">{{ r.comment }}</div>
             {% endif %}

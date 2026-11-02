@@ -469,6 +469,30 @@ def _exact_name_rows(conn, name: str, source_id: str | None, limit: int):
             LIMIT ?""", params + [limit]).fetchall()
 
 
+def _glossary_rows(engine, conn, query: str, source_id: str | None) -> list[dict]:
+    """Процедуры из словаря проекта (engine.glossary) — первыми, match 'glossary'."""
+    finder = getattr(engine, '_glossary_procedure_ids', None)
+    found = finder(query) if finder else []
+    rows = []
+    for proc_id, _term in found:
+        conds, params = ['p.id = ?'], [proc_id]
+        if source_id:
+            conds.append('m.source_id = ?')
+            params.append(source_id)
+        r = conn.execute(
+            f"""SELECT p.id AS procedure_id, 0 AS chunk_no, p.start_line, p.end_line, 0.0 AS score,
+                       p.name AS procedure_name, m.name AS module_name, m.source_id,
+                       0 AS callers, {_RESULT_COLUMNS},
+                       (SELECT c.content_hash FROM card_chunks c WHERE c.procedure_id = p.id
+                        ORDER BY c.chunk_no LIMIT 1) AS content_hash,
+                       'glossary' AS match
+                FROM procedures p JOIN modules m ON m.id = p.module_id
+                WHERE {' AND '.join(conds)}""", params).fetchone()
+        if r:
+            rows.append(r)
+    return rows
+
+
 def search_cards(engine, query: str, source_id: str | None = None,
                  limit: int = 20, pool: int = 200) -> list[dict]:
     """Лексический поиск по карточкам с рангом BM25 — по процедурам.
@@ -482,7 +506,9 @@ def search_cards(engine, query: str, source_id: str | None = None,
     if not match:
         return []
     conn = engine.db.read_conn()
-    exact = _exact_name_rows(conn, query.strip(), source_id, limit)         if _IDENTIFIER.match(query.strip()) else []
+    exact = _exact_name_rows(conn, query.strip(), source_id, limit) \
+        if _IDENTIFIER.match(query.strip()) else []
+    glossary = _glossary_rows(engine, conn, query, source_id)
     conds, params = ['card_fts MATCH ?'], [match]
     if source_id:
         conds.append('m.source_id = ?')
@@ -503,7 +529,7 @@ def search_cards(engine, query: str, source_id: str | None = None,
         # BM25 в SQLite отрицательный: чем меньше, тем лучше — множитель > 1 поднимает.
         rows = sorted(rows, key=lambda r: r['score'] * (1 + POPULARITY_WEIGHT * math.log1p(r['callers'])))
     results, seen = [], set()
-    for r in list(exact) + list(rows):
+    for r in list(glossary) + list(exact) + list(rows):
         if r['procedure_id'] in seen:
             continue
         seen.add(r['procedure_id'])

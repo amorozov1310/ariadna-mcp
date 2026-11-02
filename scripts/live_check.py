@@ -48,7 +48,7 @@ from mcp import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
-EXPECTED_TOOLS = 18
+EXPECTED_TOOLS = 21
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
 
@@ -70,6 +70,10 @@ PARITY_CASES = {
     'search_code': {'query': 'Возврат'},
     'semantic_search_code': {'query': 'расчет цены со скидкой', 'limit': 3},
     'get_procedure_context': {'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'},
+    'add_glossary_term': {'target': 'Справочник.Склады', 'terms': 'места хранения'},
+    'list_glossary': {},
+    # Удаление дважды подряд успешным не бывает — сверяется одинаковая ошибка.
+    'remove_glossary_term': {'entry_id': 'нет'},
     'diagnose_index': {},
     'reindex': {},
     'remove_source': {'source_id': 'main'},          # без confirm — только предпросмотр
@@ -309,6 +313,10 @@ def check_indexing(ctx: LiveContext) -> list[Result]:
 # 3. playground == MCP
 # ============================================
 
+# Сверяется одинаковая ошибка: удаление дважды подряд успешным не бывает.
+PARITY_EXPECTED_ERRORS = {'remove_glossary_term'}
+
+
 def check_playground_parity(ctx: LiveContext) -> list[Result]:
     pid = ctx.temp_id
     out = []
@@ -332,6 +340,8 @@ def check_playground_parity(ctx: LiveContext) -> list[Result]:
         same = play['result'] == mcp_text and bool(play['is_error']) == is_error
         # Ответ содержательный: сверка двух пустых ответов ничего не доказывает.
         empty = any(m in text for m in ('No results', 'not found', 'No procedures'))
+        if tool in PARITY_EXPECTED_ERRORS:
+            empty, is_error = False, not is_error
         out.append(check(f'playground == MCP: {tool}', same and not is_error and not empty,
                          f"{len(text)} символов",
                          f"playground: {play['result'][:150]!r}\n        MCP: {mcp_text[:150]!r}"))

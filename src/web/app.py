@@ -232,7 +232,9 @@ def favicon():
 from .routes_projects import router as projects_router
 from .routes_search import router as search_router
 from .routes_playground import router as playground_router
+from .routes_glossary import router as glossary_router
 
 app.include_router(projects_router)
 app.include_router(search_router)
 app.include_router(playground_router)
+app.include_router(glossary_router)
