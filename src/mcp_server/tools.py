@@ -119,7 +119,8 @@ def _call_list(rows: list[dict], shown: int) -> list[str]:
 
 def format_procedure_context(ctx: dict) -> str:
     """Текст get_procedure_context: объявление, место, описание, связи.
-    В списке вызывающих «стр.» — строка вызова в модуле вызывающего."""
+    Вызывающие — сначала с наибольшим числом мест вызова; «стр.» — строка
+    вызова в модуле вызывающего."""
     mod, proc = ctx['module'], ctx['procedure']
     src = f"  @{ctx['source_label']}" if ctx.get('source_label') else ''
     lines = [f"// {mod['name']}.{proc['name']}{src}"]
@@ -139,10 +140,15 @@ def format_procedure_context(ctx: dict) -> str:
     if ctx.get('region'):
         lines.append(f"Область: {ctx['region']}")
     if ctx.get('comment'):
-        comment = ctx['comment']
-        if len(comment) > CONTEXT_COMMENT_CHARS:
-            comment = comment[:CONTEXT_COMMENT_CHARS].rstrip() + '…'
-        lines.append(f"Описание: {comment}")
+        shown, size = [], 0
+        for line in ctx['comment']:
+            if len(shown) >= CONTEXT_COMMENT_LINES or size + len(line) > CONTEXT_COMMENT_CHARS:
+                shown.append('…')
+                break
+            shown.append(line)
+            size += len(line)
+        lines.append('Описание:')
+        lines += [f'  {line}' for line in shown]
     elif not ctx.get('file_readable'):
         lines.append("Описание: файл модуля недоступен на сервере — область и комментарий не прочитаны")
 
@@ -186,8 +192,9 @@ _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list
 DIAGNOSE_MISSING_SHOWN = 100
 
 # get_procedure_context: сколько вызывающих и вызываемых показывать (дальше —
-# get_call_tree) и предел описания из комментария.
+# get_call_tree) и предел описания из комментария (строк и символов).
 CONTEXT_CALLS_SHOWN = 20
+CONTEXT_COMMENT_LINES = 12
 CONTEXT_COMMENT_CHARS = 800
 
 

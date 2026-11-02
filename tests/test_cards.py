@@ -185,3 +185,10 @@ def test_card_fts_query_stems_and_drops_redundant_terms():
     assert card_fts_query('отправление почтовых') == '"отпра"* OR "правл"* OR "почто"*'
     # В запросе из одного слова точная основа остаётся рядом с корнями.
     assert card_fts_query('ЗаписьСклада') == '"записьсклад"* OR "запис"* OR "письс"*'
+
+
+def test_doc_comment_lines_keep_nesting_card_header_flat():
+    from src.core.cards import _doc_comment, doc_comment_lines
+    src = ['// Делает дело.', '//', '// Параметры:', '//   А - Строка - имя.', '&НаСервере', 'Процедура П(А)']
+    assert doc_comment_lines(src, 6) == ['Делает дело.', 'Параметры:', '  А - Строка - имя.']
+    assert _doc_comment(src, 6) == 'Делает дело. Параметры: А - Строка - имя.'

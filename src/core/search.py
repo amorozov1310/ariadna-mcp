@@ -639,11 +639,12 @@ class SearchEngine:
     def get_procedure_context(self, module_name: str, procedure_name: str,
                               source_id: str | None = None) -> dict | str:
         """Всё о процедуре, кроме кода, — для get_procedure_context: объявление,
-        строки, объект и его синоним, область и комментарий над объявлением
-        (из файла модуля), кто вызывает (с числом мест вызова) и что
+        строки, объект и его синоним, область и строки комментария над
+        объявлением (из файла модуля), кто вызывает (сначала по числу мест
+        вызова) и что
         вызывает (разрешённые вызовы и неразрешённые имена). Строка — ошибка
         «не найдено» с подсказкой."""
-        from .cards import _doc_comment, _read_lines, _regions
+        from .cards import _read_lines, _regions, doc_comment_lines
         conn = self.db.read_conn()
         ids = resolve_module_ids(conn, module_name, source_id)
         if not ids:
@@ -662,14 +663,14 @@ class SearchEngine:
             return (f"Procedure '{procedure_name}' not found in module {mod['name']}. "
                     f"List its procedures with get_module_outline(module_name=\"{mod['name']}\").")
 
-        region, comment = '', ''
+        region, comment = '', []
         path = self.module_file_path(mod)
         lines = _read_lines(path) if path else None
         if lines:
             regions = _regions(lines)
             if 0 < proc['start_line'] <= len(regions):
                 region = regions[proc['start_line'] - 1]
-            comment = _doc_comment(lines, proc['start_line'])
+            comment = doc_comment_lines(lines, proc['start_line'])
 
         callers = [dict(r) for r in conn.execute(
             """SELECT m.name AS module_name, p.name AS procedure_name, COUNT(*) AS sites,
@@ -677,7 +678,7 @@ class SearchEngine:
                FROM calls_resolved r JOIN calls c ON c.id = r.call_id
                JOIN procedures p ON p.id = c.caller_id JOIN modules m ON m.id = p.module_id
                WHERE r.callee_id = ?
-               GROUP BY p.id ORDER BY m.name, p.name""", (proc['id'],))]
+               GROUP BY p.id ORDER BY sites DESC, m.name, p.name""", (proc['id'],))]
         callees = [dict(r) for r in conn.execute(
             """SELECT m.name AS module_name, p.name AS procedure_name, COUNT(*) AS sites,
                       MIN(c.line) AS line

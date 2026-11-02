@@ -199,18 +199,26 @@ def _regions(lines: list[str]) -> list[str]:
     return result
 
 
-def _doc_comment(lines: list[str], start_line: int) -> str:
-    """Комментарий сразу над объявлением (директивы &НаСервере пропускаются)."""
+def doc_comment_lines(lines: list[str], start_line: int) -> list[str]:
+    """Строки комментария сразу над объявлением, без «//» и пустых строк-
+    разделителей (директивы &НаСервере пропускаются). Вложенность — как в
+    коде (раздел «Параметры:»), общий отступ убран."""
     i = start_line - 2  # строка над объявлением, индекс с 0
     while i >= 0 and _DIRECTIVE.match(lines[i]):
         i -= 1
     collected = []
     while i >= 0 and (m := _COMMENT.match(lines[i])):
-        collected.append(m.group(1).strip())
+        collected.append(m.group(1).rstrip().expandtabs(4))
         i -= 1
     collected.reverse()
-    # Пустые строки-разделители «//» внутри описания сжимаются.
-    return ' '.join(part for part in collected if part)
+    collected = [part for part in collected if part.strip()]
+    indent = min((len(p) - len(p.lstrip()) for p in collected), default=0)
+    return [p[indent:] for p in collected]
+
+
+def _doc_comment(lines: list[str], start_line: int) -> str:
+    """Комментарий над объявлением одной строкой — для заголовка карточки."""
+    return ' '.join(part.strip() for part in doc_comment_lines(lines, start_line))
 
 
 def chunk_body(lines: list[str], start_line: int, end_line: int,
