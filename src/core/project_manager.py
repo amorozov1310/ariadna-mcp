@@ -135,7 +135,6 @@ class SourceInfo:
     source_type: str = 'main'          # 'main' (конфигурация) | 'extension'
     # Относительно каталога проекта (sources/{id}/…) или абсолютные — см.
     # ProjectManager.source_path.
-    report_path: str = ''
     xml_path: str = ''
     indexed_at: str = ''
 
@@ -175,7 +174,6 @@ class ProjectManager:
                 ├── index.db
                 └── sources/
                     └── {source_id}/
-                        ├── report.txt
                         └── xml/
 
     index_dir, если задан, — отдельный каталог для индексов SQLite:
@@ -346,11 +344,12 @@ class ProjectManager:
     @classmethod
     def _project_from_dict(cls, pdata: dict) -> tuple['ProjectInfo', bool]:
         """Собрать ProjectInfo из записи реестра, отбросив поля, оставшиеся
-        от выгрузки из информационной базы.
+        от убранных возможностей.
 
-        Выгрузка из информационной базы убрана, но реестры, записанные
-        раньше, могут содержать `dump` у проекта или у источника и
-        `parent_id` у расширения. SourceInfo(**s) на таких
+        Выгрузка из информационной базы и загрузка отчёта по конфигурации
+        убраны, но реестры, записанные раньше, могут содержать `dump` у
+        проекта или у источника, `parent_id` у расширения и `report_path` у
+        источника. SourceInfo(**s) на таких
         ключах упал бы, поэтому они просто выбрасываются; второй элемент
         результата говорит, было ли что выбрасывать — по нему реестр
         перезаписывается один раз.
@@ -363,7 +362,7 @@ class ProjectManager:
         sources: list[SourceInfo] = []
         for s in raw_sources:
             s = dict(s)
-            for stale in ('dump', 'parent_id', 'extension'):
+            for stale in ('dump', 'parent_id', 'extension', 'report_path'):
                 if s.pop(stale, None) is not None:
                     dropped = True
             sources.append(SourceInfo(**s))
@@ -406,8 +405,8 @@ class ProjectManager:
         его сюда: реестр за это время мог перечитаться, и registry[project_id]
         — уже другой объект, без статуса, который выставляет reindex. Из
         объекта берутся только поля, которыми владеет переиндексация
-        (status, index_stats и у уже известных источников indexed_at/
-        report_path); остальное — список источников, имя — остаётся как на
+        (status, index_stats и у уже известных источников indexed_at);
+        остальное — список источников, имя — остаётся как на
         диске, чтобы не потерять источник, добавленный через Web UI во время
         долгого прогона, и не вернуть удалённый.
         """
@@ -450,8 +449,6 @@ class ProjectManager:
                 if mine is None:
                     continue
                 src['indexed_at'] = mine['indexed_at']
-                if mine['report_path']:
-                    src['report_path'] = mine['report_path']
 
         self._write_registry_file(disk)
         # Кэш этого экземпляра с записанным файлом не совпадает (остальные
@@ -584,15 +581,12 @@ class ProjectManager:
         source_id: str,
         label: str,
         source_type: str = 'main',
-        report_file: BinaryIO | None = None,
-        report_filename: str = '',
         xml_archive: BinaryIO | None = None,
         xml_archive_filename: str = '',
     ) -> SourceInfo:
         """
         Add a source to a project.
 
-        report_file: file-like object with report.txt content (upload)
         xml_archive: file-like object with .zip or .tar.gz of XML dump (upload)
 
         If files are None, assumes they are already at the expected paths
@@ -608,18 +602,7 @@ class ProjectManager:
         source_dir = self.projects_dir / project_id / 'sources' / source_id
         source_dir.mkdir(parents=True, exist_ok=True)
 
-        report_path = ''
         xml_path = ''
-
-        # Save report file
-        if report_file is not None:
-            report_dest = source_dir / 'report.txt'
-            with open(report_dest, 'wb') as f:
-                while chunk := report_file.read(8192):
-                    f.write(chunk)
-            report_path = f'sources/{source_id}/report.txt'
-        elif (source_dir / 'report.txt').exists():
-            report_path = f'sources/{source_id}/report.txt'
 
         # Extract XML archive (проверка путей и пределов — src/core/archives.py)
         if xml_archive is not None:
@@ -632,7 +615,6 @@ class ProjectManager:
             id=source_id,
             label=label,
             source_type=source_type,
-            report_path=report_path,
             xml_path=xml_path,
         )
         with self._registry_lock():
@@ -649,18 +631,15 @@ class ProjectManager:
         source_id: str,
         label: str | None = None,
         source_type: str | None = None,
-        report_file: BinaryIO | None = None,
-        report_filename: str = '',
         xml_archive: BinaryIO | None = None,
         xml_archive_filename: str = '',
     ) -> SourceInfo:
         """
         Update an existing source: replace its files and/or change its label/type.
 
-        - If ``report_file`` is given, the old report.txt is replaced.
         - If ``xml_archive`` is given, the old xml/ folder is wiped and the new
           archive extracted.
-        - If both files are None, only metadata (label/source_type) is updated.
+        - Otherwise only metadata (label/source_type) is updated.
 
         Caller must run ``reindex(project_id, source_id=source_id)`` afterwards
         to refresh the database.
@@ -678,14 +657,6 @@ class ProjectManager:
         # Файлы — вне блокировки реестра: распаковка архива идёт минутами.
         source_dir = self.projects_dir / project_id / 'sources' / source_id
         source_dir.mkdir(parents=True, exist_ok=True)
-
-        # Replace report file
-        if report_file is not None:
-            report_dest = source_dir / 'report.txt'
-            with open(report_dest, 'wb') as f:
-                while chunk := report_file.read(8192):
-                    f.write(chunk)
-            changes['report_path'] = f'sources/{source_id}/report.txt'
 
         # Replace XML archive
         if xml_archive is not None:
@@ -794,24 +765,15 @@ class ProjectManager:
             self._save_registry()
 
     def source_path(self, project_id: str, rel: str) -> Path:
-        """Путь к файлу или каталогу источника (report_path, xml_path).
+        """Путь к каталогу источника (xml_path).
 
         Обычно путь относительный — от каталога проекта (sources/{id}/xml).
         Абсолютный путь берётся как есть: так источник может лежать вне
         data_dir — медленные тесты указывают им на реальные выгрузки в
-        data/projects, а реестр, индексы и сгенерированный report.txt держат
-        во временном каталоге (tests/corpus_sandbox.py). Единственное место,
+        data/projects, а реестр и индексы держат во временном каталоге (tests/corpus_sandbox.py). Единственное место,
         где путь источника склеивается с каталогом проекта."""
         path = Path(rel)
         return path if path.is_absolute() else self.projects_dir / project_id / path
-
-    def get_source_report_path(self, project_id: str, source_id: str) -> Path | None:
-        """Get absolute path to source's report.txt."""
-        project = self.get_project(project_id)
-        for s in project.sources:
-            if s.id == source_id and s.report_path:
-                return self.source_path(project_id, s.report_path)
-        return None
 
     def get_source_xml_path(self, project_id: str, source_id: str) -> Path | None:
         """Get absolute path to source's XML directory."""
@@ -938,7 +900,7 @@ class ProjectManager:
         source_id="ext1" → reindex only that source
 
         Этап 4/D7 incrementality: this no longer wipes the DB (or the one
-        source's rows) before indexing — index_report/index_bsl UPSERT and
+        source's rows) before indexing — index_xml_metadata/index_bsl UPSERT and
         skip-unchanged-by-hash on their own, so a rerun with nothing
         changed on disk is an order of magnitude faster than a cold index.
         """
@@ -999,7 +961,7 @@ class ProjectManager:
                     progress_current=progress['done'] + current,
                     progress_total=total_files, progress_phase=progress['phase'])
 
-            db.update_state(progress_total=total_files, progress_phase='report')
+            db.update_state(progress_total=total_files, progress_phase='metadata')
 
             # Этап 4/D7: durations sum across sources (real per-call work),
             # but object/module/procedure/call *counts* do not — index_bsl's
@@ -1257,7 +1219,7 @@ class ProjectManager:
                        known_objects: dict[str, set[str]] | None = None,
                        known_factory_functions: dict[str, set[str]] | None = None,
                        progress_cb=None, force_reparse: bool = False) -> dict:
-        """Index one source (report + optionally BSL from XML dump)."""
+        """Index one source: metadata and BSL code from its XML dump."""
         stats = {'objects': 0, 'attributes': 0, 'forms': 0,
                  'modules': 0, 'procedures': 0, 'calls': 0, 'duration_sec': 0}
 
@@ -1265,27 +1227,21 @@ class ProjectManager:
         if source.xml_path:
             xml_path = self.source_path(project_id, source.xml_path)
 
-        # 1. Metadata: из XML-выгрузки, если в ней есть Configuration.xml
-        # (src/core/xml_metadata.py); иначе — из загруженного отчёта по
-        # конфигурации. Выгрузка — первоисточник и всегда согласована с
-        # кодом, который индексируется ниже; отчёт — для источника без XML.
-        report_path = None
-        if source.report_path:
-            report_path = self.source_path(project_id, source.report_path)
-
+        # 1. Metadata: из Configuration.xml и файлов объектов выгрузки
+        # (src/core/xml_metadata.py). Выгрузка Конфигуратора («Выгрузить
+        # конфигурацию в файлы»); без Configuration.xml — только код.
         from .xml_metadata import has_configuration
-        report_stats = None
         if xml_path and has_configuration(xml_path):
-            report_stats = indexer.index_xml_metadata(str(xml_path), source_id=source.id,
-                                                      source_label=source.label,
-                                                      source_type=source.source_type)
-        elif report_path and report_path.exists():
-            report_stats = indexer.index_report(str(report_path), source_id=source.id,
-                                                 source_label=source.label,
-                                                 source_type=source.source_type)
-        if report_stats:
+            meta_stats = indexer.index_xml_metadata(str(xml_path), source_id=source.id,
+                                                    source_label=source.label,
+                                                    source_type=source.source_type)
             for k in ('objects', 'attributes', 'forms', 'modules', 'duration_sec'):
-                stats[k] = report_stats.get(k, 0)
+                stats[k] = meta_stats.get(k, 0)
+        elif xml_path and xml_path.exists():
+            logger.warning("Проект %s, источник %s: в выгрузке нет Configuration.xml — "
+                           "метаданные не индексируются, только код. Нужна выгрузка "
+                           "Конфигуратора «Выгрузить конфигурацию в файлы».",
+                           project_id, source.id)
 
         # 2. Index BSL code (from XML dump)
         if xml_path and xml_path.exists():

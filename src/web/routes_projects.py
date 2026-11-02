@@ -149,24 +149,16 @@ async def add_source(
     source_id: str = Form(...),
     label: str = Form(...),
     source_type: str = Form('main'),
-    # Отчёт по конфигурации Web UI не предлагает загружать — метаданные
-    # читаются прямо из XML (src/core/xml_metadata.py). Приём оставлен для
-    # внешних вызовов и источников без XML: созданные когда-то одним
-    # отчётом должны продолжать работать.
-    report_file: UploadFile | None = File(None),
     xml_archive: UploadFile | None = File(None),
 ):
     pm = get_pm()
     try:
-        report_fobj = report_file.file if report_file and report_file.filename else None
         xml_fobj = xml_archive.file if xml_archive and xml_archive.filename else None
         xml_fname = xml_archive.filename if xml_archive else ''
 
         pm.add_source(
             project_id, source_id, label,
             source_type=source_type,
-            report_file=report_fobj,
-            report_filename=report_file.filename if report_file else '',
             xml_archive=xml_fobj,
             xml_archive_filename=xml_fname,
         )
@@ -237,7 +229,6 @@ async def update_source(
     source_id: str,
     label: str | None = Form(None),
     source_type: str | None = Form(None),
-    report_file: UploadFile | None = File(None),
     xml_archive: UploadFile | None = File(None),
     auto_reindex: str | None = Form(None),
 ):
@@ -245,7 +236,6 @@ async def update_source(
     If auto_reindex=on, runs reindex for that source immediately after."""
     pm = get_pm()
     try:
-        report_fobj = report_file.file if report_file and report_file.filename else None
         xml_fobj = xml_archive.file if xml_archive and xml_archive.filename else None
         xml_fname = xml_archive.filename if xml_archive else ''
 
@@ -253,8 +243,6 @@ async def update_source(
             project_id, source_id,
             label=label or None,
             source_type=source_type or None,
-            report_file=report_fobj,
-            report_filename=report_file.filename if report_file else '',
             xml_archive=xml_fobj,
             xml_archive_filename=xml_fname,
         )

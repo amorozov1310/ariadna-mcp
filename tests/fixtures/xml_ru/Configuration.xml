@@ -1,0 +1,67 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Configuration uuid="c44442d5-dd38-5e30-9850-1a5ef603d9df">
+		<Properties>
+			<Name>ДемоКонфигурация</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Демо-конфигурация</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment>Синтетическая конфигурация для тестов</Comment>
+			<ScriptVariant>Russian</ScriptVariant>
+			<Version>1.2.3.4</Version>
+			<CompatibilityMode>Version8_3_24</CompatibilityMode>
+		</Properties>
+		<ChildObjects>
+			<Language>Русский</Language>
+			<Style>ОсновнойСтиль</Style>
+			<Role>ПолныеПрава</Role>
+			<Role>Кладовщик</Role>
+			<Role>Менеджер</Role>
+			<CommonPicture>Логотип</CommonPicture>
+			<CommonPicture>ЗначокСклада</CommonPicture>
+			<SessionParameter>ТекущийПользователь</SessionParameter>
+			<Constant>ОсновнаяВалюта</Constant>
+			<DefinedType>Сумма</DefinedType>
+			<DefinedType>Количество</DefinedType>
+			<DefinedType>ВладелецФайлов</DefinedType>
+			<CommonModule>ОбщегоНазначения</CommonModule>
+			<CommonModule>ОбщиеНаСервере</CommonModule>
+			<CommonModule>ОбщиеНаКлиенте</CommonModule>
+			<CommonModule>ЦенообразованиеСервер</CommonModule>
+			<CommonModule>РаботаСоСкладом</CommonModule>
+			<Enum>ТипыЦен</Enum>
+			<Enum>ТипыСкладов</Enum>
+			<Enum>СтавкиНДС</Enum>
+			<Catalog>Номенклатура</Catalog>
+			<Catalog>ВидыНоменклатуры</Catalog>
+			<Catalog>ЕдиницыИзмерения</Catalog>
+			<Catalog>Контрагенты</Catalog>
+			<Catalog>Организации</Catalog>
+			<Catalog>Склады</Catalog>
+			<Catalog>Сотрудники</Catalog>
+			<Catalog>Валюты</Catalog>
+			<Document>ПоступлениеТоваров</Document>
+			<Document>РеализацияТоваров</Document>
+			<Document>ПеремещениеТоваров</Document>
+			<Document>ИнвентаризацияТоваров</Document>
+			<Document>ВозвратТоваровПоставщику</Document>
+			<InformationRegister>ЦеныНоменклатуры</InformationRegister>
+			<InformationRegister>КурсыВалют</InformationRegister>
+			<InformationRegister>ШтрихкодыНоменклатуры</InformationRegister>
+			<AccumulationRegister>ТоварыНаСкладах</AccumulationRegister>
+			<AccumulationRegister>Продажи</AccumulationRegister>
+			<Report>АнализПродаж</Report>
+			<DataProcessor>ЗагрузкаЦен</DataProcessor>
+			<CommonForm>ВыборПериода</CommonForm>
+			<ScheduledJob>ОбновлениеКурсов</ScheduledJob>
+			<EventSubscription>ПроверкаЗаполнения</EventSubscription>
+			<Subsystem>Склад</Subsystem>
+			<Subsystem>Закупки</Subsystem>
+			<Subsystem>Продажи</Subsystem>
+			<Subsystem>Администрирование</Subsystem>
+		</ChildObjects>
+	</Configuration>
+</MetaDataObject>

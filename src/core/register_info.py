@@ -6,13 +6,12 @@
 отвечает на вопрос к базе через свой MCP к данным, это нужно, чтобы сразу
 составить правильный запрос, а не гадать по составу реквизитов.
 
-Свойства приходят из XML-выгрузки (RegisterType, InformationRegisterPeriodicity…)
-или из отчёта по конфигурации (ВидРегистра, ПериодичностьРегистраСведений…,
-русские или английские) — object_properties приводит их к одному виду.
-Движения документов (RegisterRecords) есть только в XML-выгрузке.
+Свойства и движения документов — из XML-выгрузки (RegisterType,
+InformationRegisterPeriodicity, WriteMode, ChartOfAccounts, Correspondence,
+RegisterRecords); object_properties приводит их к русским ключам и значениям.
 """
 
-from .report_parser import MetadataObject
+from .metadata_model import MetadataObject
 
 REGISTER_TYPE = 'ВидРегистра'
 PERIODICITY = 'Периодичность'
@@ -21,26 +20,22 @@ CHART_OF_ACCOUNTS = 'ПланСчетов'
 CORRESPONDENCE = 'Корреспонденция'
 RECORDS = 'Движения'
 
-# Ключ свойства в выгрузке или отчёте (RU/EN) → ключ в индексе.
+# Свойство в выгрузке → ключ в индексе.
 _KEYS = {
-    'RegisterType': REGISTER_TYPE, 'ВидРегистра': REGISTER_TYPE,
-    'InformationRegisterPeriodicity': PERIODICITY, 'ПериодичностьРегистраСведений': PERIODICITY,
-    'WriteMode': WRITE_MODE, 'РежимЗаписи': WRITE_MODE,
-    'ChartOfAccounts': CHART_OF_ACCOUNTS, 'ПланСчетов': CHART_OF_ACCOUNTS,
-    'Correspondence': CORRESPONDENCE, 'Корреспонденция': CORRESPONDENCE,
+    'RegisterType': REGISTER_TYPE,
+    'InformationRegisterPeriodicity': PERIODICITY,
+    'WriteMode': WRITE_MODE,
+    'ChartOfAccounts': CHART_OF_ACCOUNTS,
+    'Correspondence': CORRESPONDENCE,
 }
-# Значение (EN из выгрузки или отчёта, RU из отчёта с пробелами) → значение в индексе.
+# Значение в выгрузке → значение в индексе.
 _VALUES = {
-    'balance': 'Остатки', 'остатки': 'Остатки',
-    'turnovers': 'Обороты', 'обороты': 'Обороты',
-    'nonperiodical': 'Непериодический', 'непериодический': 'Непериодический',
-    'second': 'Секунда', 'впределахсекунды': 'Секунда', 'секунда': 'Секунда',
-    'day': 'День', 'день': 'День', 'month': 'Месяц', 'месяц': 'Месяц',
-    'quarter': 'Квартал', 'квартал': 'Квартал', 'year': 'Год', 'год': 'Год',
-    'recorderposition': 'ПозицияРегистратора', 'позициярегистратора': 'ПозицияРегистратора',
-    'independent': 'Независимый', 'независимый': 'Независимый',
-    'recordersubordinate': 'ПодчинениеРегистратору', 'подчинениерегистратору': 'ПодчинениеРегистратору',
-    'true': 'Да', 'истина': 'Да', 'false': 'Нет', 'ложь': 'Нет',
+    'Balance': 'Остатки', 'Turnovers': 'Обороты',
+    'Nonperiodical': 'Непериодический', 'Second': 'Секунда', 'Day': 'День',
+    'Month': 'Месяц', 'Quarter': 'Квартал', 'Year': 'Год',
+    'RecorderPosition': 'ПозицияРегистратора',
+    'Independent': 'Независимый', 'RecorderSubordinate': 'ПодчинениеРегистратору',
+    'true': 'Да', 'false': 'Нет',
 }
 
 
@@ -48,7 +43,7 @@ def _value(raw: str) -> str:
     value = raw.strip()
     if value.startswith('ChartOfAccounts.'):
         return 'ПланСчетов.' + value[len('ChartOfAccounts.'):]
-    return _VALUES.get(value.replace(' ', '').casefold(), value)
+    return _VALUES.get(value, value)
 
 
 def object_properties(obj: MetadataObject) -> list[tuple[str, str]]:

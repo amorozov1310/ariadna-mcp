@@ -48,9 +48,7 @@ def pm():
     tmpdir = tempfile.mkdtemp()
     manager = ProjectManager(data_dir=tmpdir)
     manager.create_project('p', 'p')
-    with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-        manager.add_source('p', 'main', 'Main', report_file=f,
-                           xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+    manager.add_source('p', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
     manager.add_source('p', 'ext', 'Ext', source_type='extension',
                        xml_archive=_zip(FIXTURES / 'xml_ru_ext'), xml_archive_filename='x.zip')
     try:
@@ -130,12 +128,12 @@ def test_fingerprint_ignores_line_endings_and_location(monkeypatch):
 
 def test_fingerprint_covers_parse_related_indexer_code_only():
     """Из indexer.py в отпечаток входят функции, формирующие сохранённый
-    результат разбора, — но не resolve_calls/index_report (они и так
+    результат разбора, — но не resolve_calls/index_xml_metadata (они и так
     пересчитываются при каждом reindex)."""
     assert 'index_bsl' in parser_fingerprint._INDEXER_FUNCTIONS
     assert 'collect_known_facts' in parser_fingerprint._INDEXER_FUNCTIONS
     assert 'resolve_calls' not in parser_fingerprint._INDEXER_FUNCTIONS
-    assert 'index_report' not in parser_fingerprint._INDEXER_FUNCTIONS
+    assert 'index_xml_metadata' not in parser_fingerprint._INDEXER_FUNCTIONS
 
 
 def test_missing_sources_give_empty_fingerprint(monkeypatch):

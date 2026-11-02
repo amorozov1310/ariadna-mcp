@@ -21,7 +21,7 @@ _MODULES = [
     (1, 'main', 'ОбщийМодуль.ОбщегоНазначения.Модуль', ['СообщитьПользователю', 'Вызывающая']),
     (2, 'main', 'ОбщийМодуль.ОбщегоНазначенияКлиентСервер.Модуль', ['ЗначениеВМассиве']),
     (3, 'ext', 'ОбщийМодуль.РасшМодуль.Модуль', ['РасшМетод']),
-    (4, 'main', 'ОтчетныйМодуль', []),   # строка из report.txt, кода нет
+    (4, 'main', 'ОтчетныйМодуль', []),   # модуль только из метаданных, кода нет
     (5, 'main', 'Справочник.Номенклатура.МодульМенеджера', ['ПолучитьЦену']),
     (6, 'main', 'Справочник.Склады.МодульОбъекта', ['ПередЗаписью']),
     (7, 'main', 'ОбщийМодуль.Common.Модуль', ['SendMessage']),
@@ -228,9 +228,7 @@ def test_diagnose_index_tool_prints_breakdown():
         pm = ProjectManager(data_dir=tmpdir)
         try:
             pm.create_project('p1', 'p1')
-            with open(fixtures / 'report_ru.txt', 'rb') as f:
-                pm.add_source('p1', 'main', 'Main', report_file=f,
-                              xml_archive=buf, xml_archive_filename='xml.zip')
+            pm.add_source('p1', 'main', 'Main', xml_archive=buf, xml_archive_filename='xml.zip')
             pm.reindex('p1')
             text = execute_tool(pm, 'diagnose_index', {'project_id': 'p1'})
             # Старый вывод на месте.

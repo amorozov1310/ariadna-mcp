@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
+from fixture_zip import zip_dir
 
 from src.core.project_manager import ProjectManager
 from src.core.db import Database
@@ -24,14 +26,13 @@ from src.core.call_analyzer import CallAnalyzer
 from src.core.search import format_object_details
 from src.mcp_server.tools import execute_tool
 
-REPORT_FIXTURE = Path(__file__).parent / 'fixtures' / 'report_en.txt'
+META_FIXTURE = Path(__file__).parent / 'fixtures' / 'xml_meta_en'
 
 
 def _pm_with_project(tmpdir: str, project_id: str = 'p1') -> ProjectManager:
     pm = ProjectManager(data_dir=tmpdir)
     pm.create_project(project_id, project_id)
-    with open(REPORT_FIXTURE, 'rb') as f:
-        pm.add_source(project_id, 'main', 'Main', report_file=f)
+    pm.add_source(project_id, 'main', 'Main', xml_archive=zip_dir(META_FIXTURE), xml_archive_filename='x.zip')
     pm.reindex(project_id)
     return pm
 
@@ -102,7 +103,7 @@ def test_search_metadata_pagination_trailer():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm_with_project(tmpdir)
         try:
-            # report_en.txt has enough Catalog objects to page through.
+            # xml_meta_en has enough Catalog objects to page through.
             more = execute_tool(pm, 'search_metadata', {'project_id': 'p1', 'query': 'a', 'limit': 2, 'offset': 0})
             assert 'use offset=2 for more' in more or 'shown' in more
 

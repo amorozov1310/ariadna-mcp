@@ -21,7 +21,7 @@ from src.core.db import Database
 from src.core.indexer import Indexer
 from src.core.search import SearchEngine
 from src.core.bsl_parser import BSLParser
-from src.core.report_parser import canonicalize_kind
+from src.core.metadata_model import canonicalize_kind
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
@@ -156,17 +156,17 @@ def test_canonicalize_kind_aliases():
     assert canonicalize_kind('NotAKind') == 'NotAKind'
 
 
-def _index_report_db(tmpdir: str, fixture: Path) -> SearchEngine:
+def _index_metadata_db(tmpdir: str, fixture: Path) -> SearchEngine:
     db = Database(os.path.join(tmpdir, 'index.db'))
     db.connect()
     db.init_schema()
-    Indexer(db).index_report(str(fixture), source_id='main')
+    Indexer(db).index_xml_metadata(str(fixture), source_id='main')
     return SearchEngine(db)
 
 
 def test_search_metadata_kind_catalog_equals_spravochnik():
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = _index_report_db(tmpdir, FIXTURES / 'report_en.txt')
+        engine = _index_metadata_db(tmpdir, FIXTURES / 'xml_meta_en')
         by_en = engine.search_metadata('Users', kind='Catalog', limit=20)
         by_ru = engine.search_metadata('Users', kind='Справочник', limit=20)
         assert by_en, "kind='Catalog' should return results"
@@ -178,7 +178,7 @@ def test_search_metadata_kind_catalog_equals_spravochnik():
 
 def test_search_metadata_en_alias_case_insensitive_kind():
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = _index_report_db(tmpdir, FIXTURES / 'report_en.txt')
+        engine = _index_metadata_db(tmpdir, FIXTURES / 'xml_meta_en')
         results = engine.search_metadata('user', kind='Catalog', limit=20)
         assert results, "EN alias 'Catalog' (any case) should work"
         assert all(r['kind'] == 'Справочник' for r in results)
@@ -187,7 +187,7 @@ def test_search_metadata_en_alias_case_insensitive_kind():
 
 def test_list_objects_kind_alias():
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = _index_report_db(tmpdir, FIXTURES / 'report_en.txt')
+        engine = _index_metadata_db(tmpdir, FIXTURES / 'xml_meta_en')
         by_en = engine.list_objects(kind='Catalog', limit=200)
         by_ru = engine.list_objects(kind='Справочник', limit=200)
         assert len(by_en) == len(by_ru) and len(by_en) > 0
@@ -198,12 +198,12 @@ def test_list_objects_kind_alias():
 # D5: case-insensitive search (Cyrillic + EN)
 # ============================================
 
-def _build_project_db_with_bsl(tmpdir: str, xml_dir: Path, report: Path) -> SearchEngine:
+def _build_project_db_with_bsl(tmpdir: str, xml_dir: Path) -> SearchEngine:
     db = Database(os.path.join(tmpdir, 'index.db'))
     db.connect()
     db.init_schema()
     indexer = Indexer(db)
-    indexer.index_report(str(report), source_id='main')
+    indexer.index_xml_metadata(str(xml_dir), source_id='main')
     known_modules, known_objects = Indexer.scan_known_names([str(xml_dir)])
     indexer.index_bsl(str(xml_dir), source_id='main',
                        known_modules=known_modules, known_objects=known_objects)
@@ -214,7 +214,7 @@ def test_search_procedures_lowercase_en_finds_mixed_case():
     """search_procedures(query='getintegrationsettings') finds GetIntegrationSettings —
     a real exported function in tests/fixtures/xml_en/CommonModules/IntegrationServer."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = _build_project_db_with_bsl(tmpdir, FIXTURES / 'xml_en', FIXTURES / 'report_en.txt')
+        engine = _build_project_db_with_bsl(tmpdir, FIXTURES / 'xml_en')
         results = engine.search_procedures('getintegrationsettings')
         names = [r['name'] for r in results]
         assert 'GetIntegrationSettings' in names, f"Expected GetIntegrationSettings, got {names}"
@@ -249,7 +249,7 @@ def test_search_metadata_cyrillic_case_insensitive():
     """D5's original defect: search_procedures/search_metadata was
     case-sensitive on Cyrillic (SQLite LIKE only folds ASCII)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = _index_report_db(tmpdir, FIXTURES / 'report_ru.txt')
+        engine = _index_metadata_db(tmpdir, FIXTURES / 'xml_meta_ru')
         lower = engine.search_metadata('склады', limit=20)
         upper = engine.search_metadata('СКЛАДЫ', limit=20)
         mixed = engine.search_metadata('Склады', limit=20)
@@ -261,7 +261,7 @@ def test_search_metadata_cyrillic_case_insensitive():
 
 def test_search_procedures_cyrillic_case_insensitive():
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = _build_project_db_with_bsl(tmpdir, FIXTURES / 'xml_ru', FIXTURES / 'report_ru.txt')
+        engine = _build_project_db_with_bsl(tmpdir, FIXTURES / 'xml_ru')
         lower = engine.search_procedures('присозданиинасервере')
         upper = engine.search_procedures('ПРИСОЗДАНИИНАСЕРВЕРЕ')
         assert lower and upper

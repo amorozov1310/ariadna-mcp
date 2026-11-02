@@ -29,7 +29,7 @@ def _build_engine(tmpdir: str, xml_dir: Path, report: Path | None = None) -> Sea
     db.init_schema()
     indexer = Indexer(db)
     if report:
-        indexer.index_report(str(report), source_id='main')
+        indexer.index_xml_metadata(str(report), source_id='main')
     known_modules, known_objects = Indexer.scan_known_names([str(xml_dir)])
     indexer.index_bsl(str(xml_dir), source_id='main',
                        known_modules=known_modules, known_objects=known_objects)
@@ -191,9 +191,7 @@ def _pm_with_xml_en(tmpdir: str) -> ProjectManager:
     buf.seek(0)
     pm = ProjectManager(data_dir=tmpdir)
     pm.create_project('p1', 'p1')
-    with open(FIXTURES / 'report_en.txt', 'rb') as f:
-        pm.add_source('p1', 'main', 'Main', report_file=f,
-                      xml_archive=buf, xml_archive_filename='x.zip')
+    pm.add_source('p1', 'main', 'Main', xml_archive=buf, xml_archive_filename='x.zip')
     pm.reindex('p1')
     return pm
 
@@ -316,9 +314,7 @@ def _pm_with_xml_ru(tmpdir: str) -> ProjectManager:
     buf.seek(0)
     pm = ProjectManager(data_dir=tmpdir)
     pm.create_project('p1', 'p1')
-    with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-        pm.add_source('p1', 'main', 'Main', report_file=f,
-                      xml_archive=buf, xml_archive_filename='x.zip')
+    pm.add_source('p1', 'main', 'Main', xml_archive=buf, xml_archive_filename='x.zip')
     pm.reindex('p1')
     return pm
 

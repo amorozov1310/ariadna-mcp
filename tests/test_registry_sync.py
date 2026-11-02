@@ -42,10 +42,8 @@ def two_pms():
         pm_mcp = ProjectManager(tmpdir)
         try:
             pm_web.create_project('p1', 'P1')
-            with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-                pm_web.add_source('p1', 'main', 'Main', report_file=f,
-                                  xml_archive=_zip(FIXTURES / 'xml_ru'),
-                                  xml_archive_filename='x.zip')
+            pm_web.add_source('p1', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'),
+                              xml_archive_filename='x.zip')
             yield pm_web, pm_mcp
         finally:
             pm_web.close_all()

@@ -1,11 +1,11 @@
 """
 Метаданные прямо из XML-выгрузки (src/core/xml_metadata.py).
 
-tests/fixtures/xml_meta_ru и xml_meta_en — выгрузки той же синтетической
-модели, что и report_ru.txt/report_en.txt (собирает
+tests/fixtures/xml_meta_ru и xml_meta_en — выгрузки синтетической модели,
+описанной в report_ru.txt/report_en.txt (собирает и разбирает
 tests/fixtures/generate_metadata.py), поэтому разбор XML сверяется с
-разбором отчёта целиком: объекты, реквизиты с типами, табличные части,
-формы, значения перечислений, флаги общих модулей, состав подсистем.
+моделью целиком: объекты, реквизиты с типами, табличные части, формы,
+значения перечислений, флаги общих модулей, состав подсистем.
 """
 
 import io
@@ -22,7 +22,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.project_manager import ProjectManager
-from src.core.report_parser import parse_report
+sys.path.insert(0, str(Path(__file__).parent / 'fixtures'))
+from report_format import parse_report   # модель фикстур, только для генератора и сверки
 from src.core.xml_metadata import _Lang, has_configuration, parse_xml_dump
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -49,7 +50,7 @@ def _shape(obj):
 
 
 @pytest.mark.parametrize('lang', ['ru', 'en'])
-def test_xml_dump_matches_configurator_report(lang):
+def test_xml_dump_matches_fixture_model(lang):
     report_config, report_objects = parse_report(FIXTURES / f'report_{lang}.txt')
     config, objects = parse_xml_dump(FIXTURES / f'xml_meta_{lang}')
 
@@ -137,7 +138,7 @@ def test_unreadable_object_file_is_skipped_with_warning(caplog):
 
 def test_has_configuration():
     assert has_configuration(FIXTURES / 'xml_meta_ru')
-    assert not has_configuration(FIXTURES / 'xml_ru')   # фикстура кода — без метаданных
+    assert not has_configuration(FIXTURES / 'xml_ru_ext')   # только модули, без метаданных
     assert not has_configuration(FIXTURES / 'нет-такого-каталога')
 
 
@@ -165,7 +166,6 @@ def test_project_from_xml_only_gets_metadata_and_code():
             source = pm.add_source('p1', 'main', 'Main',
                                    xml_archive=_zip(FIXTURES / 'xml_meta_ru', FIXTURES / 'xml_ru'),
                                    xml_archive_filename='x.zip')
-            assert source.report_path == ''
             stats = pm.reindex('p1')
             assert pm.get_project('p1').status == 'ready'
             assert stats.total_objects == 48
@@ -177,23 +177,18 @@ def test_project_from_xml_only_gets_metadata_and_code():
             assert {a['name'] for a in details['attributes']} == {'ТипСклада', 'Ответственный'}
             assert {f['name'] for f in details['forms']} == {'ФормаЭлемента', 'ФормаСписка'}
             assert [r['name'] for r in engine.search_procedures('РассчитатьЦену')]
-            # report.txt больше не создаётся.
-            assert not list(Path(tmpdir).rglob('report.txt'))
-            assert pm.get_project('p1').sources[0].report_path == ''
         finally:
             pm.close_all()
 
 
-def test_xml_metadata_preferred_over_uploaded_report():
-    """Есть и отчёт, и выгрузка с Configuration.xml — метаданные из выгрузки:
-    она согласована с индексируемым кодом, отчёт мог устареть."""
+def test_metadata_only_dump_is_indexed():
+    """Выгрузка без модулей (только Configuration.xml и файлы объектов) —
+    метаданные индексируются, имя конфигурации берётся из Configuration.xml."""
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = ProjectManager(data_dir=tmpdir)
         try:
             pm.create_project('p1', 'p1')
-            with open(FIXTURES / 'report_en.txt', 'rb') as f:
-                pm.add_source('p1', 'main', 'Main', report_file=f,
-                              xml_archive=_zip(FIXTURES / 'xml_meta_ru'), xml_archive_filename='x.zip')
+            pm.add_source('p1', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_meta_ru'), xml_archive_filename='x.zip')
             stats = pm.reindex('p1')
             assert stats.total_objects == 48
             row = pm.get_db('p1').conn.execute("SELECT config_name FROM sources WHERE id='main'").fetchone()

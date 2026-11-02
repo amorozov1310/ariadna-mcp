@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.project_manager import ProjectManager
 
-FIXTURE = Path(__file__).parent / 'fixtures' / 'report_ru.txt'
+FIXTURE = Path(__file__).parent / 'fixtures' / 'xml_meta_ru'
 TD = '/tmp/test_pm'
 
 
@@ -19,7 +19,7 @@ def _make_project(pm, pid='proj'):
     pm.create_project(pid, f'Test {pid}')
     sd = Path(TD) / 'projects' / pid / 'sources' / 'main'
     sd.mkdir(parents=True, exist_ok=True)
-    shutil.copy(FIXTURE, sd / 'report.txt')
+    shutil.copytree(FIXTURE, sd / 'xml')
     pm.add_source(pid, 'main', 'Main Config')
 
 
@@ -59,7 +59,7 @@ def test_add_source_volume():
     _make_project(pm)
     proj = pm.get_project('proj')
     assert len(proj.sources) == 1
-    assert proj.sources[0].report_path == 'sources/main/report.txt'
+    assert proj.sources[0].xml_path == 'sources/main/xml'
     pm.close_all()
 
 
@@ -80,7 +80,7 @@ def test_multi_source():
     for sid in ['main', 'ext1']:
         sd = Path(TD) / 'projects' / 'multi' / 'sources' / sid
         sd.mkdir(parents=True, exist_ok=True)
-        shutil.copy(FIXTURE, sd / 'report.txt')
+        shutil.copytree(FIXTURE, sd / 'xml')
         pm.add_source('multi', sid, f'Source {sid}',
                        source_type='main' if sid == 'main' else 'extension')
     stats = pm.reindex('multi')

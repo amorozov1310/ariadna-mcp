@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
+from fixture_zip import zip_dir
 
 from src.core.project_manager import ProjectManager
 from src.mcp_server.tools import execute_tool
@@ -158,12 +160,11 @@ def test_search_procedures_uppercase_cyrillic_query_finds_mixed_case():
 
 
 def test_attribute_results_include_attribute_name():
-    report = FIXTURES / 'report_en.txt'
+    meta = FIXTURES / 'xml_meta_en'
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = ProjectManager(data_dir=tmpdir)
         pm.create_project('p1', 'p1')
-        with open(report, 'rb') as f:
-            pm.add_source('p1', 'main', 'Main', report_file=f)
+        pm.add_source('p1', 'main', 'Main', xml_archive=zip_dir(meta), xml_archive_filename='x.zip')
         pm.reindex('p1')
         try:
             db = pm.get_db('p1')

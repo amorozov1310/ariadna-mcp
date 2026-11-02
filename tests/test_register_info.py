@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.project_manager import ProjectManager
 from src.core.register_info import object_properties, query_hints
-from src.core.report_parser import MetadataObject
+from src.core.metadata_model import MetadataObject
 from src.mcp_server.tools import execute_tool
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -56,15 +56,15 @@ def _details(pm, name):
 
 @pytest.mark.parametrize('props, expected', [
     ({'RegisterType': 'Balance'}, [('ВидРегистра', 'Остатки')]),
-    ({'ВидРегистра': 'Обороты'}, [('ВидРегистра', 'Обороты')]),
+    ({'RegisterType': 'Turnovers'}, [('ВидРегистра', 'Обороты')]),
     ({'InformationRegisterPeriodicity': 'Nonperiodical', 'WriteMode': 'RecorderSubordinate'},
      [('Периодичность', 'Непериодический'), ('РежимЗаписи', 'ПодчинениеРегистратору')]),
-    ({'ПериодичностьРегистраСведений': 'В пределах секунды'}, [('Периодичность', 'Секунда')]),
+    ({'InformationRegisterPeriodicity': 'Second'}, [('Периодичность', 'Секунда')]),
     ({'ChartOfAccounts': 'ChartOfAccounts.Хозрасчетный', 'Correspondence': 'true'},
      [('ПланСчетов', 'ПланСчетов.Хозрасчетный'), ('Корреспонденция', 'Да')]),
-    ({'Синоним': 'не свойство регистра'}, []),
+    ({'Hierarchical': 'true'}, []),
 ])
-def test_properties_normalized_from_xml_and_report(props, expected):
+def test_properties_normalized_from_xml(props, expected):
     assert object_properties(MetadataObject(properties=props)) == expected
 
 
@@ -112,15 +112,3 @@ def test_reindex_does_not_duplicate_properties(xml_pm):
     xml_pm.reindex('p1')
     assert _details(xml_pm, 'РегистрНакопления.ТоварыНаСкладах') == before
 
-
-def test_report_source_has_register_kind_but_no_records():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-            pm = _pm(tmpdir, report_file=f)
-        try:
-            text = _details(pm, 'РегистрНакопления.ТоварыНаСкладах')
-            assert 'Вид регистра: остатки' in text
-            assert 'Движения делают' not in text   # движения в отчёте не разбираются
-            assert 'Периодичность: День' in _details(pm, 'РегистрСведений.КурсыВалют')
-        finally:
-            pm.close_all()

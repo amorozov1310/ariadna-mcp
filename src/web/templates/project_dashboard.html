@@ -121,24 +121,12 @@
                 </div>
                 <div class="source-meta">
                     <span class="meta-item mono">{{ src.id }}</span>
-                    {#
-                      Раньше здесь висело «отчёт есть» — след времён, когда
-                      отчёт Конфигуратора загружали руками. Теперь он
-                      генерируется из XML при индексации, и сам по себе ни о
-                      чём не говорит. Показываем то, что реально определяет
-                      возможности источника: есть ли XML (без неё нет кода
-                      BSL, а значит ни графа вызовов, ни поиска по коду).
-                    #}
+                    {# Возможности источника определяет XML-выгрузка: без неё нет ни
+                       метаданных, ни кода BSL. #}
                     {% if src.xml_path %}
                     <span class="meta-item" title="XML-выгрузка конфигурации — из неё индексируются метаданные и код BSL">
                         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#folder"/></svg>
                         XML-выгрузка
-                    </span>
-                    {% elif src.report_path %}
-                    <span class="meta-item" style="color:var(--warning)"
-                          title="Источник добавлен только отчётом по конфигурации: метаданные есть, кода BSL нет">
-                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#file-text"/></svg>
-                        только отчёт, без кода BSL
                     </span>
                     {% else %}
                     <span class="meta-item" style="color:var(--warning)" title="У источника нет данных для индексации">
@@ -200,9 +188,6 @@
                                 </select>
                             </div>
                         </div>
-                        {# Отчёт по конфигурации здесь не загружают: с этапа 5 он
-                           генерируется из XML сам при индексации. Источник —
-                           только XML-выгрузка. #}
                         <div class="form-group">
                             <label>Новая XML-выгрузка (.zip) — необязательно</label>
                             <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
@@ -223,7 +208,7 @@
         {% endfor %}
     </div>
     {% else %}
-    <p class="text-muted" style="margin-top:var(--space-2)">Нет источников. Добавьте отчёт по конфигурации или XML-выгрузку.</p>
+    <p class="text-muted" style="margin-top:var(--space-2)">Нет источников. Добавьте XML-выгрузку конфигурации.</p>
     {% endif %}
 
     <details class="disclosure" style="margin-top:var(--space-3)">
@@ -252,18 +237,12 @@
                     </select>
                 </div>
             </div>
-            {#
-              Отчёта по конфигурации здесь нет: метаданные индексатор
-              читает прямо из XML-выгрузки (src/core/xml_metadata.py),
-              так что выгружать отчёт из Конфигуратора не нужно.
-              Единственный вход — XML.
-            #}
             <div class="form-group">
                 <label>XML-выгрузка (.zip)</label>
                 <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
                 <div class="form-hint">
-                    Отчёт по конфигурации выгружать не нужно — он строится из этой XML сам.
-                    Файл необязателен при монтировании volume: положите выгрузку в
+                    Конфигуратор → «Конфигурация» → «Выгрузить конфигурацию в файлы»
+                    (формат EDT не поддерживается). Файл необязателен при монтировании volume: положите выгрузку в
                     <span class="mono">/data/projects/{{ project.id }}/sources/{id}/xml/</span>
                 </div>
             </div>
@@ -306,7 +285,7 @@ const PROJECT_ID = "{{ project.id }}";
 const PHASE_NAMES = {
     scanning: 'сканирование выгрузки',
     factory_functions: 'анализ общих модулей',
-    report: 'отчёт по конфигурации',
+    metadata: 'метаданные из выгрузки',
     bsl: 'разбор кода BSL',
     bsl_full: 'полный перепарс BSL: изменилась версия парсера',
     resolving: 'разрешение графа вызовов',

@@ -33,9 +33,7 @@ def _zip(src: Path) -> io.BytesIO:
 
 def _index_project(pm: ProjectManager, project_id: str = 'p1') -> None:
     pm.create_project(project_id, project_id)
-    with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-        pm.add_source(project_id, 'main', 'Main', report_file=f,
-                      xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+    pm.add_source(project_id, 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
     pm.reindex(project_id)
 
 

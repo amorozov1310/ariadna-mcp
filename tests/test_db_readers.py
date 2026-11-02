@@ -128,9 +128,7 @@ def _pm_with_project(tmpdir: str, index_dir: str) -> ProjectManager:
     buf.seek(0)
     pm = ProjectManager(tmpdir, index_dir=index_dir)
     pm.create_project('p1', 'p1')
-    with open(fixtures / 'report_ru.txt', 'rb') as f:
-        pm.add_source('p1', 'main', 'Main', report_file=f,
-                      xml_archive=buf, xml_archive_filename='x.zip')
+    pm.add_source('p1', 'main', 'Main', xml_archive=buf, xml_archive_filename='x.zip')
     pm.reindex('p1')
     return pm
 

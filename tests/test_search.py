@@ -9,7 +9,7 @@ from src.core.db import Database
 from src.core.indexer import Indexer
 from src.core.search import SearchEngine, format_search_results, format_object_details
 
-FIXTURE = str(Path(__file__).parent / 'fixtures' / 'report_ru.txt')
+FIXTURE = str(Path(__file__).parent / 'fixtures' / 'xml_meta_ru')
 TD = '/tmp/test_search'
 
 _last_db = None
@@ -27,7 +27,7 @@ def _engine():
     db = Database(f'{TD}/s.db')
     db.connect()
     db.init_schema()
-    Indexer(db).index_report(FIXTURE, source_id='main')
+    Indexer(db).index_xml_metadata(FIXTURE, source_id='main')
     _last_db = db
     return SearchEngine(db)
 

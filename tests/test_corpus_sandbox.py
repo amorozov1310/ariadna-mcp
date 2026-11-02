@@ -3,8 +3,7 @@
 фикстурах — в облаке реальных корпусов нет.
 
 «Реальный» data/ собирается из фикстур так же, как его заполняет Web UI:
-реестр, выгрузки в projects/{id}/sources/{id}/xml, у одного источника
-метаданные из report.txt, у другого — из Configuration.xml выгрузки. Затем
+реестр, выгрузки в projects/{id}/sources/{id}/xml с Configuration.xml. Затем
 проект индексируется и опрашивается через песочницу, и проверяется, что в
 «реальном» data/ не изменился ни один файл, а индексы и реестр оказались
 во временном каталоге.
@@ -42,9 +41,7 @@ def _real_data(root: Path) -> Path:
     data = root / 'real-data'
     pm = ProjectManager(str(data))
     pm.create_project('corpus', 'Корпус')
-    with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-        pm.add_source('corpus', 'main', 'Main', report_file=f,
-                      xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+    pm.add_source('corpus', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
     pm.add_source('corpus', 'ext', 'Ext', source_type='extension',
                   xml_archive=_zip(FIXTURES / 'xml_meta_en'), xml_archive_filename='x.zip')
     pm.close_all()
@@ -70,7 +67,6 @@ def test_sandbox_reads_corpus_and_writes_nothing_to_data():
             # Источники указывают на реальные выгрузки абсолютными путями.
             xml = pm.get_source_xml_path('corpus', 'main')
             assert xml == (real / 'projects' / 'corpus' / 'sources' / 'main' / 'xml').resolve()
-            assert pm.get_source_report_path('corpus', 'main').is_file()
             with pytest.raises(KeyError):
                 pm.get_project('нет-такого')
 
@@ -79,7 +75,6 @@ def test_sandbox_reads_corpus_and_writes_nothing_to_data():
             assert stats.total_procedures > 0 and stats.total_objects > 0
 
             # Метаданные расширения — из Configuration.xml его выгрузки.
-            assert pm.get_source_report_path('corpus', 'ext') is None
             users = pm.get_search('corpus').search_metadata('Users', source_id='ext')
             assert [r['full_name'] for r in users][:1] == ['Справочник.Users']
 
@@ -156,7 +151,7 @@ def test_snapshot_catches_change_of_sandboxed_project(edit, expected):
         assert expected in str(exc.value), str(exc.value)
 
 
-def test_snapshot_catches_new_index_and_changed_report():
+def test_snapshot_catches_new_index():
     with tempfile.TemporaryDirectory() as tmp:
         real = _real_data(Path(tmp))
         before = data_snapshot(real, ['corpus'])
@@ -165,10 +160,3 @@ def test_snapshot_catches_new_index_and_changed_report():
             assert_data_unchanged(real, before)
         assert 'появились файлы индекса' in str(exc.value) and 'index.db' in str(exc.value)
 
-        real2 = _real_data(Path(tmp) / 'second')
-        before = data_snapshot(real2, ['corpus'])
-        report = real2 / 'projects' / 'corpus' / 'sources' / 'main' / 'report.txt'
-        report.write_bytes(report.read_bytes() + b'\n')
-        with pytest.raises(AssertionError) as exc:
-            assert_data_unchanged(real2, before)
-        assert 'report.txt' in str(exc.value)

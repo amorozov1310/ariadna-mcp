@@ -48,9 +48,6 @@ from mcp import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
-# Отчёт по конфигурации к той же выгрузке: в фикстуре кода xml_ru нет
-# Configuration.xml, метаданные берутся из отчёта.
-FIXTURE_REPORT = ROOT / 'tests' / 'fixtures' / 'report_ru.txt'
 EXPECTED_TOOLS = 17
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
@@ -141,8 +138,7 @@ class LiveContext:
             if with_source:
                 r = c.post(f'/api/projects/{project_id}/sources',
                            data={'source_id': 'main', 'label': 'Main'},
-                           files={'xml_archive': ('xml_ru.zip', fixture_zip(), 'application/zip'),
-                                  'report_file': ('report.txt', FIXTURE_REPORT.read_bytes(), 'text/plain')})
+                           files={'xml_archive': ('xml_ru.zip', fixture_zip(), 'application/zip')})
                 if r.status_code != 303:
                     raise RuntimeError(f"источник проекта {project_id}: HTTP {r.status_code} {r.text[:200]}")
 

@@ -19,7 +19,7 @@ from typing import NamedTuple
 
 from .db import Database
 from .register_info import RECORDS, query_hints
-from .report_parser import canonicalize_kind
+from .metadata_model import canonicalize_kind
 
 logger = logging.getLogger('ariadna')
 
@@ -85,7 +85,7 @@ def resolve_module_ids(conn, module_name: str, source_id: str | None = None) -> 
 
     Ranked, and only the best-ranked group is returned: exact name
     ("ОбщийМодуль.ОбщегоНазначения.Модуль", or a bare common-module name
-    stored from report.txt) → a common module's short name
+    in an index built from a configuration report before 1.3) → a common module's short name
     ("ОбщегоНазначения") → a whole dotted segment ("Номенклатура.МодульМенеджера")
     → plain substring, shortest name first. A bare substring match alone
     would let "ОбщегоНазначения" resolve to "ОтчетыОбщегоНазначения".
@@ -984,7 +984,7 @@ _UNRESOLVED_GROUPS = ('module_missing', 'method_missing', 'other')
 
 def _module_short_name(name_cf: str) -> str:
     """Имя объекта из имени модуля: 'общиймодуль.x.модуль' / 'справочник.x.…'
-    → 'x'; голое имя общего модуля (строка из отчёта) — само имя."""
+    → 'x'; голое имя общего модуля (индекс до 1.3, из отчёта) — само имя."""
     parts = name_cf.split('.')
     return parts[1] if len(parts) > 1 else parts[0]
 
@@ -1006,7 +1006,7 @@ def _unresolved_breakdown(conn, top_limit: int = 20, hints_limit: int = 3) -> di
     Модуль ищется тем же ключом, что в Indexer.resolve_calls (по всем
     источникам, без учёта регистра), иначе группы расходились бы с тем, что
     резолвер реально мог найти. «Есть» = есть хотя бы одна процедура: строка
-    modules из report.txt без BSL-кода для резолвера всё равно пуста.
+    modules без BSL-кода (только из метаданных) для резолвера всё равно пуста.
     """
     # name_cf модуля -> {name_cf процедуры}; только модули с кодом.
     module_procs: dict[str, set[str]] = {}

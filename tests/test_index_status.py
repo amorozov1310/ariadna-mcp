@@ -1,7 +1,7 @@
 """
 get_index_status во время переиндексации.
 
-Indexer.index_report в конце писал в index_state status='ready', а
+Indexer.index_report (до 1.3 — разбор отчёта) в конце писал в index_state status='ready', а
 ProjectManager.reindex вызывает его для каждого источника первым — до
 index_bsl и resolve_calls. Всю фазу разбора BSL (на крупной конфигурации — минуты)
 get_index_status отвечал «Status: ready» с Procedures: 0 и без строки
@@ -34,9 +34,7 @@ def _pm(tmpdir: str) -> ProjectManager:
     buf.seek(0)
     pm = ProjectManager(tmpdir)
     pm.create_project('p1', 'p1')
-    with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-        pm.add_source('p1', 'main', 'Main', report_file=f,
-                      xml_archive=buf, xml_archive_filename='x.zip')
+    pm.add_source('p1', 'main', 'Main', xml_archive=buf, xml_archive_filename='x.zip')
     return pm
 
 
@@ -48,7 +46,7 @@ def _spy_index_bsl(monkeypatch, pm, seen: list, fail: bool = False):
     real = Indexer.index_bsl
 
     def spy(self, *a, **kw):
-        # Метаданные (index_report) уже записаны, BSL ещё не разобран.
+        # Метаданные (index_xml_metadata) уже записаны, BSL ещё не разобран.
         seen.append((pm.get_db('p1').get_stats()['status'], _status(pm)))
         if fail:
             raise RuntimeError('разбор BSL упал')
@@ -105,7 +103,7 @@ def test_indexer_alone_does_not_touch_status():
         db.update_state(status='indexing')
         try:
             ix = Indexer(db)
-            ix.index_report(str(FIXTURES / 'report_ru.txt'), source_id='main')
+            ix.index_xml_metadata(str(FIXTURES / 'xml_meta_ru'), source_id='main')
             ix.index_bsl(str(FIXTURES / 'xml_ru'), source_id='main')
             state = db.get_stats()
             assert state['status'] == 'indexing'

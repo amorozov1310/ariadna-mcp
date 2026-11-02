@@ -58,9 +58,7 @@ def pm():
     with tempfile.TemporaryDirectory() as tmpdir:
         manager = ProjectManager(tmpdir)
         manager.create_project('p1', 'p1')
-        with open(FIXTURES / 'report_en.txt', 'rb') as f:
-            manager.add_source('p1', 'main', 'Main', report_file=f,
-                               xml_archive=buf, xml_archive_filename='x.zip')
+        manager.add_source('p1', 'main', 'Main', xml_archive=buf, xml_archive_filename='x.zip')
         manager.reindex('p1')
         try:
             yield manager

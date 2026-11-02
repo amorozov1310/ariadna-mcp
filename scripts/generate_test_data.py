@@ -16,7 +16,7 @@ from src.core.project_manager import ProjectManager
 
 def main():
     data_dir = sys.argv[1] if len(sys.argv) > 1 else './data'
-    fixture = Path(__file__).parent.parent / 'tests' / 'fixtures' / 'report_ru.txt'
+    fixture = Path(__file__).parent.parent / 'tests' / 'fixtures' / 'xml_ru'
 
     if not fixture.exists():
         print(f"Error: fixture not found at {fixture}")
@@ -39,14 +39,14 @@ def main():
     if not project.sources:
         source_dir = Path(data_dir) / 'projects' / project_id / 'sources' / 'main'
         source_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(fixture, source_dir / 'report.txt')
+        shutil.copytree(fixture, source_dir / 'xml', dirs_exist_ok=True)
         pm.add_source(project_id, 'main', 'Основная конфигурация')
         print("Added source: main")
 
     # Index
     print("Indexing...")
     stats = pm.reindex(project_id)
-    print(f"Done: {stats.total_objects} objects, {stats.total_attributes} attributes in {stats.duration_sec}s")
+    print(f"Done: {stats.total_objects} objects, {stats.total_procedures} procedures in {stats.duration_sec}s")
 
     pm.close_all()
     print(f"\nProject ready. Start server: DATA_DIR={data_dir} python -m src.main")
