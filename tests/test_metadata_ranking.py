@@ -98,3 +98,29 @@ def test_unknown_phrase_gives_nothing_instead_of_noise(engine):
 def test_synonym_equal_to_query_counts_as_exact(engine):
     assert _names(engine, 'Курсы валют')[0] == 'РегистрСведений.КурсыВалют'
     assert _names(engine, 'товары на складах')[0] == 'РегистрНакопления.ТоварыНаСкладах'
+
+
+def test_object_found_by_words_of_its_name(engine):
+    """Синоним без слов запроса — объект находится по имени, разбитому на слова."""
+    conn = engine.db.conn or engine.db.connect()
+    engine.db.conn.execute("UPDATE metadata_objects SET synonym = 'Приход', synonym_cf = 'приход' "
+                           "WHERE full_name = 'Документ.ПоступлениеТоваров'")
+    engine.db.conn.commit()
+    try:
+        assert _names(engine, 'поступление товаров')[0] == 'Документ.ПоступлениеТоваров'
+    finally:
+        engine.db.conn.execute("UPDATE metadata_objects SET synonym = 'Поступление товаров', "
+                               "synonym_cf = 'поступление товаров' "
+                               "WHERE full_name = 'Документ.ПоступлениеТоваров'")
+        engine.db.conn.commit()
+
+
+def test_attributes_answer_question_in_own_words(engine):
+    """«количество товаров на складах» — ресурс Количество регистра «Товары на
+    складах»: всех слов нет ни в одном реквизите, а владелец совпадает по
+    синониму — его реквизиты выше одноимённых реквизитов документов."""
+    rows = engine.search_attributes('количество товаров на складах', limit=5)
+    found = [(r['object_full_name'], r['name']) for r in rows]
+    assert ('РегистрНакопления.ТоварыНаСкладах', 'Количество') in found[:2]
+    # Одно слово — по-прежнему все реквизиты с ним, точные совпадения первыми.
+    assert engine.search_attributes('ИНН')[0]['name'] == 'ИНН'
