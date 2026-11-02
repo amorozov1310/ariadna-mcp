@@ -52,7 +52,8 @@ INSTRUCTIONS = """\
 Типовой порядок:
 - объект конфигурации: search_metadata → get_object_details(full_name из выдачи);
 - «где используется справочник/документ как тип реквизита»: find_references;
-- процедура: search_procedures → get_procedure_code(module_name, procedure_name из выдачи);
+- процедура: search_procedures → get_procedure_context (объявление, описание, кто вызывает
+  и что вызывает — одним вызовом) → get_procedure_code (module_name, procedure_name из выдачи);
   структура модуля без чтения кода — get_module_outline;
 - «кто вызывает / что вызывает»: get_call_tree (direction=up/down); передавайте
   module_name, если имя процедуры встречается в нескольких модулях;
@@ -323,6 +324,23 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         source_id: Annotated[str | None, Field(description="ID источника — если модуль с таким именем есть и в конфигурации, и в расширении")] = None,
     ) -> str:
         return run('get_procedure_code', project_id=project_id,
+                    module_name=module_name, procedure_name=procedure_name, source_id=source_id)
+
+    @mcp.tool(
+        description="Всё о процедуре одним вызовом, без кода: объявление (параметры, экспорт, "
+                     "директива), строки и файл, объект и его синоним, область, комментарий над "
+                     "объявлением, кто вызывает (с числом мест вызова) и что вызывает — один "
+                     "уровень вверх и вниз. Чтобы понять процедуру и её связи, прежде чем "
+                     "читать код; код — get_procedure_code, глубже по цепочке — get_call_tree.",
+        annotations=_READ_ONLY,
+    )
+    def get_procedure_context(
+        module_name: Annotated[str, Field(description=_MODULE)],
+        procedure_name: Annotated[str, Field(description="Имя процедуры или функции (регистр не важен)")],
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        source_id: Annotated[str | None, Field(description="ID источника — если модуль с таким именем есть и в конфигурации, и в расширении")] = None,
+    ) -> str:
+        return run('get_procedure_context', project_id=project_id,
                     module_name=module_name, procedure_name=procedure_name, source_id=source_id)
 
     @mcp.tool(

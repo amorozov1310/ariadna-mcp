@@ -191,6 +191,35 @@
       "result": "string"
     }
   },
+  "get_procedure_context": {
+    "params": {
+      "module_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "procedure_name": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
   "list_objects": {
     "params": {
       "project_id": {

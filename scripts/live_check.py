@@ -48,7 +48,7 @@ from mcp import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
-EXPECTED_TOOLS = 17
+EXPECTED_TOOLS = 18
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
 
@@ -69,6 +69,7 @@ PARITY_CASES = {
     'get_call_tree': {'procedure_name': 'РассчитатьЦену', 'direction': 'up', 'depth': 2},
     'search_code': {'query': 'Возврат'},
     'semantic_search_code': {'query': 'расчет цены со скидкой', 'limit': 3},
+    'get_procedure_context': {'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'},
     'diagnose_index': {},
     'reindex': {},
     'remove_source': {'source_id': 'main'},          # без confirm — только предпросмотр

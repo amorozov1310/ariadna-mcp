@@ -26,7 +26,7 @@ from src.mcp_server.tools import MAX_LIMIT, execute_tool
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
-# Аргументы для каждого из 17 инструментов (без project_id) — так, чтобы
+# Аргументы для каждого из 18 инструментов (без project_id) — так, чтобы
 # ответ был содержательным на фикстуре. Дополняются умолчаниями схемы.
 CASES = {
     'list_projects': {},
@@ -39,6 +39,7 @@ CASES = {
     'list_objects': {'offset': '0'},
     'search_procedures': {'query': 'Рассчитать', 'limit': '2', 'offset': '1'},
     'get_procedure_code': {'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'},
+    'get_procedure_context': {'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'},
     'get_module_outline': {'module_name': 'ЦеныСервер'},
     'get_call_tree': {'procedure_name': 'РассчитатьЦену', 'direction': 'up', 'depth': '2'},
     'search_code': {'query': 'Возврат'},
@@ -130,7 +131,7 @@ def _play(client, tool: str, params: dict) -> dict:
 
 def test_cases_cover_every_mcp_tool():
     assert set(CASES) == set(_schemas())
-    assert len(CASES) == 17
+    assert len(CASES) == 18
 
 
 @pytest.mark.parametrize('tool', sorted(CASES))

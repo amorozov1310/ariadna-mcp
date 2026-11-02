@@ -107,6 +107,67 @@ def _stale_module_warning(path: str, mod: dict) -> str:
             "(reindex).\n")
 
 
+def _call_list(rows: list[dict], shown: int) -> list[str]:
+    out = []
+    for r in rows[:shown]:
+        where = f"стр. {r['line']}" + (f", мест: {r['sites']}" if r['sites'] > 1 else '')
+        out.append(f"  {r['module_name']}.{r['procedure_name']}  ({where})")
+    if len(rows) > shown:
+        out.append(f"  … и ещё {len(rows) - shown} — get_call_tree")
+    return out
+
+
+def format_procedure_context(ctx: dict) -> str:
+    """Текст get_procedure_context: объявление, место, описание, связи.
+    В списке вызывающих «стр.» — строка вызова в модуле вызывающего."""
+    mod, proc = ctx['module'], ctx['procedure']
+    src = f"  @{ctx['source_label']}" if ctx.get('source_label') else ''
+    lines = [f"// {mod['name']}.{proc['name']}{src}"]
+    decl = proc.get('signature') or f"{proc['kind']} {proc['name']}({proc.get('params') or ''})"
+    if proc.get('is_export') and not any(w in decl.casefold() for w in ('экспорт', 'export')):
+        decl += ' Экспорт'
+    if proc.get('directive'):
+        decl = f"{proc['directive']} {decl}"
+    lines.append(decl)
+    count = proc['end_line'] - proc['start_line'] + 1
+    lines.append(f"Строки: {proc['start_line']}-{proc['end_line']} ({count}), файл {mod.get('file_path', '')}")
+    if mod.get('object_full_name'):
+        obj = mod['object_full_name']
+        if mod.get('object_synonym'):
+            obj += f" — {mod['object_synonym']}"
+        lines.append(f"Объект: {obj}")
+    if ctx.get('region'):
+        lines.append(f"Область: {ctx['region']}")
+    if ctx.get('comment'):
+        comment = ctx['comment']
+        if len(comment) > CONTEXT_COMMENT_CHARS:
+            comment = comment[:CONTEXT_COMMENT_CHARS].rstrip() + '…'
+        lines.append(f"Описание: {comment}")
+    elif not ctx.get('file_readable'):
+        lines.append("Описание: файл модуля недоступен на сервере — область и комментарий не прочитаны")
+
+    callers = ctx['callers']
+    if callers:
+        sites = sum(r['sites'] for r in callers)
+        lines.append(f"\nВызывают ({len(callers)}, мест вызова: {sites}):")
+    else:
+        lines.append("\nВызывают: никто в проиндексированном коде (точка входа, обработчик "
+                     "события или вызов по строке)")
+    lines += _call_list(callers, CONTEXT_CALLS_SHOWN)
+    if ctx['callees']:
+        lines.append(f"\nВызывает ({len(ctx['callees'])}):")
+        lines += _call_list(ctx['callees'], CONTEXT_CALLS_SHOWN)
+    unresolved = ctx['unresolved']
+    if unresolved:
+        names = ', '.join(r['name'] for r in unresolved[:CONTEXT_CALLS_SHOWN])
+        if len(unresolved) > CONTEXT_CALLS_SHOWN:
+            names += f" … и ещё {len(unresolved) - CONTEXT_CALLS_SHOWN}"
+        lines.append(f"\nНе найдены в индексе ({len(unresolved)}): {names}")
+    lines.append(f"\nКод — get_procedure_code(module_name=\"{mod['name']}\", "
+                 f"procedure_name=\"{proc['name']}\")")
+    return '\n'.join(lines)
+
+
 # ============================================
 # TOOL EXECUTION
 # ============================================
@@ -123,6 +184,11 @@ _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list
 # Сколько процедур «Missing from index» показывает diagnose_index: на большой
 # конфигурации их тысячи, а для диагностики хватает первых.
 DIAGNOSE_MISSING_SHOWN = 100
+
+# get_procedure_context: сколько вызывающих и вызываемых показывать (дальше —
+# get_call_tree) и предел описания из комментария.
+CONTEXT_CALLS_SHOWN = 20
+CONTEXT_COMMENT_CHARS = 800
 
 
 def is_error_text(text: str) -> bool:
@@ -368,6 +434,11 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             return (_stale_module_warning(path, mod)
                     + f"// {mod['name']}.{proc['name']}{src}\n"
                     f"// Lines {proc['start_line']}-{proc['end_line']}\n\n{code}")
+
+        case 'get_procedure_context':
+            ctx = engine.get_procedure_context(
+                args.get('module_name', ''), args.get('procedure_name', ''), source_id=source_id)
+            return ctx if isinstance(ctx, str) else format_procedure_context(ctx)
 
         case 'get_call_tree':
             from ..core.call_analyzer import CallAnalyzer
