@@ -154,7 +154,7 @@ def search(engine, project_id: str, query: str, source_id: str | None,
     }
 
 
-_MATCH_LABEL = {'exact_name': 'имя', 'fts': 'текст'}
+_MATCH_LABEL = {'exact_name': 'имя', 'fts': 'текст', 'glossary': 'словарь'}
 
 
 def format_text(data: dict) -> str:

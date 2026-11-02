@@ -79,3 +79,6 @@ rules, `AGENTS.md`, `CLAUDE.md`) и другие MCP-серверы со сво�
 - `get_procedure_context(module_name, procedure_name)` — всё о процедуре без
   кода (объявление, описание, кто вызывает и что вызывает). Строка таблицы в
   основном и вспомогательном шаблоне.
+- Словарь проекта: `add_glossary_term(target, terms)` — записать, какими
+  словами пользователи называют объект; `list_glossary()`,
+  `remove_glossary_term(entry_id)`. Строка в основном шаблоне.

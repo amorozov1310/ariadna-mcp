@@ -51,7 +51,7 @@
 {% set nav_section = self.active_nav()|trim %}
 {% set section_paths = {
     'overview': '', 'search': '/search', 'graph': '/graph',
-    'playground': '/playground', 'settings': '/settings'} %}
+    'playground': '/playground', 'glossary': '/glossary', 'settings': '/settings'} %}
 {% macro theme_toggle() %}
 <button type="button" class="theme-toggle" onclick="toggleTheme()"
         title="Переключить тему" aria-label="Переключить светлую и тёмную тему">
@@ -108,6 +108,9 @@
         <a class="navlink" href="/projects/{{ project.id }}/playground"
            {% if nav_section == 'playground' %}aria-current="page"{% endif %}>
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg> Playground</a>
+        <a class="navlink" href="/projects/{{ project.id }}/glossary"
+           {% if nav_section == 'glossary' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#file-text"/></svg> Словарь</a>
         <a class="navlink" href="/projects/{{ project.id }}/settings"
            {% if nav_section == 'settings' %}aria-current="page"{% endif %}>
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#settings"/></svg> Настройки</a>
@@ -141,7 +144,7 @@
 </main>
 
 {# Каждая страница объявляет свой раздел: overview | search | graph |
-   playground | settings | projects. Объявление блока обязано быть в
+   playground | glossary | settings | projects. Объявление блока обязано быть в
    родителе, чтобы дочерние шаблоны могли его переопределить, поэтому оно
    спрятано в HTML-комментарий — читается только через self.active_nav()
    в шапке. #}
