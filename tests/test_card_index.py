@@ -182,3 +182,18 @@ def test_exact_name_puts_most_called_procedure_first(tmp_path):
         manager.close_all()
 
 
+
+
+def test_common_terms_dropped_but_rarest_kept(pm):
+    from src.core.cards import card_fts_terms, drop_common_terms
+    engine = pm.get_search('p1')
+    conn = engine.db.read_conn()
+    # «объек» — в каждой карточке (строка «Объект:»), «склад» — в части.
+    terms = card_fts_terms('объект склад умолчанию')
+    kept = drop_common_terms(engine.db, conn, terms)
+    assert kept and len(kept) >= 2
+    assert all(t in terms for t in kept)
+    # Только частые термы — остаются два самых редких, запрос не пустеет.
+    assert len(drop_common_terms(engine.db, conn, ['объек', 'модул', 'проце'])) == 2
+    # Поиск по-прежнему находит процедуру по описанию.
+    assert search_cards(engine, 'тип склада по умолчанию')

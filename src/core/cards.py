@@ -19,6 +19,7 @@ content_hash — отпечаток всего, что видит поиск (ф
 import hashlib
 import math
 import re
+import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -413,8 +414,17 @@ QUERY_STOPWORDS = frozenset("""
 
 
 def card_fts_query(text: str, max_terms: int = 24) -> str:
-    """Запрос MATCH: основы слов запроса (query_stems, у некириллических —
-    слово целиком) и их корни (word_roots) через OR, по префиксу.
+    """Запрос MATCH из card_fts_terms: термы через OR, по префиксу."""
+    return _match(card_fts_terms(text, max_terms))
+
+
+def _match(terms: list[str]) -> str:
+    return ' OR '.join(f'"{t}"*' for t in terms)
+
+
+def card_fts_terms(text: str, max_terms: int = 24) -> list[str]:
+    """Термы запроса: основы слов (query_stems, у некириллических — слово
+    целиком) и их корни (word_roots).
 
     Слова короче трёх букв («по», «на», «в») и слова вопроса
     (QUERY_STOPWORDS: «сколько», «где», «должны») отбрасываются, если есть другие:
@@ -439,7 +449,53 @@ def card_fts_query(text: str, max_terms: int = 24) -> str:
         terms += [r for r in sorted(word_roots(w)) if r not in terms]
     if len(words) > 1:
         terms = [t for t in terms if not any(o != t and t.startswith(o) for o in terms)]
-    return ' OR '.join(f'"{t}"*' for t in terms[:max_terms])
+    return terms[:max_terms]
+
+
+# Почти вездесущие термы не ищутся: «объек» есть во всех карточках (строка
+# «Объект:» в заголовке). Вклад такого терма в BM25 почти нулевой, а считать
+# ранг приходится по всем совпавшим фрагментам — на крупной конфигурации это
+# сотни миллисекунд. Терм, который встречается чаще чем в COMMON_TERM_SHARE
+# фрагментов, убирается, если остаётся хотя бы MIN_TERMS_KEPT более редких.
+# Частота — оценка сверху по словарю индекса (fts5vocab во временной схеме
+# соединения: в индекс ничего не пишется). Порог — по стенду
+# (docs/hybrid-search.md): при 0,5 качество прежнее, p95 вдвое ниже; при 0,2–0,3
+# уходят и значимые слова («документ», «значение» — в трети карточек).
+COMMON_TERM_SHARE = 0.5
+MIN_TERMS_KEPT = 2
+
+
+def _term_share(db, conn, term: str) -> float:
+    """Доля фрагментов карточек с термом-префиксом (оценка сверху); кэш —
+    на объекте Database, т. е. на время жизни открытого индекса."""
+    cache = db.__dict__.setdefault('_card_term_share', {})
+    if term in cache:
+        return cache[term]
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.card_vocab "
+                 "USING fts5vocab(main, card_fts, 'row')")
+    total = cache.get('\0total')
+    if total is None:
+        total = cache['\0total'] = conn.execute('SELECT COUNT(*) FROM card_chunks').fetchone()[0] or 1
+    upper = term[:-1] + chr(ord(term[-1]) + 1)
+    docs = conn.execute('SELECT SUM(doc) FROM temp.card_vocab WHERE term >= ? AND term < ?',
+                        (term, upper)).fetchone()[0] or 0
+    cache[term] = share = min(1.0, docs / total)
+    return share
+
+
+def drop_common_terms(db, conn, terms: list[str]) -> list[str]:
+    """terms без частых (COMMON_TERM_SHARE), но не меньше MIN_TERMS_KEPT
+    самых редких; порядок прежний."""
+    if len(terms) <= MIN_TERMS_KEPT:
+        return terms
+    try:
+        share = {t: _term_share(db, conn, t) for t in terms}
+    except sqlite3.Error:
+        return terms          # словаря индекса нет (старая SQLite) — как раньше
+    rare = [t for t in terms if share[t] <= COMMON_TERM_SHARE]
+    if len(rare) < MIN_TERMS_KEPT:
+        rare = sorted(terms, key=lambda t: share[t])[:MIN_TERMS_KEPT]
+    return [t for t in terms if t in rare]
 
 
 # Общие поля выдачи search_cards: границы процедуры и файл модуля — для
@@ -502,10 +558,11 @@ def search_cards(engine, query: str, source_id: str | None = None,
     start_line/end_line — строки найденного фрагмента, proc_start/proc_end —
     всей процедуры; match — 'exact_name' (имя равно запросу) или 'fts'.
     """
-    match = card_fts_query(query)
-    if not match:
+    terms = card_fts_terms(query)
+    if not terms:
         return []
     conn = engine.db.read_conn()
+    match = _match(drop_common_terms(engine.db, conn, terms))
     exact = _exact_name_rows(conn, query.strip(), source_id, limit) \
         if _IDENTIFIER.match(query.strip()) else []
     glossary = _glossary_rows(engine, conn, query, source_id)
