@@ -19,6 +19,7 @@ alwaysApply: true
    | Нужно | Инструмент `ariadna` |
    |---|---|
    | Код одной процедуры с номерами строк | `search_procedures(query)`, затем `get_procedure_code(module_name, procedure_name)` — оба из выдачи |
+   | Процедура и её связи без кода | `get_procedure_context(module_name, procedure_name)` |
    | Структура модуля без чтения файла | `get_module_outline(module_name)` |
    | Кто вызывает / что вызывает, с учётом перехватов расширений | `get_call_tree(procedure_name, module_name, direction)` — `direction="up"` или `"down"` |
    | Где объект используется как тип реквизита | `find_references(object_name)` — имя без вида |

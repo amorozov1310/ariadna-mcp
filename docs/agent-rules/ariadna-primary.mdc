@@ -23,6 +23,7 @@ alwaysApply: true
 | Где объект используется как тип реквизита | `find_references(object_name)` — имя без вида: `Номенклатура` |
 | Где лежат данные («сколько должны пайщикам») | `search_metadata(query)` словами, как объекты называют в 1С (`взаиморасчеты аренда земельных долей`), без «сколько/где»; показатель — `search_attributes(query)`; пусто — переформулировать синонимами |
 | Процедура по имени | `search_procedures(query)`, затем `get_procedure_code(module_name, procedure_name)` — оба из выдачи |
+| Что это за процедура и с чем связана, без чтения кода | `get_procedure_context(module_name, procedure_name)` — объявление, описание, кто вызывает и что вызывает |
 | Процедура по описанию своими словами («где считается себестоимость») | `semantic_search_code(query)`, затем `get_procedure_code(module_name, procedure_name)` |
 | Структура модуля без чтения файла | `get_module_outline(module_name)` |
 | Кто вызывает / что вызывает | `get_call_tree(procedure_name, module_name, direction)` — `direction="up"` или `"down"` |

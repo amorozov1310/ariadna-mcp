@@ -636,6 +636,73 @@ class SearchEngine:
             'source_label': mod['source_label'] or mod['source_id'],
         }
 
+    def get_procedure_context(self, module_name: str, procedure_name: str,
+                              source_id: str | None = None) -> dict | str:
+        """Всё о процедуре, кроме кода, — для get_procedure_context: объявление,
+        строки, объект и его синоним, область и комментарий над объявлением
+        (из файла модуля), кто вызывает (с числом мест вызова) и что
+        вызывает (разрешённые вызовы и неразрешённые имена). Строка — ошибка
+        «не найдено» с подсказкой."""
+        from .cards import _doc_comment, _read_lines, _regions
+        conn = self.db.read_conn()
+        ids = resolve_module_ids(conn, module_name, source_id)
+        if not ids:
+            return (f"Module '{module_name}' not found. Find the module with "
+                    f"search_procedures(query=\"{procedure_name}\") — its output starts with the module name.")
+        mod = conn.execute(
+            """SELECT m.*, s.label AS source_label, o.full_name AS object_full_name,
+                      o.synonym AS object_synonym
+               FROM modules m LEFT JOIN sources s ON s.id = m.source_id
+               LEFT JOIN metadata_objects o ON o.id = m.object_id
+               WHERE m.id = ?""", (ids[0],)).fetchone()
+        proc = conn.execute(
+            "SELECT * FROM procedures WHERE module_id = ? AND name_cf = ?",
+            (mod['id'], procedure_name.strip().casefold())).fetchone()
+        if not proc:
+            return (f"Procedure '{procedure_name}' not found in module {mod['name']}. "
+                    f"List its procedures with get_module_outline(module_name=\"{mod['name']}\").")
+
+        region, comment = '', ''
+        path = self.module_file_path(mod)
+        lines = _read_lines(path) if path else None
+        if lines:
+            regions = _regions(lines)
+            if 0 < proc['start_line'] <= len(regions):
+                region = regions[proc['start_line'] - 1]
+            comment = _doc_comment(lines, proc['start_line'])
+
+        callers = [dict(r) for r in conn.execute(
+            """SELECT m.name AS module_name, p.name AS procedure_name, COUNT(*) AS sites,
+                      MIN(c.line) AS line
+               FROM calls_resolved r JOIN calls c ON c.id = r.call_id
+               JOIN procedures p ON p.id = c.caller_id JOIN modules m ON m.id = p.module_id
+               WHERE r.callee_id = ?
+               GROUP BY p.id ORDER BY m.name, p.name""", (proc['id'],))]
+        callees = [dict(r) for r in conn.execute(
+            """SELECT m.name AS module_name, p.name AS procedure_name, COUNT(*) AS sites,
+                      MIN(c.line) AS line
+               FROM calls c JOIN calls_resolved r ON r.call_id = c.id
+               JOIN procedures p ON p.id = r.callee_id JOIN modules m ON m.id = p.module_id
+               WHERE c.caller_id = ?
+               GROUP BY p.id ORDER BY MIN(c.line)""", (proc['id'],))]
+        unresolved = [dict(r) for r in conn.execute(
+            """SELECT c.callee_name AS name, COUNT(*) AS sites, MIN(c.line) AS line
+               FROM calls c
+               WHERE c.caller_id = ? AND NOT EXISTS
+                     (SELECT 1 FROM calls_resolved r WHERE r.call_id = c.id)
+               GROUP BY c.callee_name ORDER BY MIN(c.line)""", (proc['id'],))]
+        return {
+            'module': dict(mod),
+            'procedure': dict(proc),
+            'source_label': mod['source_label'] or mod['source_id'],
+            'region': region,
+            'comment': comment,
+            'file_readable': bool(lines),
+            'callers': callers,
+            'callees': callees,
+            'unresolved': unresolved,
+        }
+
     def search_code(self, query: str, file_pattern: str | None = None,
                     source_id: str | None = None, limit: int = 30,
                     offset: int = 0) -> list[dict]:
