@@ -79,7 +79,12 @@ def test_object_attributes_come_first(pm):
     lines = [l for l in text.splitlines() if l[:1].isdigit()]
     kinds = ['.Форма.' in l for l in lines]
     assert True in kinds and False in kinds
-    assert kinds == sorted(kinds), 'реквизиты форм — после реквизитов объектов'
+    # Реквизиты форм — после реквизитов объектов со всеми словами запроса;
+    # за ними может идти ранжированный поиск по любому слову (ТипСклада).
+    first_form = kinds.index(True)
+    assert first_form > 0 and not any(kinds[:first_form])
+    assert all(kinds[first_form:first_form + kinds[first_form:].index(False)]
+               if False in kinds[first_form:] else kinds[first_form:])
 
 
 def test_paging_across_object_and_form_attributes(pm):

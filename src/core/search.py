@@ -50,6 +50,13 @@ METADATA_DATA_KINDS = ('РегистрНакопления', 'РегистрСв
 # METADATA_DATA_KINDS.
 _DATA_KIND_ORDER = ('CASE m.kind ' + ' '.join(f"WHEN '{k}' THEN {i}" for i, k in enumerate(METADATA_DATA_KINDS))
                     + f' ELSE {len(METADATA_DATA_KINDS)} END')
+# Объект, в имени которого есть каждое слово запроса («поступление товаров» —
+# ПоступлениеТоваровУслуг): имя одно слитное слово, полнотекстовый индекс его
+# по частям не находит. Прибавка к рангу (BM25 отрицательный — меньше лучше).
+METADATA_NAME_WORDS_SCORE = -12.0
+# search_attributes своими словами: доля ранга объекта-владельца в ранге
+# реквизита («расход горючего» у регистра «Выполненные работы»).
+ATTRIBUTE_OWNER_WEIGHT = 0.5
 METADATA_POOL = 200                              # кандидатов-объектов из FTS
 METADATA_ATTRIBUTE_POOL = 400                    # кандидатов-реквизитов из FTS
 
@@ -189,7 +196,9 @@ class SearchEngine:
         alias, any case (D11/Этап 2) — e.g. "Catalog" == "справочник" == "Справочник".
 
         Порядок выдачи: объект с именем, равным запросу, затем с таким
-        синонимом (Справочник.схПоля — «Поля»); объекты, где есть
+        синонимом (Справочник.схПоля — «Поля»); из словаря проекта; объекты,
+        в имени которых есть каждое слово запроса («поступление товаров» —
+        ПоступлениеТоваровУслуг); объекты, где есть
         все слова запроса (как раньше); затем ранжированный поиск по основам
         слов с учётом реквизитов (_ranked_metadata) — для вопросов своими
         словами. Резервный LIKE — только если не нашлось ничего.
@@ -224,7 +233,17 @@ class SearchEngine:
             [self._fts_query(query)] + filter_params + [need])
 
         rows, seen = [], set()
-        for r in list(exact) + self._glossary_objects(query, filters, filter_params) + list(precise):
+        named_ids = self._objects_named_by(query, ''.join(' AND ' + f for f in filters), filter_params)
+        named = []
+        if named_ids:
+            marks = ','.join('?' * len(named_ids))
+            # Ближе к запросу — короче имя: ПоступлениеТоваров раньше ПоступлениеТоваровИзПереработки.
+            named = conn.execute(
+                f"""SELECT {columns} FROM metadata_objects m WHERE m.id IN ({marks})
+                    ORDER BY {_DATA_KIND_ORDER}, length(m.name), m.full_name""",
+                list(named_ids)).fetchall()
+        for r in (list(exact) + self._glossary_objects(query, filters, filter_params)
+                  + list(named) + list(precise)):
             key = (r['full_name'], r['source_id'])
             if key not in seen:
                 seen.add(key)
@@ -313,14 +332,42 @@ class SearchEngine:
                 row = dict(r)
                 scored[row.pop('id')] = (0.0, row)
 
+        named = self._objects_named_by(query, extra, filter_params)
+        missing = [oid for oid in named if oid not in scored]
+        if missing:
+            marks = ','.join('?' * len(missing))
+            for r in conn.execute(
+                    f"""SELECT m.id, m.full_name, m.kind, m.name, m.synonym, m.comment, m.source_id
+                        FROM metadata_objects m WHERE m.id IN ({marks})""", missing):
+                row = dict(r)
+                scored[row.pop('id')] = (0.0, row)
+
         def rank(item):
             oid, (score, row) = item
             # BM25 в SQLite отрицательный: меньше — лучше.
             score += METADATA_ATTRIBUTE_WEIGHT * best.get(oid, 0.0)
+            if oid in named:
+                score += METADATA_NAME_WORDS_SCORE
             if row['kind'] in METADATA_DATA_KINDS:
                 score *= METADATA_DATA_KIND_BOOST
             return score
         return [row for _, (_, row) in sorted(scored.items(), key=rank)]
+
+    def _objects_named_by(self, query: str, extra: str, filter_params: list) -> set[int]:
+        """Объекты, в имени которых есть каждое слово запроса (по основе):
+        «поступление товаров» → ПоступлениеТоваровУслуг. Только для запроса из
+        двух и более слов: одно слово и так находится по имени через FTS."""
+        from .cards import card_fts_terms, query_stems, _WORD, QUERY_STOPWORDS
+        words = [w for w in _WORD.findall(query.casefold())
+                 if len(w) >= 3 and w not in QUERY_STOPWORDS]
+        if len(words) < 2:
+            return set()
+        keys = [min(query_stems(w) or [w], key=len) for w in dict.fromkeys(words)]
+        conds = ' AND '.join(["m.name_cf LIKE '%' || ? || '%'"] * len(keys))
+        rows = self.db.read_conn().execute(
+            f"SELECT m.id FROM metadata_objects m WHERE {conds}{extra} LIMIT ?",
+            keys + filter_params + [METADATA_POOL]).fetchall()
+        return {r['id'] for r in rows}
 
     def get_object_details(self, full_name: str,
                             source_id: str | None = None) -> dict | None:
@@ -444,19 +491,30 @@ class SearchEngine:
     def search_attributes(self, query: str, type_filter: str | None = None,
                           source_id: str | None = None, limit: int = 30,
                           offset: int = 0) -> list[dict]:
-        """Реквизиты по имени, синониму или типу: сначала реквизиты объектов
-        метаданных, за ними — реквизиты форм (kind «РеквизитФормы»,
-        object_full_name — форма). Постранично по общему списку."""
-        rows = self._glossary_attributes(query, source_id)
-        known = {(r['object_full_name'], r['name']) for r in rows}
-        rows += [r for r in self._object_attributes(query, source_id, offset + limit)
-                 if (r['object_full_name'], r['name']) not in known]
-        page = rows[offset:offset + limit]
-        if len(page) < limit:
-            # Реквизиты объектов кончились — страницу дополняют реквизиты форм.
-            page += self._form_attributes(query, source_id, limit - len(page),
-                                          max(0, offset - len(rows)))
-        rows = page
+        """Реквизиты по имени, синониму или типу. Порядок: из словаря проекта;
+        реквизиты объектов со всеми словами запроса; реквизиты форм
+        (kind «РеквизитФормы», object_full_name — форма) со всеми словами;
+        затем, для вопроса своими словами, — ранжированный поиск реквизитов
+        объектов по любому слову (_ranked_attributes). Постранично по общему
+        списку."""
+        need = offset + limit
+        rows: list[dict] = []
+        seen: set[tuple] = set()
+
+        def add(items):
+            for r in items:
+                key = (r['object_full_name'], r['name'], r.get('source_id'))
+                if key not in seen and len(rows) < need:
+                    seen.add(key)
+                    rows.append(r)
+
+        add(self._glossary_attributes(query, source_id))
+        add(self._precise_attributes(query, source_id, need))
+        if len(rows) < need:
+            add(self._form_attributes(query, source_id, need, 0))
+        if len(rows) < need:
+            add(self._ranked_attributes(query, source_id))
+        rows = rows[offset:offset + limit]
         if type_filter:
             rows = [r for r in rows if type_filter.lower() in (r.get('type_desc') or '').lower()]
         return self._attach_source_labels(rows)
@@ -597,8 +655,44 @@ class SearchEngine:
                LIMIT ? OFFSET ?""", params).fetchall()
         return [dict(r) for r in rows]
 
-    def _object_attributes(self, query: str, source_id: str | None, limit: int) -> list[dict]:
-        """Реквизиты объектов метаданных: FTS, без результата — LIKE."""
+    def _ranked_attributes(self, query: str, source_id: str | None) -> list[dict]:
+        """Реквизиты по любому из слов запроса (основы, как у карточек), BM25
+        с весами ATTRIBUTE_FTS_WEIGHTS; к рангу добавляется ранг объекта-
+        владельца по тем же словам (ATTRIBUTE_OWNER_WEIGHT), реквизиты объектов
+        с данными — с METADATA_DATA_KIND_BOOST."""
+        from .cards import card_fts_query
+        match = card_fts_query(query)
+        if not match:
+            return []
+        conn = self.db.read_conn()
+        src = ' AND m.source_id = ?' if source_id else ''
+        extra = [source_id] if source_id else []
+        a, b, c, d = METADATA_FTS_WEIGHTS
+        owners = {r['id']: r['score'] for r in _fts_rows(conn, f"""
+                SELECT m.id, bm25(metadata_fts, {a}, {b}, {c}, {d}) AS score
+                FROM metadata_fts f JOIN metadata_objects m ON m.id = f.rowid
+                WHERE metadata_fts MATCH ?{src} ORDER BY score LIMIT ?""",
+                [match] + extra + [METADATA_POOL])}
+        a, b, c, d = ATTRIBUTE_FTS_WEIGHTS
+        rows = []
+        for r in _fts_rows(conn, f"""
+                SELECT a.name, a.kind, a.type_desc, a.synonym, a.object_id,
+                       m.full_name AS object_full_name, m.source_id, m.kind AS object_kind,
+                       bm25(attributes_fts, {a}, {b}, {c}, {d}) AS score
+                FROM attributes_fts f JOIN attributes a ON a.id = f.rowid
+                JOIN metadata_objects m ON m.id = a.object_id
+                WHERE attributes_fts MATCH ?{src} ORDER BY score LIMIT ?""",
+                [match] + extra + [METADATA_ATTRIBUTE_POOL]):
+            row = dict(r)
+            score = row.pop('score') + ATTRIBUTE_OWNER_WEIGHT * owners.get(row.pop('object_id'), 0.0)
+            if row.pop('object_kind') in METADATA_DATA_KINDS:
+                score *= METADATA_DATA_KIND_BOOST
+            rows.append((score, row))
+        return [row for _, row in sorted(rows, key=lambda x: x[0])]
+
+    def _precise_attributes(self, query: str, source_id: str | None, limit: int) -> list[dict]:
+        """Реквизиты, где есть все слова запроса; без результата у запроса из
+        одного слова — LIKE по подстроке."""
         conn = self.db.read_conn()
         fts_query = self._fts_query(query)
 
@@ -620,8 +714,9 @@ class SearchEngine:
                WHERE {where}
                ORDER BY rank LIMIT ?""", params)
 
-        # LIKE fallback (D5: case-insensitive)
-        if not rows:
+        # LIKE fallback (D5: case-insensitive); у фразы обрезка по символам
+        # находила случайное — см. search_metadata.
+        if not rows and len(query.split()) == 1:
             conds = ["(a.name_cf LIKE '%' || ? || '%' OR "
                      "casefold(a.synonym) LIKE '%' || casefold(?) || '%' OR "
                      "casefold(a.type_desc) LIKE '%' || casefold(?) || '%')"]
