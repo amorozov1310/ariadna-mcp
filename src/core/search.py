@@ -240,7 +240,7 @@ class SearchEngine:
             # Ближе к запросу — короче имя: ПоступлениеТоваров раньше ПоступлениеТоваровИзПереработки.
             named = conn.execute(
                 f"""SELECT {columns} FROM metadata_objects m WHERE m.id IN ({marks})
-                    ORDER BY {_DATA_KIND_ORDER}, length(m.name), m.full_name""",
+                    ORDER BY length(m.name), {_DATA_KIND_ORDER}, m.full_name""",
                 list(named_ids)).fetchall()
         for r in (list(exact) + self._glossary_objects(query, filters, filter_params)
                   + list(named) + list(precise)):
