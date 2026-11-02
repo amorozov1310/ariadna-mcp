@@ -40,9 +40,7 @@ def pm():
     with tempfile.TemporaryDirectory() as tmpdir:
         manager = ProjectManager(tmpdir)
         manager.create_project('p1', 'p1')
-        with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-            manager.add_source('p1', 'main', 'Main', report_file=f,
-                               xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+        manager.add_source('p1', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
         manager.add_source('p1', 'ext', 'Ext', source_type='extension',
                            xml_archive=_zip(FIXTURES / 'xml_ru_ext'), xml_archive_filename='x.zip')
         manager.reindex('p1')

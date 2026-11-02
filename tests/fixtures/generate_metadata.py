@@ -1,7 +1,12 @@
 """
-Генератор синтетических метаданных для тестов: отчёты по конфигурации
-(report_ru.txt, report_en.txt) и XML-выгрузки тех же конфигураций без кода
-(xml_meta_ru/, xml_meta_en/).
+Генератор синтетических метаданных для тестов: XML-выгрузки «демо-склада»
+без кода (xml_meta_ru/, xml_meta_en/) и те же метаданные в фикстурах с кодом
+(xml_ru/, xml_en/ — Configuration.xml и файлы объектов рядом с модулями;
+файлы, которые там уже есть, не трогаются).
+
+Модель описывается в формате отчёта по конфигурации (report_ru.txt,
+report_en.txt) — так её удобно читать и править; Ариадна отчёты не читает,
+их разбор — tests/fixtures/report_format.py, только для генератора.
 
 Тесты не должны зависеть от реальных конфигураций, поэтому всё собирается
 здесь из выдуманной модели «демо-склада». Формат отчёта —
@@ -18,9 +23,9 @@ BOM перед первой строкой важен: в настоящем о�
 разбор не принимает её за объект, и свойства конфигурации остаются
 свойствами конфигурации.
 
-XML-выгрузка строится из разобранного отчёта (src/core/report_parser.py) —
-так обе формы гарантированно описывают одну и ту же модель, и
-tests/test_xml_metadata.py сверяет разбор XML с разбором отчёта. Формат —
+XML-выгрузка строится из разобранного отчёта (report_format.py) — так обе
+формы гарантированно описывают одну и ту же модель, и
+tests/test_xml_metadata.py сверяет разбор XML с моделью. Формат —
 как у «Выгрузить конфигурацию в файлы»: Configuration.xml со списком
 объектов, файл на объект в каталоге вида (Catalogs/Склады.xml), вложенные
 подсистемы в Subsystems/Родитель/Subsystems/, типы в виде cfg:CatalogRef.X /
@@ -750,7 +755,8 @@ def _object_xml(obj, kind_en, lang, nested_subsystems, english):
 
 
 def write_xml_dump(report: Path, out: Path, english: bool):
-    from src.core.report_parser import OBJECT_TYPE_MAP, parse_report
+    from src.core.metadata_model import OBJECT_TYPE_MAP
+    from report_format import parse_report
 
     kinds = {ru: (en, plural) for plural, (ru, en) in OBJECT_TYPE_MAP.items() if plural.isascii()}
     global _KIND_EN
@@ -801,11 +807,23 @@ def write_xml_dump(report: Path, out: Path, english: bool):
           '\t\t</ChildObjects>\n\t</Configuration>\n</MetaDataObject>\n')
 
 
+def overlay(meta: Path, code: Path):
+    """Метаданные из xml_meta_* — в фикстуру с кодом: Configuration.xml и
+    файлы объектов, которых там ещё нет (свои файлы фикстуры остаются)."""
+    for path in meta.rglob('*'):
+        target = code / path.relative_to(meta)
+        if path.is_file() and (path.name == 'Configuration.xml' or not target.exists()):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+
+
 def main():
     write_report(build_ru(), HERE / 'report_ru.txt')
     write_report(build_en(), HERE / 'report_en.txt')
     write_xml_dump(HERE / 'report_ru.txt', HERE / 'xml_meta_ru', english=False)
     write_xml_dump(HERE / 'report_en.txt', HERE / 'xml_meta_en', english=True)
+    overlay(HERE / 'xml_meta_ru', HERE / 'xml_ru')
+    overlay(HERE / 'xml_meta_en', HERE / 'xml_en')
 
 
 if __name__ == '__main__':

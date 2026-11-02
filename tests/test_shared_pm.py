@@ -60,8 +60,7 @@ def _create_and_index_via_web(client, project_id: str = 'p1') -> None:
     assert r.status_code == 303, r.text
     r = client.post(f'/api/projects/{project_id}/sources',
                     data={'source_id': 'main', 'label': 'Main'},
-                    files={'report_file': ('report.txt', (FIXTURES / 'report_ru.txt').read_bytes()),
-                           'xml_archive': ('x.zip', _zip(FIXTURES / 'xml_ru'))},
+                    files={'xml_archive': ('x.zip', _zip(FIXTURES / 'xml_ru'))},
                     follow_redirects=False)
     assert r.status_code == 303, r.text
 

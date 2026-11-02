@@ -12,14 +12,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.core.report_parser import ReportParser, parse_report
+from src.core.xml_metadata import parse_xml_dump
 from src.core.db import Database
 from src.core.indexer import Indexer
 from src.core.search import SearchEngine, format_search_results, format_object_details
 from src.core.project_manager import ProjectManager
 
 
-FIXTURE_REPORT = Path(__file__).parent / 'fixtures' / 'report_ru.txt'
+# Синтетическая XML-выгрузка «демо-склада» (tests/fixtures/generate_metadata.py).
+FIXTURE_XML = Path(__file__).parent / 'fixtures' / 'xml_meta_ru'
 
 
 @pytest.fixture
@@ -43,26 +44,31 @@ def indexed_project(pm):
     pm.create_project('test', 'Test Project')
     source_dir = Path(pm.projects_dir) / 'test' / 'sources' / 'main'
     source_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(str(FIXTURE_REPORT), str(source_dir / 'report.txt'))
+    shutil.copytree(FIXTURE_XML, source_dir / 'xml')
+    # Модуль общего модуля — как в настоящей выгрузке: без файла модуля
+    # индексатор кода убирает его запись вместе с флагами.
+    module = source_dir / 'xml' / 'CommonModules' / 'ОбщиеНаСервере' / 'Ext' / 'Module.bsl'
+    module.parent.mkdir(parents=True)
+    module.write_text('Функция Пример() Экспорт\nКонецФункции\n', encoding='utf-8-sig')
     pm.add_source('test', 'main', 'Main config')
     pm.reindex('test')
     return pm
 
 
 # ============================================
-# REPORT PARSER
+# METADATA PARSING
 # ============================================
 
-class TestReportParser:
+class TestMetadataParsing:
 
     def test_parse_file(self):
-        config, objects = parse_report(str(FIXTURE_REPORT))
+        config, objects = parse_xml_dump(FIXTURE_XML)
         assert config.name == 'ДемоКонфигурация'
         assert config.version == '1.2.3.4'
         assert len(objects) == 48
 
     def test_object_kinds(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         kinds = {o.kind for o in objects}
         assert 'Справочник' in kinds
         assert 'Документ' in kinds
@@ -72,7 +78,7 @@ class TestReportParser:
         assert 'Подсистема' in kinds
 
     def test_object_counts(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         from collections import Counter
         counts = Counter(o.kind for o in objects)
         assert counts['Справочник'] == 8
@@ -82,7 +88,7 @@ class TestReportParser:
         assert counts['ОбщийМодуль'] == 5
 
     def test_attributes_parsed(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         cat = next(o for o in objects if o.full_name == 'Справочник.Номенклатура')
         assert len(cat.attributes) == 7
         # Check a specific attribute
@@ -93,27 +99,27 @@ class TestReportParser:
         assert art.usage == 'ДляЭлемента'
 
     def test_type_references(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         cat = next(o for o in objects if o.full_name == 'Справочник.Номенклатура')
         grp = next(a for a in cat.attributes if a.name == 'ВидНоменклатуры')
         assert grp.type_desc == 'СправочникСсылка.ВидыНоменклатуры'
 
     def test_forms_parsed(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         cat = next(o for o in objects if o.full_name == 'Справочник.Номенклатура')
         form_names = [f.name for f in cat.forms]
         assert 'ФормаЭлемента' in form_names
         assert 'ФормаСписка' in form_names
 
     def test_enum_values(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         enum = next(o for o in objects if o.full_name == 'Перечисление.ТипыЦен')
         assert len(enum.enum_values) == 2
         names = [ev.name for ev in enum.enum_values]
         assert 'Продажная' in names
 
     def test_common_modules(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         modules = [o for o in objects if o.kind == 'ОбщийМодуль']
         assert len(modules) == 5
 
@@ -132,14 +138,14 @@ class TestReportParser:
         assert glob.module_info.is_global is True
 
     def test_subsystem_content(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         sub = next(o for o in objects if o.full_name == 'Подсистема.Склад')
         assert sub.subsystem_info is not None
         assert len(sub.subsystem_info.content) == 5
         assert 'Справочник.Склады' in sub.subsystem_info.content
 
     def test_register_dimensions(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         reg = next(o for o in objects if o.full_name == 'РегистрСведений.ЦеныНоменклатуры')
         dims = [a for a in reg.attributes if a.kind == 'Измерение']
         ress = [a for a in reg.attributes if a.kind == 'Ресурс']
@@ -147,7 +153,7 @@ class TestReportParser:
         assert len(ress) == 1
 
     def test_tabular_sections(self):
-        _, objects = parse_report(str(FIXTURE_REPORT))
+        _, objects = parse_xml_dump(FIXTURE_XML)
         docs = [o for o in objects if o.kind == 'Документ' and o.tabular_sections]
         assert len(docs) > 0
         doc = docs[0]
@@ -191,10 +197,10 @@ class TestProjectManager:
         pm.create_project('p1', 'P1')
         source_dir = Path(pm.projects_dir) / 'p1' / 'sources' / 'main'
         source_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(str(FIXTURE_REPORT), str(source_dir / 'report.txt'))
+        shutil.copytree(FIXTURE_XML, source_dir / 'xml')
 
         src = pm.add_source('p1', 'main', 'Config')
-        assert src.report_path == 'sources/main/report.txt'
+        assert src.xml_path == 'sources/main/xml'
 
     def test_reindex(self, indexed_project):
         pm = indexed_project

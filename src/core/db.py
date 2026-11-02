@@ -86,10 +86,10 @@ CREATE TABLE IF NOT EXISTS modules (
     abs_path     TEXT DEFAULT '',
     -- Этап 4/D7: (source_id, name) is the stable identity a rerun looks a
     -- module up by — for incremental reindex to skip/update in place
-    -- instead of accumulating duplicate rows, both index_report (common
+    -- instead of accumulating duplicate rows, both index_metadata (common
     -- modules, flags-only) and index_bsl (everything, including refiling
-    -- an existing report.txt-created row) must agree on one name per
-    -- module, hence UPSERTing on this rather than plain INSERT.
+    -- a row created from metadata) must agree on one name per module,
+    -- hence UPSERTing on this rather than plain INSERT.
     UNIQUE(source_id, name)
 );
 

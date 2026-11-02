@@ -1,0 +1,81 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Catalog uuid="3eacf383-cc3b-56cb-a9e8-671cb0c3ab73">
+		<Properties>
+			<Name>EventKinds</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Виды событий</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="0fac5a0d-efd8-5944-b745-9cf89d341e2d">
+				<Properties>
+					<Name>Active</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>en</v8:lang>
+							<v8:content>Активный</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:boolean</v8:Type>
+					</Type>
+					<FillChecking>DontCheck</FillChecking>
+					<Use>ForItem</Use>
+					<Indexing>DontIndex</Indexing>
+				</Properties>
+			</Attribute>
+			<TabularSection uuid="8e507eca-528e-5470-b77b-9059340d9bcd">
+				<Properties>
+					<Name>Schedule</Name>
+					<Synonym/>
+					<Comment/>
+				</Properties>
+				<ChildObjects>
+					<Attribute uuid="5dc59bf3-a925-5603-b288-318da0ff15d2">
+						<Properties>
+							<Name>IntervalDays</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>en</v8:lang>
+									<v8:content>Интервал, дней</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:Type>xs:decimal</v8:Type>
+								<v8:NumberQualifiers><v8:Digits>10</v8:Digits><v8:FractionDigits>2</v8:FractionDigits><v8:AllowedSign>Any</v8:AllowedSign></v8:NumberQualifiers>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="a4779fad-70f1-527f-8b8b-a3ffc1890018">
+						<Properties>
+							<Name>Channel</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>en</v8:lang>
+									<v8:content>Канал</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<Type>
+								<v8:Type>cfg:EnumRef.Channel</v8:Type>
+							</Type>
+							<FillChecking>DontCheck</FillChecking>
+							<Indexing>DontIndex</Indexing>
+						</Properties>
+					</Attribute>
+				</ChildObjects>
+			</TabularSection>
+			<Form>ItemForm</Form>
+			<Command uuid="bca3e7d2-75f0-5d56-9994-a30aaff8a7f3"><Properties><Name>Открыть</Name></Properties></Command>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>

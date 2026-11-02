@@ -18,7 +18,7 @@ from src.core.db import Database
 from src.core.indexer import Indexer
 from src.core.call_analyzer import CallAnalyzer
 
-REPORT_FIXTURE = Path(__file__).parent / 'fixtures' / 'report_en.txt'
+META_FIXTURE = Path(__file__).parent / 'fixtures' / 'xml_meta_en'
 MODULE_FIXTURE = Path(__file__).parent / 'fixtures' / 'Module.bsl'
 
 
@@ -30,7 +30,7 @@ def _build_db_with_bsl(tmpdir: str, module_name: str = 'TestModule') -> Database
     db.init_schema()
 
     indexer = Indexer(db)
-    indexer.index_report(str(REPORT_FIXTURE), source_id='main',
+    indexer.index_xml_metadata(str(META_FIXTURE), source_id='main',
                          source_label='Ядро', source_type='main')
 
     fake_xml = os.path.join(tmpdir, 'xml')

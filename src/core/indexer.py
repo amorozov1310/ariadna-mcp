@@ -1,6 +1,6 @@
 """
-Indexer: parses a configuration report and populates per-project SQLite.
-Each call indexes one source (report.txt) into the project's DB.
+Indexer: populates per-project SQLite from an XML dump of the configuration
+(metadata — index_xml_metadata, BSL code — index_bsl), one source per call.
 """
 
 import hashlib
@@ -10,7 +10,7 @@ from datetime import datetime
 
 from .db import Database
 from .register_info import object_properties
-from .report_parser import parse_report, ConfigInfo, MetadataObject
+from .metadata_model import ConfigInfo, MetadataObject
 
 
 def module_file_hash(file_path: str | Path, form_xml_path: str | Path = '') -> str:
@@ -39,27 +39,10 @@ class Indexer:
     def __init__(self, db: Database):
         self.db = db
 
-    def index_report(self, report_path: str, source_id: str = 'main',
-                     source_label: str = '', source_type: str = 'main') -> dict:
-        """
-        Parse configuration report and populate DB.
-        
-        Args:
-            report_path: path to report.txt
-            source_id: unique source identifier within project
-            source_label: human-readable label
-            source_type: 'main' or 'extension'
-        
-        Returns: stats dict
-        """
-        start = time.time()
-        config, objects = parse_report(report_path)
-        return self.index_metadata(config, objects, source_id, source_label, source_type, start)
-
     def index_xml_metadata(self, xml_path: str, source_id: str = 'main',
                            source_label: str = '', source_type: str = 'main') -> dict:
-        """Метаданные прямо из XML-выгрузки (Configuration.xml и файлы
-        объектов) — то же, что index_report, без отчёта по конфигурации."""
+        """Метаданные из XML-выгрузки Конфигуратора (Configuration.xml и
+        файлы объектов)."""
         from .xml_metadata import parse_xml_dump
         start = time.time()
         config, objects = parse_xml_dump(xml_path)
@@ -68,7 +51,7 @@ class Indexer:
     def index_metadata(self, config: ConfigInfo, objects: list[MetadataObject],
                        source_id: str = 'main', source_label: str = '',
                        source_type: str = 'main', start: float | None = None) -> dict:
-        """Write already-parsed metadata (from a report or an XML dump) to the DB."""
+        """Write already-parsed metadata (from an XML dump) to the DB."""
         start = time.time() if start is None else start
         conn = self.db.conn
         if not conn:
@@ -206,7 +189,7 @@ class Indexer:
             # existing UNIQUE(full_name, source_id) — a rerun keeps the same
             # id for an object that's still there, so modules.object_id's
             # FK never has to CASCADE-delete a module (and its procedures/
-            # calls) just because report.txt got re-parsed. See mo_au for
+            # calls) just because metadata got re-parsed. See mo_au for
             # the matching metadata_fts sync trigger.
             cur = conn.execute(
                 """INSERT INTO metadata_objects (source_id, name, full_name, kind, synonym, comment,
@@ -642,13 +625,12 @@ class Indexer:
         # off an exact modules.name match (see index_bsl for why the dotted
         # name is the right join key, no LIKE needed) — EXCEPT common
         # modules can end up stored under two different forms depending on
-        # which pass created the row: index_report (report.txt present)
-        # stores the bare short name ("CommonAtServer"), while index_bsl's
-        # own fallback registration (XML-only source, no report.txt) uses
-        # the fully dotted form ("ОбщийМодуль.CommonAtServer.Модуль") — the
-        # same one common_module calls are looked up by below. Register
+        # which pass created the row: indexes built from a configuration
+        # report (before 1.3) stored the bare short name ("CommonAtServer"),
+        # index_bsl uses the fully dotted form ("ОбщийМодуль.CommonAtServer.Модуль")
+        # — the same one common_module calls are looked up by below. Register
         # both keys for a bare-name row so resolution doesn't silently miss
-        # every common-module call in a project that has report.txt.
+        # common-module calls in such an older index.
         module_proc_index: dict[tuple[str, str], list[tuple[int, str]]] = {}
         for r in conn.execute(
                 """SELECT m.id as module_id, m.name as mname, p.id as pid, p.name as pname

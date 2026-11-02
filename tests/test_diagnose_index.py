@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
+from fixture_zip import zip_dir
 
 from src.core.db import Database
 from src.core.search import call_graph_resolution_stats
@@ -14,7 +16,7 @@ from src.mcp_server.tools import execute_tool
 from src.core.project_manager import ProjectManager
 
 FIXTURES = Path(__file__).parent / 'fixtures'
-REPORT_FIXTURE = FIXTURES / 'report_en.txt'
+META_FIXTURE = FIXTURES / 'xml_meta_en'
 
 
 def _seed_known_graph(db: Database):
@@ -118,8 +120,7 @@ def test_diagnose_index_tool_includes_graph_section():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = ProjectManager(data_dir=tmpdir)
         pm.create_project('p1', 'p1')
-        with open(REPORT_FIXTURE, 'rb') as f:
-            pm.add_source('p1', 'main', 'Main', report_file=f)
+        pm.add_source('p1', 'main', 'Main', xml_archive=zip_dir(META_FIXTURE), xml_archive_filename='x.zip')
         pm.reindex('p1')
         try:
             text = execute_tool(pm, 'diagnose_index', {'project_id': 'p1'})

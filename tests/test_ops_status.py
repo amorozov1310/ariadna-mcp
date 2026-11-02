@@ -38,9 +38,7 @@ def pm():
     with tempfile.TemporaryDirectory() as tmpdir:
         manager = ProjectManager(tmpdir)
         manager.create_project('p1', 'p1')
-        with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-            manager.add_source('p1', 'main', 'Main', report_file=f,
-                               xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+        manager.add_source('p1', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
         # Метаданные из XML-выгрузки (Configuration.xml), без кода.
         manager.add_source('p1', 'meta', 'Meta', source_type='extension',
                            xml_archive=_zip(FIXTURES / 'xml_meta_ru'), xml_archive_filename='x.zip')
@@ -100,7 +98,7 @@ def test_manifest_describes_sources(pm):
     src = {s['id']: s for s in data['sources']}
     assert set(src) == {'main', 'meta', 'ext'}
     main = src['main']
-    assert main['metadata_from'] == 'report' and main['config_name']
+    assert main['metadata_from'] == 'xml' and main['config_name']
     assert main['indexed_at'] and main['modules'] > 0
     assert main['parser_current'] is True
     assert src['meta']['metadata_from'] == 'xml' and src['meta']['config_name']

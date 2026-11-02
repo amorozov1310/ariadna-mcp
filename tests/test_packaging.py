@@ -76,9 +76,7 @@ def test_ariadna_index_reindexes_project(capsys):
         pm = ProjectManager(data_dir)
         try:
             pm.create_project('p1', 'p1')
-            with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-                pm.add_source('p1', 'main', 'Main', report_file=f,
-                              xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+            pm.add_source('p1', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
         finally:
             pm.close_all()
 

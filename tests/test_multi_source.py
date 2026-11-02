@@ -14,7 +14,7 @@ from src.core.db import Database
 from src.core.indexer import Indexer
 from src.core.search import SearchEngine
 
-FIXTURE = Path(__file__).parent / 'fixtures' / 'report_en.txt'
+FIXTURE = Path(__file__).parent / 'fixtures' / 'xml_meta_en'
 
 
 def _build_multi_source_db(tmpdir: str) -> SearchEngine:
@@ -24,8 +24,8 @@ def _build_multi_source_db(tmpdir: str) -> SearchEngine:
     db.connect()
     db.init_schema()
     indexer = Indexer(db)
-    indexer.index_report(str(FIXTURE), source_id='main', source_label='Ядро', source_type='main')
-    indexer.index_report(str(FIXTURE), source_id='ext1', source_label='ext_inventory', source_type='extension')
+    indexer.index_xml_metadata(str(FIXTURE), source_id='main', source_label='Ядро', source_type='main')
+    indexer.index_xml_metadata(str(FIXTURE), source_id='ext1', source_label='ext_inventory', source_type='extension')
     return SearchEngine(db)
 
 

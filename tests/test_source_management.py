@@ -2,7 +2,7 @@
 Tests for source update/remove operations.
 
 Verifies:
-- update_source replaces files atomically and resets indexed_at
+- update_source replaces the XML dump and resets indexed_at
 - remove_source wipes both files AND DB rows (no orphaned data)
 - After update + reindex, the new content is reflected in queries
 - Updating only metadata (label/source_type) doesn't touch files
@@ -10,15 +10,17 @@ Verifies:
 
 import os
 import sys
-import io
 import shutil
 import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
+from fixture_zip import zip_dir
 
 from src.core.project_manager import ProjectManager
 
-REPORT_FIXTURE = Path(__file__).parent / 'fixtures' / 'report_en.txt'
+META_FIXTURE = Path(__file__).parent / 'fixtures' / 'xml_meta_en'
+META_FIXTURE_RU = Path(__file__).parent / 'fixtures' / 'xml_meta_ru'
 
 
 def _setup(tmpdir: str) -> ProjectManager:
@@ -31,18 +33,17 @@ def test_update_source_metadata_only():
     """Updating just label/type should NOT touch files."""
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _setup(tmpdir)
-        with open(REPORT_FIXTURE, 'rb') as f:
-            pm.add_source('test', 'main', 'Old Label', source_type='main', report_file=f)
+        pm.add_source('test', 'main', 'Old Label', source_type='main', xml_archive=zip_dir(META_FIXTURE), xml_archive_filename='x.zip')
 
         # Snapshot file mtime
-        report_path = Path(tmpdir) / 'projects' / 'test' / 'sources' / 'main' / 'report.txt'
-        original_mtime = report_path.stat().st_mtime
+        conf = Path(tmpdir) / 'projects' / 'test' / 'sources' / 'main' / 'xml' / 'Configuration.xml'
+        original_mtime = conf.stat().st_mtime
 
         # Update only label
         pm.update_source('test', 'main', label='New Label', source_type='extension')
 
         # File untouched
-        assert report_path.stat().st_mtime == original_mtime, "File mtime should not change"
+        assert conf.stat().st_mtime == original_mtime, "File mtime should not change"
         # Metadata updated
         proj = pm.get_project('test')
         src = next(s for s in proj.sources if s.id == 'main')
@@ -51,19 +52,17 @@ def test_update_source_metadata_only():
         pm.close_all()
 
 
-def test_update_source_replaces_report_file():
-    """Replacing report file should overwrite old content."""
+def test_update_source_replaces_xml_archive():
+    """Replacing the XML dump should overwrite the old one entirely."""
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _setup(tmpdir)
-        with open(REPORT_FIXTURE, 'rb') as f:
-            pm.add_source('test', 'main', 'Source 1', report_file=f)
+        pm.add_source('test', 'main', 'Source 1', xml_archive=zip_dir(META_FIXTURE), xml_archive_filename='x.zip')
 
-        # Replace with custom content
-        new_content = b'New report content for testing'
-        pm.update_source('test', 'main', report_file=io.BytesIO(new_content))
+        pm.update_source('test', 'main', xml_archive=zip_dir(META_FIXTURE_RU), xml_archive_filename='x.zip')
 
-        report_path = Path(tmpdir) / 'projects' / 'test' / 'sources' / 'main' / 'report.txt'
-        assert report_path.read_bytes() == new_content, "File should be replaced with new content"
+        xml = Path(tmpdir) / 'projects' / 'test' / 'sources' / 'main' / 'xml'
+        assert (xml / 'Configuration.xml').read_bytes() == (META_FIXTURE_RU / 'Configuration.xml').read_bytes()
+        assert not (xml / 'Catalogs' / 'Users.xml').exists(), "old dump files must be gone"
 
         # indexed_at reset (because data is now stale)
         proj = pm.get_project('test')
@@ -76,11 +75,10 @@ def test_update_source_then_reindex_reflects_new_content():
     """The whole flow: index → replace file → reindex → query sees new data."""
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _setup(tmpdir)
-        with open(REPORT_FIXTURE, 'rb') as f:
-            pm.add_source('test', 'main', 'Initial', report_file=f)
+        pm.add_source('test', 'main', 'Initial', xml_archive=zip_dir(META_FIXTURE), xml_archive_filename='x.zip')
         pm.reindex('test', source_id='main')
 
-        # Initial: object Users exists from the report fixture
+        # Initial: object Users exists in the EN fixture
         engine = pm.get_search('test')
         results = engine.search_metadata('Users', limit=10)
         assert any('Users' in r['full_name'] for r in results), \
@@ -88,13 +86,10 @@ def test_update_source_then_reindex_reflects_new_content():
         initial_count = len(results)
         assert initial_count > 0
 
-        # Now replace report.txt with empty file
-        empty_report = b'\xff\xfe' + ''.encode('utf-16-le')   # valid empty UTF-16
-        pm.update_source('test', 'main', report_file=io.BytesIO(empty_report))
+        # Replace the dump with another configuration (RU fixture, no Users)
+        pm.update_source('test', 'main', xml_archive=zip_dir(META_FIXTURE_RU), xml_archive_filename='x.zip')
         pm.reindex('test', source_id='main')
 
-        # After reindex with empty file, Users should be gone
-        # (or at least the count reduced significantly)
         engine = pm.get_search('test')
         new_results = engine.search_metadata('Users', limit=10)
         assert len(new_results) < initial_count, \
@@ -107,10 +102,8 @@ def test_remove_source_wipes_db_rows():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _setup(tmpdir)
         # Add and index two sources
-        with open(REPORT_FIXTURE, 'rb') as f:
-            pm.add_source('test', 'main', 'Main', source_type='main', report_file=f)
-        with open(REPORT_FIXTURE, 'rb') as f:
-            pm.add_source('test', 'ext1', 'Ext 1', source_type='extension', report_file=f)
+        pm.add_source('test', 'main', 'Main', source_type='main', xml_archive=zip_dir(META_FIXTURE), xml_archive_filename='x.zip')
+        pm.add_source('test', 'ext1', 'Ext 1', source_type='extension', xml_archive=zip_dir(META_FIXTURE), xml_archive_filename='x.zip')
         pm.reindex('test')
 
         db = pm.get_db('test')
@@ -179,7 +172,7 @@ def test_update_nonexistent_source_raises():
 if __name__ == '__main__':
     tests = [
         test_update_source_metadata_only,
-        test_update_source_replaces_report_file,
+        test_update_source_replaces_xml_archive,
         test_update_source_then_reindex_reflects_new_content,
         test_remove_source_wipes_db_rows,
         test_remove_nonexistent_source_is_noop,

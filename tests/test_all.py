@@ -1,4 +1,4 @@
-"""Tests for report parser, indexer, search, and project manager."""
+"""Tests for metadata parsing, indexer, search, and project manager."""
 
 import os
 import sys
@@ -8,13 +8,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.core.report_parser import parse_report, ReportParser
+from src.core.xml_metadata import parse_xml_dump
 from src.core.db import Database
 from src.core.indexer import Indexer
 from src.core.search import SearchEngine, format_search_results, format_object_details
 from src.core.project_manager import ProjectManager
 
-FIXTURE_REPORT = Path(__file__).parent / 'fixtures' / 'report_ru.txt'
+# Синтетическая XML-выгрузка «демо-склада» (tests/fixtures/generate_metadata.py).
+FIXTURE_XML = Path(__file__).parent / 'fixtures' / 'xml_meta_ru'
 TEST_DATA_DIR = '/tmp/test_1c_mcp'
 
 
@@ -29,17 +30,17 @@ def cleanup():
 
 
 # ============================================
-# REPORT PARSER
+# METADATA PARSING
 # ============================================
 
-class TestReportParser:
+class TestMetadataParsing:
     def test_parse_config_info(self):
-        config, objects = parse_report(FIXTURE_REPORT)
+        config, objects = parse_xml_dump(FIXTURE_XML)
         assert config.name == 'ДемоКонфигурация'
         assert config.version == '1.2.3.4'
 
     def test_parse_object_count(self):
-        config, objects = parse_report(FIXTURE_REPORT)
+        config, objects = parse_xml_dump(FIXTURE_XML)
         assert len(objects) == 48
         kinds = set(o.kind for o in objects)
         assert 'Справочник' in kinds
@@ -47,7 +48,7 @@ class TestReportParser:
         assert 'РегистрСведений' in kinds
 
     def test_parse_catalogs(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         catalogs = [o for o in objects if o.kind == 'Справочник']
         assert len(catalogs) == 8
         # Check specific catalog
@@ -58,26 +59,26 @@ class TestReportParser:
         assert len(nom.attributes) == 7
 
     def test_parse_attribute_types(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         nom = next(o for o in objects if o.name == 'Номенклатура')
         unit_attr = next(a for a in nom.attributes if a.name == 'ЕдиницаИзмерения')
         assert unit_attr.type_desc == 'СправочникСсылка.ЕдиницыИзмерения'
         assert unit_attr.kind == 'Реквизит'
 
     def test_parse_documents(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         docs = [o for o in objects if o.kind == 'Документ']
         assert len(docs) == 5
 
     def test_parse_registers(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         info_regs = [o for o in objects if o.kind == 'РегистрСведений']
         accum_regs = [o for o in objects if o.kind == 'РегистрНакопления']
         assert len(info_regs) == 3
         assert len(accum_regs) == 2
 
     def test_parse_register_dimensions_and_resources(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         reg = next(o for o in objects if o.full_name == 'РегистрНакопления.Продажи')
         dimensions = [a.name for a in reg.attributes if a.kind == 'Измерение']
         resources = [a.name for a in reg.attributes if a.kind == 'Ресурс']
@@ -85,7 +86,7 @@ class TestReportParser:
         assert resources == ['Количество', 'Сумма']
 
     def test_parse_common_modules(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         modules = [o for o in objects if o.kind == 'ОбщийМодуль']
         assert len(modules) == 5
         server_mod = next(o for o in modules if o.name == 'ОбщиеНаСервере')
@@ -96,14 +97,14 @@ class TestReportParser:
         assert server_mod.module_info.is_client is False
 
     def test_parse_global_module(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         glob = next(o for o in objects if o.name == 'ОбщегоНазначения')
         assert glob.module_info.is_global is True
         assert glob.module_info.is_server is True
         assert glob.module_info.is_client is True
 
     def test_parse_enums(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         enums = [o for o in objects if o.kind == 'Перечисление']
         assert len(enums) == 3
         rates = next(o for o in enums if o.name == 'СтавкиНДС')
@@ -111,7 +112,7 @@ class TestReportParser:
         assert rates.enum_values[0].name == 'БезНДС'
 
     def test_parse_forms(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         nom = next(o for o in objects if o.name == 'Номенклатура')
         assert len(nom.forms) == 3
         form_names = {f.name for f in nom.forms}
@@ -119,7 +120,7 @@ class TestReportParser:
         assert 'ФормаСписка' in form_names
 
     def test_parse_subsystems(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         subs = [o for o in objects if o.kind == 'Подсистема']
         assert len(subs) == 5
         purchases = next(o for o in subs if o.name == 'Закупки')
@@ -128,7 +129,7 @@ class TestReportParser:
         assert 'Справочник.Контрагенты' in purchases.subsystem_info.content
 
     def test_parse_tabular_sections(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         # Find a document with tabular sections
         docs_with_ts = [o for o in objects if o.kind == 'Документ' and o.tabular_sections]
         assert len(docs_with_ts) > 0
@@ -139,7 +140,7 @@ class TestReportParser:
             assert len(ts_attrs) > 0
 
     def test_parse_defined_types(self):
-        _, objects = parse_report(FIXTURE_REPORT)
+        _, objects = parse_xml_dump(FIXTURE_XML)
         dtypes = [o for o in objects if o.kind == 'ОпределяемыйТип']
         assert len(dtypes) == 3
 
@@ -180,12 +181,12 @@ class TestDatabase:
 # ============================================
 
 class TestIndexer:
-    def test_index_report(self):
+    def test_index_xml_metadata(self):
         db = Database(f'{TEST_DATA_DIR}/idx.db')
         db.connect()
         db.init_schema()
         indexer = Indexer(db)
-        stats = indexer.index_report(str(FIXTURE_REPORT), source_id='main')
+        stats = indexer.index_xml_metadata(str(FIXTURE_XML), source_id='main')
         assert stats['objects'] == 48
         assert stats['attributes'] == 64
         assert stats['forms'] == 24
@@ -198,7 +199,7 @@ class TestIndexer:
         db.connect()
         db.init_schema()
         indexer = Indexer(db)
-        indexer.index_report(str(FIXTURE_REPORT), source_id='main', source_label='Main Config')
+        indexer.index_xml_metadata(str(FIXTURE_XML), source_id='main', source_label='Main Config')
         row = db.conn.execute("SELECT * FROM sources WHERE id='main'").fetchone()
         assert row is not None
         assert row['label'] == 'Main Config'
@@ -209,7 +210,7 @@ class TestIndexer:
         db = Database(f'{TEST_DATA_DIR}/idx.db')
         db.connect()
         db.init_schema()
-        Indexer(db).index_report(str(FIXTURE_REPORT), source_id='main')
+        Indexer(db).index_xml_metadata(str(FIXTURE_XML), source_id='main')
         fts_count = db.conn.execute("SELECT COUNT(*) FROM metadata_fts").fetchone()[0]
         assert fts_count == 48
         db.close()
@@ -225,7 +226,7 @@ class TestSearch:
         db = Database(f'{TEST_DATA_DIR}/search.db')
         db.connect()
         db.init_schema()
-        Indexer(db).index_report(str(FIXTURE_REPORT), source_id='main')
+        Indexer(db).index_xml_metadata(str(FIXTURE_XML), source_id='main')
         yield SearchEngine(db)
         db.close()
 
@@ -330,15 +331,15 @@ class TestProjectManager:
         pm.create_project('proj', 'Test')
         source_dir = Path(TEST_DATA_DIR) / 'projects' / 'proj' / 'sources' / 'main'
         source_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(FIXTURE_REPORT, source_dir / 'report.txt')
+        shutil.copytree(FIXTURE_XML, source_dir / 'xml')
         source = pm.add_source('proj', 'main', 'Main Config')
-        assert source.report_path == 'sources/main/report.txt'
+        assert source.xml_path == 'sources/main/xml'
 
     def test_reindex(self, pm):
         pm.create_project('proj', 'Test')
         source_dir = Path(TEST_DATA_DIR) / 'projects' / 'proj' / 'sources' / 'main'
         source_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(FIXTURE_REPORT, source_dir / 'report.txt')
+        shutil.copytree(FIXTURE_XML, source_dir / 'xml')
         pm.add_source('proj', 'main', 'Main Config')
         stats = pm.reindex('proj')
         assert stats.total_objects == 48
@@ -351,18 +352,18 @@ class TestProjectManager:
         for sid in ['main', 'ext1']:
             source_dir = Path(TEST_DATA_DIR) / 'projects' / 'multi' / 'sources' / sid
             source_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(FIXTURE_REPORT, source_dir / 'report.txt')
+            shutil.copytree(FIXTURE_XML, source_dir / 'xml')
             pm.add_source('multi', sid, f'Source {sid}',
                           source_type='main' if sid == 'main' else 'extension')
         stats = pm.reindex('multi')
-        # Both sources indexed (same report, but treated as separate sources)
+        # Both sources indexed (same dump, but treated as separate sources)
         assert stats.total_objects == 96  # duplicate objects with different source_id
 
     def test_search_after_reindex(self, pm):
         pm.create_project('search_proj', 'Search Test')
         source_dir = Path(TEST_DATA_DIR) / 'projects' / 'search_proj' / 'sources' / 'main'
         source_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(FIXTURE_REPORT, source_dir / 'report.txt')
+        shutil.copytree(FIXTURE_XML, source_dir / 'xml')
         pm.add_source('search_proj', 'main', 'Main')
         pm.reindex('search_proj')
         engine = pm.get_search('search_proj')
@@ -375,7 +376,7 @@ class TestProjectManager:
             pm.create_project(pid, f'Project {pid}')
             source_dir = Path(TEST_DATA_DIR) / 'projects' / pid / 'sources' / 'main'
             source_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(FIXTURE_REPORT, source_dir / 'report.txt')
+            shutil.copytree(FIXTURE_XML, source_dir / 'xml')
             pm.add_source(pid, 'main', 'Main')
             pm.reindex(pid)
 

@@ -1,0 +1,16 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<CommonForm uuid="dabfb808-334d-5a5c-bf77-2a5729eeb9da">
+		<Properties>
+			<Name>JobsLog</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>en</v8:lang>
+					<v8:content>Jobs log</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+		</Properties>
+		<ChildObjects/>
+	</CommonForm>
+</MetaDataObject>

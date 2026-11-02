@@ -37,9 +37,7 @@ def pm():
     with tempfile.TemporaryDirectory() as tmpdir:
         manager = ProjectManager(tmpdir)
         manager.create_project('p1', 'p1')
-        with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-            manager.add_source('p1', 'main', 'Main', report_file=f,
-                               xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+        manager.add_source('p1', 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
         manager.reindex('p1')
         try:
             yield manager
@@ -119,10 +117,11 @@ def test_changed_module_alone_is_rebuilt(pm):
 
 def test_synonym_change_rebuilds_modules_of_that_object(pm):
     before = _chunk_ids(pm)
-    report = _src(pm) / 'report.txt'
-    text = report.read_bytes().decode('utf-16')
-    assert text.count('Синоним: "Склады"') == 1
-    report.write_bytes(text.replace('Синоним: "Склады"', 'Синоним: "Места хранения"').encode('utf-16'))
+    obj = _src(pm) / 'xml' / 'Catalogs' / 'Склады.xml'
+    text = obj.read_text(encoding='utf-8-sig')
+    assert text.count('<v8:content>Склады</v8:content>') == 1
+    obj.write_text(text.replace('<v8:content>Склады</v8:content>',
+                                '<v8:content>Места хранения</v8:content>'), encoding='utf-8-sig')
     pm.reindex('p1')
     after = _chunk_ids(pm)
     changed = {m for m in before if after[m] != before[m]}

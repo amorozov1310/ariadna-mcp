@@ -102,12 +102,7 @@ def project_manifest(pm: ProjectManager, project_id: str) -> dict:
         state = parser_states.get(src.id) or {}
         cards = row.get('cards', {'modules_with_code': 0, 'modules_current': 0})
         xml_dir = pm.source_path(project_id, src.xml_path) if src.xml_path else None
-        if xml_dir is not None and has_configuration(xml_dir):
-            metadata_from = 'xml'
-        elif src.report_path:
-            metadata_from = 'report'
-        else:
-            metadata_from = ''
+        metadata_from = 'xml' if xml_dir is not None and has_configuration(xml_dir) else ''
         fingerprint = state.get('fingerprint', '')
         item = {
             'id': src.id,

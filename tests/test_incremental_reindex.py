@@ -144,10 +144,10 @@ def test_removed_file_is_cleaned_up():
         db.close()
 
 
-def test_report_txt_rerun_upserts_metadata_without_touching_modules():
-    """A metadata-only rerun (report.txt reparsed, nothing in BSL changed)
+def test_metadata_rerun_upserts_without_touching_modules():
+    """A metadata-only rerun (metadata reparsed, nothing in BSL changed)
     must not disturb modules/procedures/calls — otherwise incrementality
-    on the BSL side would be defeated every time index_report also runs."""
+    on the BSL side would be defeated every time index_xml_metadata also runs."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(os.path.join(tmpdir, 'index.db'))
         db.connect()
@@ -155,7 +155,7 @@ def test_report_txt_rerun_upserts_metadata_without_touching_modules():
         indexer = Indexer(db)
         known_modules, known_objects = Indexer.scan_known_names([str(FIXTURES / 'xml_en')])
 
-        indexer.index_report(str(FIXTURES / 'report_en.txt'), source_id='main')
+        indexer.index_xml_metadata(str(FIXTURES / 'xml_meta_en'), source_id='main')
         indexer.index_bsl(str(FIXTURES / 'xml_en'), source_id='main',
                            known_modules=known_modules, known_objects=known_objects)
 
@@ -163,13 +163,13 @@ def test_report_txt_rerun_upserts_metadata_without_touching_modules():
         proc_ids_before = {r['id'] for r in conn.execute("SELECT id FROM procedures")}
         obj_ids_before = {r['id'] for r in conn.execute("SELECT id FROM metadata_objects")}
 
-        # Rerun index_report only (as reindex() does before index_bsl).
-        indexer.index_report(str(FIXTURES / 'report_en.txt'), source_id='main')
+        # Rerun index_xml_metadata only (as reindex() does before index_bsl).
+        indexer.index_xml_metadata(str(FIXTURES / 'xml_meta_en'), source_id='main')
 
         proc_ids_after = {r['id'] for r in conn.execute("SELECT id FROM procedures")}
         obj_ids_after = {r['id'] for r in conn.execute("SELECT id FROM metadata_objects")}
         assert proc_ids_after == proc_ids_before, \
-            "Re-running index_report must not cascade-delete modules/procedures"
+            "Re-running index_xml_metadata must not cascade-delete modules/procedures"
         assert obj_ids_after == obj_ids_before, \
             "UPSERT should keep metadata_objects ids stable across reruns"
         db.close()
@@ -342,7 +342,7 @@ if __name__ == '__main__':
         test_unchanged_files_are_skipped_on_rerun,
         test_changed_file_is_reparsed_not_duplicated,
         test_removed_file_is_cleaned_up,
-        test_report_txt_rerun_upserts_metadata_without_touching_modules,
+        test_metadata_rerun_upserts_without_touching_modules,
         test_reindex_async_returns_immediately_and_reaches_ready,
         test_reindex_async_rejects_concurrent_run_on_same_project,
         test_incremental_reindex_is_much_faster_than_cold,

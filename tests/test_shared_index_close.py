@@ -41,9 +41,7 @@ def _add_source(pm: ProjectManager, project_id: str = 'p1') -> None:
             if path.is_file():
                 zf.write(path, path.relative_to(FIXTURES / 'xml_ru'))
     buf.seek(0)
-    with open(FIXTURES / 'report_ru.txt', 'rb') as f:
-        pm.add_source(project_id, 'main', 'Main', report_file=f,
-                      xml_archive=buf, xml_archive_filename='x.zip')
+    pm.add_source(project_id, 'main', 'Main', xml_archive=buf, xml_archive_filename='x.zip')
 
 
 def _procedures(pm: ProjectManager) -> list:
