@@ -405,10 +405,17 @@ class SearchEngine:
         for r in conn.execute("SELECT key, value FROM object_properties WHERE object_id = ? "
                               "ORDER BY rowid", (obj_id,)):
             properties.setdefault(r['key'], []).append(r['value'])
+        # Сначала самые специализированные: документ, который пишет в
+        # немногие регистры, скорее «тот самый» для этого регистра, а ввод
+        # остатков и ручные операции пишут почти во всё — они в конце.
         recorded_by = [r['full_name'] for r in conn.execute(
-            """SELECT DISTINCT m.full_name FROM object_properties p
+            """SELECT m.full_name,
+                      (SELECT COUNT(*) FROM object_properties q
+                       WHERE q.object_id = p.object_id AND q.key = p.key) AS registers
+               FROM object_properties p
                JOIN metadata_objects m ON m.id = p.object_id
-               WHERE p.key = ? AND p.value = ? ORDER BY m.full_name""",
+               WHERE p.key = ? AND p.value = ?
+               GROUP BY m.full_name ORDER BY registers, m.full_name""",
             (RECORDS, obj['full_name']))]
 
         obj_dict = dict(obj)
