@@ -210,6 +210,11 @@ class ProjectManager:
 
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
+        # Ключ блокировки реестра — от каталога, который точно существует, и
+        # один раз: resolve() самого projects.json на Windows в момент его
+        # замены (файла нет) мог дать другую запись пути, чем при
+        # существующем файле, — и чтение брало другую блокировку.
+        self._registry_lock_key = str(self.data_dir.resolve() / 'projects.json')
 
     def _retire_project_db(self, project_id: str) -> None:
         """Закрыть Database проекта и убрать его из пула — перед удалением
@@ -228,7 +233,7 @@ class ProjectManager:
 
     def _registry_lock(self) -> threading.RLock:
         """Общая на процесс блокировка реестра по его пути (_REGISTRY_LOCKS)."""
-        key = str(self.registry_path.resolve())
+        key = self._registry_lock_key
         with _REINDEX_LOCKS_GUARD:
             lock = _REGISTRY_LOCKS.get(key)
             if lock is None:
