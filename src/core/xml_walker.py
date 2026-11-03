@@ -13,8 +13,10 @@ Structure:
     └── Ext/SessionModule.bsl
 """
 
+import os
 import re
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,22 +135,41 @@ def read_form_attributes(form_xml_path: str | Path) -> set[str]:
     return {a.name.lower() for a in read_form_attribute_details(form_xml_path) or []}
 
 
+# Сколько каталогов выгрузки читать одновременно. Обход упирается не в диск, а
+# в задержку каждого обращения: через 9p (Docker Desktop на Windows) это
+# миллисекунды, и на крупной конфигурации последовательный обход шёл минуты.
+IO_THREADS = 16
+
+
+def scan_dir(path: str | Path) -> dict[str, bool]:
+    """Содержимое каталога: имя → это каталог. Одно обращение к ФС вместо
+    exists/is_dir/glob на каждое имя; {} — каталога нет."""
+    try:
+        with os.scandir(path) as entries:
+            return {e.name: e.is_dir() for e in entries}
+    except OSError:
+        return {}
+
+
 class XMLWalker:
     """Walks XML config dump directory and yields .bsl files."""
 
     def walk(self, xml_root: str | Path) -> list[ModuleFile]:
         """Find all .bsl files in XML dump. Returns list of ModuleFile."""
         root = Path(xml_root)
-        if not root.exists():
+        top = scan_dir(root)
+        if not top:
             return []
 
         modules = []
 
         # 1. Top-level modules: Ext/SessionModule.bsl, Ext/ManagedApplicationModule.bsl
-        ext_dir = root / 'Ext'
-        if ext_dir.exists():
-            for bsl in ext_dir.glob('*.bsl'):
-                module_type = FILE_TO_MODULE_TYPE.get(bsl.name, bsl.stem)
+        if top.get('Ext'):
+            for name, is_dir in sorted(scan_dir(root / 'Ext').items()):
+                if is_dir or not name.endswith('.bsl'):
+                    continue
+                bsl = root / 'Ext' / name
+                module_type = FILE_TO_MODULE_TYPE.get(name, bsl.stem)
                 modules.append(ModuleFile(
                     file_path=str(bsl),
                     relative_path=bsl.relative_to(root).as_posix(),
@@ -158,71 +179,80 @@ class XMLWalker:
                     full_name=f'Конфигурация.{module_type}',
                 ))
 
-        # 2. Object modules: {Category}/{EncodedName}/Ext/{ModuleType}.bsl
+        # 2. Object modules: {Category}/{EncodedName}/Ext/{ModuleType}.bsl —
+        # объекты читаются параллельно, порядок результата — как у списка.
+        objects = []
         for dir_name, kind in DIR_TO_KIND.items():
-            category_dir = root / dir_name
-            if not category_dir.exists():
+            if not top.get(dir_name):
                 continue
+            category_dir = root / dir_name
+            objects += [(kind, category_dir / name)
+                        for name, is_dir in sorted(scan_dir(category_dir).items()) if is_dir]
+        with ThreadPoolExecutor(IO_THREADS) as pool:
+            for found in pool.map(lambda o: self._walk_object(root, *o), objects):
+                modules += found
+        return modules
 
-            for obj_dir in sorted(category_dir.iterdir()):
-                if not obj_dir.is_dir():
+    @staticmethod
+    def _walk_object(root: Path, kind: str, obj_dir: Path) -> list[ModuleFile]:
+        obj_name = decode_1c_dirname(obj_dir.name)
+        entries = scan_dir(obj_dir)
+        modules = []
+
+        # Object-level modules: Ext/ObjectModule.bsl, Ext/ManagerModule.bsl
+        obj_ext = obj_dir / 'Ext'
+        ext = scan_dir(obj_ext) if entries.get('Ext') else {}
+        for name, is_dir in sorted(ext.items()):
+            if is_dir or not name.endswith('.bsl'):
+                continue
+            bsl = obj_ext / name
+            module_type = FILE_TO_MODULE_TYPE.get(name, bsl.stem)
+            modules.append(ModuleFile(
+                file_path=str(bsl),
+                relative_path=bsl.relative_to(root).as_posix(),
+                object_kind=kind,
+                object_name=obj_name,
+                module_type=module_type,
+                full_name=f'{kind}.{obj_name}.{module_type}',
+            ))
+
+        # Common form module: CommonForms/{Name}/Ext/Form/Module.bsl —
+        # the object itself is the form, there's no Forms/ subdir.
+        # full_name matches the object name (ОбщаяФорма.X).
+        if kind == 'ОбщаяФорма' and ext.get('Form'):
+            form_bsl = obj_ext / 'Form' / 'Module.bsl'
+            if form_bsl.exists():
+                modules.append(ModuleFile(
+                    file_path=str(form_bsl),
+                    relative_path=form_bsl.relative_to(root).as_posix(),
+                    object_kind=kind,
+                    object_name=obj_name,
+                    module_type='МодульФормы',
+                    form_name=obj_name,
+                    full_name=f'{kind}.{obj_name}',
+                    form_xml_path=str(obj_ext / 'Form.xml') if ext.get('Form.xml') is False else '',
+                ))
+
+        # Form modules: Forms/{EncodedFormName}/Ext/Form/Module.bsl
+        if entries.get('Forms'):
+            forms_dir = obj_dir / 'Forms'
+            for form_dir_name, is_dir in sorted(scan_dir(forms_dir).items()):
+                if not is_dir:
                     continue
-
-                obj_name = decode_1c_dirname(obj_dir.name)
-
-                # Object-level modules: Ext/ObjectModule.bsl, Ext/ManagerModule.bsl
-                obj_ext = obj_dir / 'Ext'
-                if obj_ext.exists():
-                    for bsl in obj_ext.glob('*.bsl'):
-                        module_type = FILE_TO_MODULE_TYPE.get(bsl.name, bsl.stem)
-                        full_name = f'{kind}.{obj_name}.{module_type}'
-                        modules.append(ModuleFile(
-                            file_path=str(bsl),
-                            relative_path=bsl.relative_to(root).as_posix(),
-                            object_kind=kind,
-                            object_name=obj_name,
-                            module_type=module_type,
-                            full_name=full_name,
-                        ))
-
-                # Common form module: CommonForms/{Name}/Ext/Form/Module.bsl —
-                # the object itself is the form, there's no Forms/ subdir.
-                # full_name matches report_parser's object name (ОбщаяФорма.X).
-                if kind == 'ОбщаяФорма':
-                    form_bsl = obj_ext / 'Form' / 'Module.bsl'
-                    if form_bsl.exists():
-                        form_xml = obj_ext / 'Form.xml'
-                        modules.append(ModuleFile(
-                            file_path=str(form_bsl),
-                            relative_path=form_bsl.relative_to(root).as_posix(),
-                            object_kind=kind,
-                            object_name=obj_name,
-                            module_type='МодульФормы',
-                            form_name=obj_name,
-                            full_name=f'{kind}.{obj_name}',
-                            form_xml_path=str(form_xml) if form_xml.exists() else '',
-                        ))
-
-                # Form modules: Forms/{EncodedFormName}/Ext/Form/Module.bsl
-                forms_dir = obj_dir / 'Forms'
-                if forms_dir.exists():
-                    for form_dir in sorted(forms_dir.iterdir()):
-                        if not form_dir.is_dir():
-                            continue
-                        form_name = decode_1c_dirname(form_dir.name)
-                        form_bsl = form_dir / 'Ext' / 'Form' / 'Module.bsl'
-                        if form_bsl.exists():
-                            form_xml = form_dir / 'Ext' / 'Form.xml'
-                            full_name = f'{kind}.{obj_name}.Форма.{form_name}'
-                            modules.append(ModuleFile(
-                                file_path=str(form_bsl),
-                                relative_path=form_bsl.relative_to(root).as_posix(),
-                                object_kind=kind,
-                                object_name=obj_name,
-                                module_type='МодульФормы',
-                                form_name=form_name,
-                                full_name=full_name,
-                                form_xml_path=str(form_xml) if form_xml.exists() else '',
-                            ))
-
+                form_dir = forms_dir / form_dir_name
+                form_ext = scan_dir(form_dir / 'Ext')
+                form_bsl = form_dir / 'Ext' / 'Form' / 'Module.bsl'
+                if not form_ext.get('Form') or not form_bsl.exists():
+                    continue
+                form_name = decode_1c_dirname(form_dir_name)
+                modules.append(ModuleFile(
+                    file_path=str(form_bsl),
+                    relative_path=form_bsl.relative_to(root).as_posix(),
+                    object_kind=kind,
+                    object_name=obj_name,
+                    module_type='МодульФормы',
+                    form_name=form_name,
+                    full_name=f'{kind}.{obj_name}.Форма.{form_name}',
+                    form_xml_path=str(form_dir / 'Ext' / 'Form.xml') if form_ext.get('Form.xml') is False else '',
+                ))
         return modules

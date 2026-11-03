@@ -68,7 +68,9 @@ INSTRUCTIONS = """\
   называл объект иначе, — add_glossary_term (слова пользователя → объект), и в следующий
   раз поиск найдёт его сразу; дальше get_object_details:
   у регистра там вид, периодичность и готовое обращение для запроса (.Остатки(&Период),
-  .СрезПоследних, поля «РесурсОстаток»), у документа — регистры его движений.
+  .СрезПоследних, поля «РесурсОстаток»), у документа — регистры его движений;
+- «что доработано относительно типовой», «правлена ли эта процедура»: diff_from_base
+  (сводка → object_name → module_name + procedure_name), если у проекта задана база.
 
 Имена — как в конфигураторе, RU или EN (Справочник == Catalog), регистр не важен.
 Выдача постраничная: строка «use offset=N for more» означает, что есть продолжение.
@@ -390,6 +392,31 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     ) -> str:
         return run('get_procedure_context', project_id=project_id,
                     module_name=module_name, procedure_name=procedure_name, source_id=source_id)
+
+    @mcp.tool(
+        description="Что доработано относительно типовой: отличия проекта от его базы (проект "
+                     "с типовой конфигурацией, задаётся в настройках проекта в Web UI). Без "
+                     "параметров — сводка и доработанные типовые объекты (больше изменений — "
+                     "выше): новые и удалённые реквизиты, формы, изменённые/добавленные "
+                     "процедуры по модулям; section=added — новые объекты, removed — удалённые. "
+                     "object_name — всё по одному объекту; module_name + procedure_name — diff "
+                     "текста процедуры (база → проект). Для обновления на новый релиз и ревью "
+                     "доработок: какие типовые процедуры правлены.",
+        annotations=_READ_ONLY,
+    )
+    def diff_from_base(
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        object_name: Annotated[str | None, Field(description="Полное имя объекта (Документ.ЗаказКлиента) или модуля — изменения только по нему")] = None,
+        module_name: Annotated[str | None, Field(description="Модуль процедуры (вместе с procedure_name — diff её текста)")] = None,
+        procedure_name: Annotated[str | None, Field(description="Процедура: diff текста базы и проекта")] = None,
+        section: Annotated[Literal['changed', 'added', 'removed'], Field(description="changed — доработанные типовые объекты, added — новые, removed — удалённые")] = 'changed',
+        source_id: Annotated[str | None, Field(description="ID источника (по умолчанию main — основная конфигурация)")] = None,
+        limit: Annotated[int, Field(description=_LIMIT)] = 30,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+    ) -> str:
+        return run('diff_from_base', project_id=project_id, object_name=object_name,
+                   module_name=module_name, procedure_name=procedure_name, section=section,
+                   source_id=source_id, limit=limit, offset=offset)
 
     @mcp.tool(
         description="Кто вызывает / что вызывает процедура — дерево вверх (direction=up) или "

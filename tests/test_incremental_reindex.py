@@ -359,3 +359,46 @@ if __name__ == '__main__':
             traceback.print_exc()
             failed += 1
     print(f'\n{passed} passed, {failed} failed')
+
+
+# ============================================
+# Пропуск по размеру и времени изменения (module_stat)
+# ============================================
+
+def test_unchanged_stat_skips_reading_files(monkeypatch):
+    """Повторный прогон не читает файлы, у которых размер и время изменения
+    те же, — хеш берётся из индекса; тронутый файл читается и, если
+    содержимое то же, не переразбирается."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        xml = Path(tmpdir) / 'xml'
+        shutil.copytree(FIXTURES / 'xml_en', xml)
+        db = Database(os.path.join(tmpdir, 'index.db'))
+        db.connect()
+        db.init_schema()
+        try:
+            _check_stat_skip(db, xml, monkeypatch)
+        finally:
+            db.close()
+
+
+def _check_stat_skip(db, xml, monkeypatch):
+    """См. test_unchanged_stat_skips_reading_files."""
+    from src.core import indexer as indexer_mod
+    indexer = Indexer(db)
+    first = indexer.index_bsl(str(xml), source_id='main')
+    assert _count(db.conn, 'module_stat') == first['files']
+
+    hashed = []
+    real_hash = indexer_mod.module_file_hash
+    monkeypatch.setattr(indexer_mod, 'module_file_hash',
+                        lambda path, form='': hashed.append(path) or real_hash(path, form))
+    again = indexer.index_bsl(str(xml), source_id='main')
+    assert hashed == [] and again['files'] == 0 and again['files_skipped'] == first['files']
+
+    touched = next(xml.rglob('*.bsl'))
+    stamp = touched.stat().st_mtime_ns + 5_000_000_000
+    os.utime(touched, ns=(stamp, stamp))
+    third = indexer.index_bsl(str(xml), source_id='main')
+    assert hashed == [str(touched)] and third['files'] == 0
+    hashed.clear()
+    assert indexer.index_bsl(str(xml), source_id='main')['files'] == 0 and hashed == []

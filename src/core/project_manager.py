@@ -160,6 +160,10 @@ class ProjectInfo:
     status: str = 'empty'               # empty | indexing | ready | error
     sources: list[SourceInfo] = field(default_factory=list)
     index_stats: IndexStats = field(default_factory=IndexStats)
+    # База — проект той же конфигурации без доработок (обычно типовая):
+    # с ней сравнивает get_base_diff, из её индекса строится первый индекс
+    # проекта (_seed_from_base). '' — базы нет.
+    base_project: str = ''
 
 
 class ProjectManager:
@@ -199,6 +203,10 @@ class ProjectManager:
         # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
         # собственной записи; None — кэш не сверен с диском.
         self._registry_sig: tuple[int, int] | None = None
+        # Последняя сводка отличий от базы по проекту: (ключ, BaseDiff) — см.
+        # get_base_diff. На крупной конфигурации сравнение — секунды.
+        self._base_diffs: dict[str, tuple] = {}
+        self._base_diff_lock = threading.Lock()
 
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -379,6 +387,7 @@ class ProjectManager:
             'status': proj.status,
             'sources': [asdict(s) for s in proj.sources],
             'index_stats': asdict(proj.index_stats),
+            'base_project': proj.base_project,
         }
 
     def _save_registry(self):
@@ -892,6 +901,115 @@ class ProjectManager:
         return Glossary(self.projects_dir / project_id / FILENAME)
 
     # ============================================
+    # BASE (отличия от типовой)
+    # ============================================
+
+    def set_base_project(self, project_id: str, base_id: str) -> ProjectInfo:
+        """Задать базу проекта ('' — убрать). База — другой проект реестра."""
+        base_id = (base_id or '').strip()
+        with self._registry_lock():
+            project = self.get_project(project_id)
+            if base_id:
+                if base_id == project_id:
+                    raise ValueError("Проект не может быть базой самому себе")
+                self.get_project(base_id)
+            project.base_project = base_id
+            self._save_registry()
+        with self._base_diff_lock:
+            self._base_diffs.pop(project_id, None)
+        return project
+
+    def _base_of(self, project_id: str) -> str:
+        """id базы проекта; ValueError с объяснением — базы нет или она не готова."""
+        base_id = self.get_project(project_id).base_project
+        if not base_id:
+            raise ValueError(f"У проекта «{project_id}» не задана база — укажите её в настройках "
+                             f"проекта (проект с типовой конфигурацией)")
+        try:
+            base = self.get_project(base_id)
+        except KeyError:
+            raise ValueError(f"База «{base_id}» проекта «{project_id}» не найдена — проект удалён? "
+                             f"Укажите базу заново в настройках")
+        if base.status != 'ready':
+            raise ValueError(f"Индекс базы «{base_id}» не готов (статус {base.status}) — "
+                             f"проиндексируйте её")
+        return base_id
+
+    @staticmethod
+    def _diff_key(db: Database) -> tuple:
+        row = db.read_conn().execute(
+            "SELECT updated_at, status FROM index_state WHERE id = 1").fetchone()
+        return (db.db_path, row['updated_at'] if row else '', row['status'] if row else '')
+
+    def get_base_diff(self, project_id: str, source_id: str = 'main'):
+        """Отличия проекта от базы (src/core/base_diff.py). Пересчитывается,
+        только когда переиндексирован проект или база. ValueError — базы нет,
+        она не готова или проект сейчас индексируется."""
+        from .base_diff import compute_base_diff
+        base_id = self._base_of(project_id)
+        if self.get_project(project_id).status == 'indexing':
+            raise ValueError(f"Проект «{project_id}» сейчас индексируется — сравнение после окончания")
+        db, base_db = self.get_db(project_id), self.get_db(base_id)
+        key = (base_id, source_id, self._diff_key(db), self._diff_key(base_db))
+        with self._base_diff_lock:
+            cached = self._base_diffs.get(project_id)
+            if cached and cached[0] == key:
+                return cached[1]
+            diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, source_id)
+            self._base_diffs[project_id] = (key, diff)
+            return diff
+
+    def get_procedure_diff(self, project_id: str, module_name: str, procedure_name: str,
+                           source_id: str = 'main') -> dict:
+        """Текст процедуры в базе и в проекте и их diff. status: changed |
+        same | added | removed | missing (нет ни там, ни там) | unreadable
+        (процедура в индексе есть, а файла выгрузки нет — base_unreadable /
+        current_unreadable говорят, с какой стороны)."""
+        from .base_diff import procedure_text_diff
+        from .bsl_parser import read_bsl_text
+        base_id = self._base_of(project_id)
+
+        def side(pid: str) -> tuple[str, list[str] | None, bool]:
+            engine = self.get_search(pid)
+            outline = engine.get_module_outline(module_name, source_id=source_id)
+            if not outline:
+                return '', None, False
+            mod = outline['module']
+            proc = next((p for p in outline['procedures']
+                         if p['name'].casefold() == procedure_name.strip().casefold()), None)
+            if not proc:
+                return mod['name'], None, False
+            path = engine.module_file_path(mod)
+            text = read_bsl_text(path) if path else None
+            if text is None:
+                return mod['name'], None, True
+            lines = text.split('\n')[proc['start_line'] - 1:proc['end_line']]
+            return f"{mod['name']}.{proc['name']}", lines, False
+
+        base_name, base_lines, base_unreadable = side(base_id)
+        cur_name, cur_lines, cur_unreadable = side(project_id)
+        base_known = base_lines is not None or base_unreadable
+        cur_known = cur_lines is not None or cur_unreadable
+        if not base_known and not cur_known:
+            status = 'missing'
+        elif not base_known:
+            status = 'added'
+        elif not cur_known:
+            status = 'removed'
+        elif base_unreadable or cur_unreadable:
+            status = 'unreadable'
+        else:
+            status = 'same' if base_lines == cur_lines else 'changed'
+        name = cur_name or base_name or f"{module_name}.{procedure_name}"
+        return {
+            'name': name, 'status': status, 'base_project': base_id,
+            'base_unreadable': base_unreadable, 'current_unreadable': cur_unreadable,
+            'diff': procedure_text_diff(base_lines, cur_lines, f"{base_id}: {name}",
+                                        f"{project_id}: {name}")
+            if status in ('changed', 'added', 'removed') else '',
+        }
+
+    # ============================================
     # INDEXING
     # ============================================
 
@@ -913,6 +1031,13 @@ class ProjectManager:
         from .xml_walker import XMLWalker
 
         project, db = self._mark_indexing(project_id)
+        if source_id is None:
+            try:
+                self._seed_from_base(project, db)
+            except Exception:
+                # Засев — только ускорение: без него индекс строится с нуля.
+                logger.exception("Проект %s: индекс базы не скопирован — индексация с нуля",
+                                 project_id)
 
         # Этап 4/D7 item 3: durability is not a concern for an index that's
         # fully rebuildable from source — trade it for write throughput for
@@ -951,7 +1076,7 @@ class ProjectManager:
             # the accuracy gain (fewer bogus common_module edges from
             # `Var = ОбщегоНазначения.НовыйПустойЛист()`-style calls).
             db.update_state(progress_phase='factory_functions')
-            known_factory_functions = Indexer.scan_known_factory_functions(common_module_files)
+            known_factory_functions = self._factory_functions(db, common_module_files)
 
             total_files = sum(len(walked.get(s.id, [])) for s in sources)
             progress = {'done': 0, 'phase': 'bsl'}
@@ -987,7 +1112,8 @@ class ProjectManager:
                                             known_modules, known_objects,
                                             known_factory_functions,
                                             progress_cb=progress_cb,
-                                            force_reparse=bool(reason))
+                                            force_reparse=bool(reason),
+                                            module_files=walked.get(source.id))
                 if current_fp and source.id in walked:
                     db.set_parser_fingerprint(source.id, current_fp, reason)
                 duration_sec += stats.get('duration_sec', 0)
@@ -1041,6 +1167,50 @@ class ProjectManager:
         finally:
             db.conn.execute("PRAGMA synchronous=NORMAL")
             db.conn.commit()
+
+    def _seed_from_base(self, project: 'ProjectInfo', db: Database) -> bool:
+        """Первый индекс проекта с базой — копия индекса базы: дальше обычная
+        инкрементальная переиндексация переразбирает только модули, чей хеш
+        отличается от типовой (сотни вместо десятков тысяч). Только для
+        пустого индекса и готовой базы, которая сейчас не индексируется;
+        источники базы, которых нет в проекте, из копии удаляются. True —
+        индекс засеян."""
+        base_id = project.base_project
+        if not base_id or base_id == project.id:
+            return False
+        conn = db.conn
+        if conn.execute("SELECT 1 FROM modules LIMIT 1").fetchone() or \
+                conn.execute("SELECT 1 FROM metadata_objects LIMIT 1").fetchone():
+            return False
+        try:
+            if self.get_project(base_id).status != 'ready':
+                return False
+        except KeyError:
+            return False
+        base_path = self._index_path(base_id)
+        if not base_path.exists():
+            return False
+        lock = self._reindex_lock(base_id)
+        if not lock.acquire(blocking=False):
+            return False
+        try:
+            db.update_state(progress_phase='base')
+            source = sqlite3.connect(str(base_path))
+            try:
+                source.backup(conn)
+            finally:
+                source.close()
+        finally:
+            lock.release()
+        keep = {s.id for s in project.sources}
+        for (sid,) in conn.execute("SELECT id FROM sources").fetchall():
+            if sid not in keep:
+                self._clear_source_data(db, sid)
+        # Копия принесла index_state базы (status='ready') — вернуть свой.
+        db.update_state(status='indexing', progress_phase='scanning')
+        logger.info("Проект %s: индекс построен от базы %s — переразбираются только отличия",
+                    project.id, base_id)
+        return True
 
     def _mark_indexing(self, project_id: str) -> tuple['ProjectInfo', Database]:
         """Записать начало переиндексации: status='indexing' в реестр и в
@@ -1219,12 +1389,45 @@ class ProjectManager:
             return 'в индексе нет отпечатка парсера (индекс старого формата)'
         return f"изменилась версия парсера ({state['fingerprint']} → {current_fp})"
 
+    @staticmethod
+    def _factory_functions(db: Database, common_module_files: list) -> dict[str, set[str]]:
+        """Indexer.scan_known_factory_functions с кэшем по файлу (factory_cache):
+        общий модуль разбирается, только если изменились его размер, время
+        изменения или отпечаток парсера. Результат тот же, что без кэша."""
+        from concurrent.futures import ThreadPoolExecutor
+        from .indexer import Indexer, module_file_stat
+        from .xml_walker import IO_THREADS
+        fp = parser_fingerprint.parser_fingerprint()
+        conn = db.conn
+        cached = {r['file_path']: r for r in conn.execute("SELECT * FROM factory_cache")}
+        with ThreadPoolExecutor(IO_THREADS) as pool:
+            stats = list(pool.map(lambda mf: module_file_stat(mf.file_path), common_module_files))
+        result: dict[str, set[str]] = {}
+        rows = []
+        for mf, stat in zip(common_module_files, stats):
+            key = f'{stat}|{fp}'
+            hit = cached.get(mf.file_path)
+            if stat and hit is not None and hit['stat'] == key:
+                functions = set(filter(None, hit['functions'].split(',')))
+            else:
+                functions = Indexer.scan_known_factory_functions([mf]).get(mf.object_name.lower(), set())
+            if functions:
+                result.setdefault(mf.object_name.lower(), set()).update(functions)
+            if stat:
+                rows.append((mf.file_path, mf.object_name, key, ','.join(sorted(functions))))
+        conn.execute("DELETE FROM factory_cache")
+        conn.executemany("INSERT OR REPLACE INTO factory_cache VALUES (?, ?, ?, ?)", rows)
+        conn.commit()
+        return result
+
     def _index_source(self, indexer, project_id: str, source: SourceInfo,
                        known_modules: set[str] | None = None,
                        known_objects: dict[str, set[str]] | None = None,
                        known_factory_functions: dict[str, set[str]] | None = None,
-                       progress_cb=None, force_reparse: bool = False) -> dict:
-        """Index one source: metadata and BSL code from its XML dump."""
+                       progress_cb=None, force_reparse: bool = False,
+                       module_files: list | None = None) -> dict:
+        """Index one source: metadata and BSL code from its XML dump.
+        module_files — обход выгрузки, уже сделанный reindex (см. index_bsl)."""
         stats = {'objects': 0, 'attributes': 0, 'forms': 0,
                  'modules': 0, 'procedures': 0, 'calls': 0, 'duration_sec': 0}
 
@@ -1257,7 +1460,8 @@ class ProjectManager:
                                            source_label=source.label,
                                            source_type=source.source_type,
                                            force_reparse=force_reparse,
-                                           progress_cb=progress_cb)
+                                           progress_cb=progress_cb,
+                                           module_files=module_files)
             stats['modules'] += bsl_stats.get('modules', 0)
             stats['procedures'] = bsl_stats.get('procedures', 0)
             stats['calls'] = bsl_stats.get('calls', 0)

@@ -4,7 +4,9 @@ Indexer: populates per-project SQLite from an XML dump of the configuration
 """
 
 import hashlib
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 
@@ -22,6 +24,25 @@ def module_file_hash(file_path: str | Path, form_xml_path: str | Path = '') -> s
     if form_xml_path:
         hasher.update(Path(form_xml_path).read_bytes())
     return hasher.hexdigest()
+
+
+def module_file_stat(file_path: str | Path, form_xml_path: str | Path = '') -> str:
+    """module_stat.stat: размер и время изменения файла модуля (и Form.xml) —
+    «файл не трогали» одним os.stat, без чтения. '' — файл не прочитать.
+
+    Совпадение — повод не считать хеш; новую выгрузку Конфигуратор пишет
+    заново, и время изменённого файла меняется. Копия с сохранением времени и
+    тем же размером при другом содержимом не распознается — такой файл
+    переразберёт полная переиндексация (смена отпечатка парсера)."""
+    try:
+        st = os.stat(file_path)
+        stat = f'{st.st_size}:{st.st_mtime_ns}'
+        if form_xml_path:
+            st = os.stat(form_xml_path)
+            stat += f'|{st.st_size}:{st.st_mtime_ns}'
+        return stat
+    except OSError:
+        return ''
 
 
 def form_xml_for_module(file_path: str | Path, module_type: str) -> str:
@@ -312,7 +333,7 @@ class Indexer:
                   known_factory_functions: dict[str, set[str]] | None = None,
                   source_label: str = '', source_type: str = 'main',
                   progress_cb=None, commit_every: int = 200,
-                  force_reparse: bool = False) -> dict:
+                  force_reparse: bool = False, module_files: list | None = None) -> dict:
         """
         Index BSL code from XML config dump.
         Walks the XML directory, parses .bsl files, populates modules/procedures/calls.
@@ -339,8 +360,14 @@ class Indexer:
 
         force_reparse — переразобрать все файлы, не глядя на хеш: результат
         разбора устарел из-за смены самого парсера (см. parser_fingerprint).
+
+        module_files — уже готовый обход выгрузки (XMLWalker.walk): reindex
+        обходит её для Pass 1, второй обход здесь стоил бы столько же.
+        Файл, чей размер и время изменения совпадают с прошлым разом
+        (module_stat), не читается вовсе; остальные читаются для хеша
+        параллельно — через 9p упирается в задержку, а не в диск.
         """
-        from .xml_walker import XMLWalker, read_form_attribute_details
+        from .xml_walker import IO_THREADS, XMLWalker, read_form_attribute_details
         from .xml_metadata import is_russian_dump
         from .bsl_reference import module_context_vars, module_context_methods
         from .bsl_parser import BSLParser
@@ -362,8 +389,8 @@ class Indexer:
             (source_id, source_label or source_id, source_type)
         )
 
-        walker = XMLWalker()
-        module_files = walker.walk(xml_path)
+        if module_files is None:
+            module_files = XMLWalker().walk(xml_path)
         total_files = len(module_files)
 
         if known_modules is None or known_objects is None:
@@ -384,6 +411,23 @@ class Indexer:
             r['name']: dict(r) for r in conn.execute(
                 "SELECT id, object_id, file_hash, name FROM modules WHERE source_id=?", (source_id,))
         }
+        stored_stat = dict(conn.execute(
+            "SELECT s.module_id, s.stat FROM module_stat s JOIN modules m ON m.id = s.module_id "
+            "WHERE m.source_id = ?", (source_id,)).fetchall())
+
+        def fingerprint(mf) -> tuple[str, str]:
+            """(stat, хеш) файла; хеш прошлого раза, если stat совпал."""
+            stat = module_file_stat(mf.file_path, mf.form_xml_path)
+            prior = existing_modules.get(mf.full_name)
+            if not force_reparse and prior and stat and stored_stat.get(prior['id']) == stat:
+                return stat, prior['file_hash']
+            try:
+                return stat, module_file_hash(mf.file_path, mf.form_xml_path)
+            except Exception:
+                return stat, ''
+
+        with ThreadPoolExecutor(IO_THREADS) as pool:
+            fingerprints = list(pool.map(fingerprint, module_files))
         seen_names: set[str] = set()
         # Модули форм, чьи реквизиты уже в индексе: у остальных неизменённых
         # форм (индекс построен до таблицы form_attributes) реквизиты
@@ -399,16 +443,16 @@ class Indexer:
             seen_names.add(mf.full_name)
 
             # Hash first, before any parsing — an unchanged file costs one
-            # file read instead of a full parse + a batch of DB writes.
-            try:
-                file_hash = module_file_hash(mf.file_path, mf.form_xml_path)
-            except Exception:
-                file_hash = ''
+            # stat (or one read) instead of a full parse + a batch of DB writes.
+            stat, file_hash = fingerprints[i]
 
             prior = existing_modules.get(mf.full_name)
             if (not force_reparse and prior is not None and file_hash
                     and prior['file_hash'] == file_hash):
                 stats['files_skipped'] += 1
+                if stat and stored_stat.get(prior['id']) != stat:
+                    conn.execute("INSERT OR REPLACE INTO module_stat (module_id, stat) VALUES (?, ?)",
+                                 (prior['id'], stat))
                 if mf.form_xml_path and prior['id'] not in with_form_attributes:
                     self._store_form_attributes(conn, prior['id'], read_form_attribute_details(
                         mf.form_xml_path, russian))
@@ -479,6 +523,8 @@ class Indexer:
                             'id': module_id, 'object_id': object_id, 'file_hash': file_hash}
 
                     stats['modules'] += 1
+                    conn.execute("INSERT OR REPLACE INTO module_stat (module_id, stat) VALUES (?, ?)",
+                                 (module_id, stat))
                     if mf.form_xml_path:
                         self._store_form_attributes(conn, module_id, details)
 

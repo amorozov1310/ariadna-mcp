@@ -547,3 +547,38 @@ a:hover { text-decoration: underline; }
     font-family: var(--mono); font-size: var(--fs-sm); white-space: pre-wrap;
     overflow-wrap: anywhere; max-height: 320px; overflow: auto; color: var(--text2);
 }
+
+/* ============================================================
+   Отличия от базы (diff.html, diff_procedure.html)
+   ============================================================ */
+.diff-base-form label { display: block; font-size: var(--fs-sm); color: var(--text2); margin: var(--space-3) 0 var(--space-1); }
+.diff-base-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; }
+.diff-base-row select, .diff-filter {
+    padding: 6px var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: var(--fs-base); font-family: var(--font); background: var(--bg2); color: var(--text);
+    min-width: 0; max-width: 100%;
+}
+.diff-base-row select:focus, .diff-filter:focus { outline: none; border-color: var(--accent); box-shadow: var(--shadow-focus); }
+.diff-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); border-bottom: 2px solid var(--border); }
+.diff-tab { padding: 8px var(--space-4); font-weight: 500; color: var(--text2); border-bottom: 2px solid transparent; margin-bottom: -2px; }
+.diff-tab:hover { color: var(--text); text-decoration: none; }
+.diff-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.diff-filter { margin: 0 0 6px auto; width: 240px; }
+.diff-item { border-top: 1px solid var(--bg3); padding: 6px 0; min-width: 0; }
+.diff-item > summary { cursor: pointer; display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: baseline; }
+.diff-badges { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.diff-body { padding: var(--space-2) 0 var(--space-2) var(--space-4); min-width: 0; }
+.diff-body p { margin: var(--space-2) 0; }
+.diff-module { margin-top: var(--space-3); }
+.diff-procs { margin-top: 4px; font-size: var(--fs-sm); display: flex; gap: 4px 8px; flex-wrap: wrap; }
+.diff-proc { font-family: var(--mono); }
+.diff-proc-added { color: var(--success); }
+.diff-proc-removed { color: var(--danger); text-decoration: line-through; }
+.diff-code { margin-top: var(--space-3); background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--radius-sm);
+             font-family: var(--mono); font-size: var(--fs-sm); line-height: 1.5; overflow-x: auto; padding: var(--space-2) 0; }
+.diff-line { display: inline-block; min-width: 100%; padding: 0 var(--space-3); white-space: pre; }
+.diff-line-add { background: var(--success-bg); color: var(--success); }
+.diff-line-del { background: var(--danger-bg); color: var(--danger); }
+.diff-line-hunk { color: var(--text3); }
+.diff-line-add-mark { color: var(--success); font-weight: 600; }
+.diff-line-del-mark { color: var(--danger); font-weight: 600; }

@@ -42,6 +42,60 @@
       "result": "string"
     }
   },
+  "diff_from_base": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "object_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "module_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "procedure_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "section": {
+        "type": "string",
+        "required": false,
+        "default": "changed",
+        "enum": [
+          "added",
+          "changed",
+          "removed"
+        ]
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 30
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
   "find_references": {
     "params": {
       "object_name": {
