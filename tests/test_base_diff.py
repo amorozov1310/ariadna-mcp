@@ -149,3 +149,83 @@ def test_web_diff_pages(pm):
         assert resp.status_code == 303 and pm.get_project('typical').base_project == 'custom'
     finally:
         app_module.set_pm(previous)
+
+
+# ============================================
+# Конфликты обновления: проект × новый релиз от общей базы
+# ============================================
+
+def _release(xml: Path) -> None:
+    """«Новый релиз» той же типовой: правит процедуру, которую правил проект;
+    добавляет процедуру и реквизит с теми же именами, что добавил проект;
+    меняет модуль, который проект удалил; меняет модуль, которого проект не
+    трогал (не конфликт)."""
+    prices = xml / PRICES
+    text = prices.read_text(encoding='utf-8-sig').replace('Возврат 100;', 'Возврат 110;')
+    text += '\nФункция НаценкаКлиента(Клиент, Дата) Экспорт\n\tВозврат 5;\nКонецФункции\n'
+    prices.write_text(text, encoding='utf-8-sig')
+    discounts = xml / 'CommonModules/СкидкиСервер/Ext/Module.bsl'
+    discounts.write_text(discounts.read_text(encoding='utf-8-sig').replace('Возврат 10;', 'Возврат 15;'),
+                         encoding='utf-8-sig')
+    orders = xml / 'CommonModules/ЗаказыСервер/Ext/Module.bsl'
+    orders.write_text(orders.read_text(encoding='utf-8-sig') + '\nПроцедура Новая() Экспорт\nКонецПроцедуры\n',
+                      encoding='utf-8-sig')
+    catalog = xml / CATALOG
+    text = catalog.read_text(encoding='utf-8-sig')
+    start = text.index('<Attribute', text.index('<Name>Производитель</Name>') - 400)
+    end = text.index('</Attribute>', start) + len('</Attribute>')
+    clone = text[start:end].replace('<Name>Производитель</Name>', '<Name>НашПроизводитель</Name>')
+    catalog.write_text(text[:end] + clone + text[end:], encoding='utf-8-sig')
+
+
+@pytest.fixture
+def release_pm(pm):
+    release = pm.projects_dir.parent / 'release'
+    shutil.copytree(FIXTURES / 'xml_ru', release)
+    _release(release)
+    _project(pm, 'release', release)
+    pm.reindex('release')
+    pm.reindex('custom')
+    return pm
+
+
+def test_update_conflicts(release_pm):
+    result = release_pm.get_update_conflicts('custom', 'release')
+    found = {(c.kind, c.target) for c in result.items}
+    assert ('both_changed', 'ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену') in found
+    assert ('name_clash', 'ОбщийМодуль.ЦеныСервер.Модуль.НаценкаКлиента') in found
+    assert ('removed_by_you', 'ОбщийМодуль.СкидкиСервер.Модуль') in found
+    assert ('name_clash', 'Справочник.Номенклатура.НашПроизводитель') in found
+    assert not any('ЗаказыСервер' in c.target for c in result.items)
+    assert result.release_totals['procedures_added'] == 2
+    with pytest.raises(ValueError):
+        release_pm.get_update_conflicts('custom', 'typical')
+
+
+def test_update_conflicts_tool_and_pages(release_pm):
+    def tool(**args):
+        return execute_tool(release_pm, 'update_conflicts', {'project_id': 'custom', 'release_project': 'release', **args})
+
+    text = tool()
+    assert 'Обновление «custom»: база «typical»' in text
+    assert '[правили и вы, и релиз] ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену' in text
+    both = tool(module_name='ЦеныСервер', procedure_name='РассчитатьЦену')
+    assert '+\tВозврат 120; // наценка' in both and '+\tВозврат 110;' in both
+    assert 'Справочник.Номенклатура.НашПроизводитель' in tool(object_name='Справочник.Номенклатура')
+    assert 'ЦеныСервер' not in tool(object_name='Справочник.Номенклатура').split('Пересечения по')[1]
+    assert execute_tool(release_pm, 'update_conflicts',
+                        {'project_id': 'custom', 'release_project': 'нет'}).startswith('Error:')
+
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    previous = app_module._pm
+    app_module.set_pm(release_pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        page = client.get('/projects/custom/diff/update', params={'release': 'release'})
+        assert page.status_code == 200 and 'ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену' in page.text
+        conflict = client.get('/projects/custom/diff/conflict', params={
+            'release': 'release', 'module': 'ОбщийМодуль.ЦеныСервер.Модуль', 'name': 'РассчитатьЦену'})
+        assert conflict.status_code == 200 and conflict.text.count('diff-line-add') >= 2
+    finally:
+        app_module.set_pm(previous)

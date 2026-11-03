@@ -233,6 +233,131 @@ def compute_base_diff(current_conn, base_conn, base_project: str,
     return diff
 
 
+# ---------------------------------------------------------------- конфликты обновления
+
+# Виды пересечений доработок проекта с изменениями нового релиза — в порядке
+# важности (так и выводятся).
+CONFLICT_KINDS = {
+    'both_changed': 'правили и вы, и релиз',
+    'removed_in_release': 'вы правили — в релизе удалено',
+    'name_clash': 'вы добавили — в релизе появилось с тем же именем',
+    'removed_by_you': 'вы удалили — релиз изменил',
+    'object_both': 'реквизиты объекта меняли и вы, и релиз',
+    'module_both': 'модуль меняли и вы, и релиз, но разные процедуры',
+}
+
+
+@dataclass
+class Conflict:
+    kind: str                       # ключ CONFLICT_KINDS
+    object_name: str
+    target: str                     # модуль, «модуль.процедура», реквизит или объект
+    module: str = ''                # для процедур — модуль (для diff текста)
+    procedure: str = ''
+    note: str = ''
+
+    @property
+    def title(self) -> str:
+        return CONFLICT_KINDS[self.kind]
+
+
+@dataclass
+class UpdateConflicts:
+    base_project: str
+    release_project: str
+    base_version: str = ''
+    release_version: str = ''
+    items: list[Conflict] = field(default_factory=list)
+    release_totals: dict = field(default_factory=dict)
+
+    def by_kind(self) -> dict[str, int]:
+        counts = {k: 0 for k in CONFLICT_KINDS}
+        for c in self.items:
+            counts[c.kind] += 1
+        return counts
+
+
+def compute_update_conflicts(ours: BaseDiff, release: BaseDiff, release_project: str) -> UpdateConflicts:
+    """Пересечение доработок проекта (ours: проект против базы) с изменениями
+    релиза (release: новая типовая против той же базы) — места, где при
+    обновлении будет ручное слияние. Ни один из индексов здесь не читается."""
+    result = UpdateConflicts(ours.base_project, release_project, ours.base_version,
+                             release.current_version, release_totals=release.totals())
+    items = result.items
+    release_modules = {m.name: m for m in release.modules()}
+
+    for m in ours.modules():
+        rel = release_modules.get(m.name)
+        if rel is None:
+            continue
+        obj = m.object_name or m.name
+        if m.status == 'added':
+            if rel.status == 'added':
+                items.append(Conflict('name_clash', obj, m.name, note='модуль'))
+            continue
+        if m.status == 'removed':
+            if rel.status == 'changed':
+                items.append(Conflict('removed_by_you', obj, m.name, note='модуль'))
+            continue
+        if rel.status == 'removed':
+            items.append(Conflict('removed_in_release', obj, m.name,
+                                  note=f'модуль; ваших правок процедур: {len(m.changed) + len(m.added)}'))
+            continue
+        found = False
+        for proc in m.changed:
+            if proc in rel.changed:
+                note = 'в релизе изменена сигнатура' if proc in rel.signature_changed else ''
+                items.append(Conflict('both_changed', obj, f'{m.name}.{proc}', m.name, proc, note))
+                found = True
+            elif proc in rel.removed:
+                items.append(Conflict('removed_in_release', obj, f'{m.name}.{proc}', m.name, proc))
+                found = True
+        for proc in m.added:
+            if proc in rel.added:
+                items.append(Conflict('name_clash', obj, f'{m.name}.{proc}', m.name, proc))
+                found = True
+        for proc in m.removed:
+            if proc in rel.changed:
+                items.append(Conflict('removed_by_you', obj, f'{m.name}.{proc}', m.name, proc))
+                found = True
+        if not found:
+            items.append(Conflict('module_both', obj, m.name,
+                                  note=f'ваших процедур: {len(m.changed) + len(m.added)}, '
+                                       f'процедур релиза: {len(rel.changed) + len(rel.added) + len(rel.removed)}'))
+
+    for o in ours.objects.values():
+        rel = release.objects.get(o.full_name)
+        if rel is None:
+            continue
+        if o.status == 'added':
+            if rel.status == 'added':
+                items.append(Conflict('name_clash', o.full_name, o.full_name, note='объект'))
+            continue
+        if not o.metadata_changed:
+            continue
+        if rel.status == 'removed':
+            items.append(Conflict('removed_in_release', o.full_name, o.full_name, note='объект'))
+            continue
+        if not rel.metadata_changed:
+            continue
+        rel_added = {n for n, _ in rel.attrs_added}
+        rel_touched = {n for n, _, _ in rel.attrs_retyped} | {n for n, _ in rel.attrs_removed}
+        clash = [n for n, _ in o.attrs_added if n in rel_added]
+        both = [n for n, _, _ in o.attrs_retyped if n in rel_touched]
+        for n in clash:
+            items.append(Conflict('name_clash', o.full_name, f'{o.full_name}.{n}', note='реквизит'))
+        for n in both:
+            items.append(Conflict('both_changed', o.full_name, f'{o.full_name}.{n}', note='тип реквизита'))
+        if not clash and not both:
+            items.append(Conflict('object_both', o.full_name, o.full_name,
+                                  note=f'ваших реквизитов: {len(o.attrs_added) + len(o.attrs_retyped)}, '
+                                       f'реквизитов релиза: {len(rel.attrs_added) + len(rel.attrs_retyped) + len(rel.attrs_removed)}'))
+
+    order = list(CONFLICT_KINDS)
+    items.sort(key=lambda c: (order.index(c.kind), c.target))
+    return result
+
+
 # ---------------------------------------------------------------- текст процедуры
 
 def procedure_text_diff(base_lines: list[str] | None, current_lines: list[str] | None,

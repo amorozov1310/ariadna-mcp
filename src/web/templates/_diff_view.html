@@ -1,0 +1,29 @@
+{# Тело diff процедуры (результат ProjectManager.get_procedure_diff и строки
+   routes_diff._diff_lines) — общее для diff_procedure.html и diff_conflict.html. #}
+{% macro status_badge(result) -%}
+{% if result.status == 'changed' %}<span class="badge badge-warning">изменена</span>
+{% elif result.status == 'added' %}<span class="badge badge-ready">добавлена</span>
+{% elif result.status == 'removed' %}<span class="badge badge-danger">удалена</span>
+{% elif result.status == 'same' %}<span class="badge">не изменена</span>{% endif %}
+{%- endmacro %}
+
+{% macro diff_body(result, lines, base_label, current_label) %}
+{% if result.status == 'error' %}
+<p class="text-muted">{{ result.error }}</p>
+{% elif result.status == 'missing' %}
+<p class="text-muted">Процедуры нет ни в «{{ current_label }}», ни в базе.</p>
+{% elif result.status == 'same' %}
+<p class="text-muted">Текст в «{{ current_label }}» и в базе «{{ base_label }}» совпадает.</p>
+{% elif result.status == 'unreadable' %}
+<p class="text-muted">Процедура есть в обоих индексах, но файл выгрузки
+    {{ 'базы «' ~ base_label ~ '»' if result.base_unreadable else '«' ~ current_label ~ '»' }}
+    недоступен на сервере — текст не сравнить.</p>
+{% else %}
+<p class="text-muted" style="font-size:var(--fs-sm)">
+    <span class="diff-line-del-mark">−</span> было в базе «{{ base_label }}»,
+    <span class="diff-line-add-mark">+</span> стало в «{{ current_label }}».
+</p>
+<pre class="diff-code">{% for kind, line in lines %}<span class="diff-line diff-line-{{ kind }}">{{ line }}</span>
+{% endfor %}</pre>
+{% endif %}
+{% endmacro %}

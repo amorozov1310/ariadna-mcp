@@ -203,7 +203,7 @@ def format_procedure_context(ctx: dict) -> str:
 # листать через offset.
 MAX_LIMIT = 500
 _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
-                'search_procedures', 'search_code', 'diff_from_base')
+                'search_procedures', 'search_code', 'diff_from_base', 'update_conflicts')
 
 # Сколько процедур «Missing from index» показывает diagnose_index: на большой
 # конфигурации их тысячи, а для диагностики хватает первых.
@@ -329,6 +329,26 @@ def format_procedure_diff(result: dict) -> str:
     note = {'added': f"процедуры нет в базе «{base}» — добавлена",
             'removed': f"процедура есть только в базе «{base}» — удалена"}.get(result['status'], '')
     return (f"// {note}\n" if note else '') + (result['diff'] or f"{name}: изменение не прочитать.")
+
+
+def format_update_conflicts_summary(project_id: str, result) -> str:
+    from ..core.base_diff import CONFLICT_KINDS
+    t = result.release_totals
+    counts = result.by_kind()
+    lines = [
+        f"Обновление «{project_id}»: база «{result.base_project}» ({result.base_version or '?'}) → "
+        f"релиз «{result.release_project}» ({result.release_version or '?'})",
+        f"Релиз изменил: модулей {t['modules_changed']}, новых {t['modules_added']}, удалено "
+        f"{t['modules_removed']}; процедур изменено {t['procedures_changed']}, добавлено "
+        f"{t['procedures_added']}, удалено {t['procedures_removed']}; новых объектов {t['objects_added']}",
+        f"Пересечения с доработками проекта: {len(result.items)}",
+    ]
+    lines += [f"  {title}: {counts[kind]}" for kind, title in CONFLICT_KINDS.items() if counts[kind]]
+    return '\n'.join(lines)
+
+
+def format_conflict_line(c) -> str:
+    return f"  [{c.title}] {c.target}" + (f" — {c.note}" if c.note else '')
 
 
 def is_error_text(text: str) -> bool:
@@ -754,6 +774,44 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                 lines.append("Подробно по объекту: diff_from_base(object_name=...); текст процедуры: "
                              "diff_from_base(module_name=..., procedure_name=...); другие разделы: "
                              "section=added | removed")
+            return '\n'.join(lines)
+
+        case 'update_conflicts':
+            release_id = (args.get('release_project') or '').strip()
+            module_name = (args.get('module_name') or '').strip()
+            proc_name = (args.get('procedure_name') or '').strip()
+            object_name = (args.get('object_name') or '').strip()
+            src = source_id or 'main'
+            try:
+                result = pm.get_update_conflicts(project_id, release_id, source_id=src)
+                if proc_name:
+                    if not module_name:
+                        return "Error: для текста процедуры нужен и module_name (из списка конфликтов)"
+                    ours = pm.get_procedure_diff(project_id, module_name, proc_name, source_id=src)
+                    theirs = pm.get_procedure_diff(release_id, module_name, proc_name, source_id=src,
+                                                   base_id=result.base_project)
+            except ValueError as e:
+                return f"Error: {e}"
+            if proc_name:
+                return (f"== Ваша правка (база «{result.base_project}» → «{project_id}»):\n"
+                        f"{format_procedure_diff(ours)}\n\n"
+                        f"== Изменение релиза (база «{result.base_project}» → «{release_id}»):\n"
+                        f"{format_procedure_diff(theirs)}")
+            items = result.items
+            if object_name:
+                key = object_name.casefold()
+                items = [c for c in items if c.object_name.casefold() == key
+                         or c.target.casefold().startswith(key + '.') or c.target.casefold() == key]
+            limit = max(1, int(limit_arg or 50))
+            shown = items[offset:offset + limit]
+            lines = [format_update_conflicts_summary(project_id, result), ''] if offset == 0 else []
+            lines.append(f"Пересечения{f' по {object_name}' if object_name else ''} ({len(items)}):")
+            lines += [format_conflict_line(c) for c in shown] or ["  нет — доработки не пересекаются с изменениями релиза"]
+            if shown:
+                lines.append(_page_trailer(len(shown), offset, limit, offset + limit < len(items)))
+            if offset == 0 and items:
+                lines.append("Обе правки процедуры (ваша и релиза): update_conflicts(release_project=..., "
+                             "module_name=..., procedure_name=...)")
             return '\n'.join(lines)
 
         case 'semantic_search_code':
