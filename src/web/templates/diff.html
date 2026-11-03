@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}Отличия — {{ project.name }}{% endblock %}
+{% block active_nav %}diff{% endblock %}
+
+{% macro base_form(current) %}
+<form action="/api/projects/{{ project.id }}/base" method="post" class="diff-base-form">
+    <label for="base-project">База — проект с типовой конфигурацией</label>
+    <div class="diff-base-row">
+        <select id="base-project" name="base_project">
+            <option value="">— нет —</option>
+            {% for p in candidates %}
+            <option value="{{ p.id }}" {% if p.id == current %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+    </div>
+</form>
+{% endmacro %}
+
+{% macro module_counts(m) -%}
+{%- if m.status == 'added' -%}новый модуль, процедур {{ m.procedures|num }}
+{%- elif m.status == 'removed' -%}модуль удалён, процедур было {{ m.procedures|num }}
+{%- else -%}
+{%- set parts = [] -%}
+{%- if m.changed %}{% set _ = parts.append('изменено ' ~ m.changed|length) %}{% endif -%}
+{%- if m.added %}{% set _ = parts.append('добавлено ' ~ m.added|length) %}{% endif -%}
+{%- if m.removed %}{% set _ = parts.append('удалено ' ~ m.removed|length) %}{% endif -%}
+{{ ('процедуры: ' ~ parts|join(', ')) if parts else 'правка вне процедур' }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro proc_links(m, names, cls) -%}
+{%- for n in names -%}
+<a class="diff-proc {{ cls }}" href="/projects/{{ project.id }}/diff/procedure?module={{ m.name|urlencode }}&name={{ n|urlencode }}">{{ n }}</a>
+{%- endfor -%}
+{%- endmacro %}
+
+{% block content %}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg>
+    Отличия от типовой
+</h1>
+
+{% if not project.base_project %}
+<div class="card">
+    <p class="text-muted">
+        Сравнение с базой показывает, что доработано в конфигурации проекта: новые объекты и
+        реквизиты, изменённые и добавленные процедуры типовых модулей — и текст каждого изменения.
+        База — отдельный проект с выгрузкой той же конфигурации без доработок (обычно типовой
+        того же релиза). Создайте его, проиндексируйте и выберите здесь. Агенту то же доступно
+        инструментом <span class="mono">diff_from_base</span>.
+    </p>
+    <p class="text-muted">
+        Пока индекс этого проекта не построен, первая индексация возьмёт индекс базы за основу и
+        переразберёт только отличающиеся модули.
+    </p>
+    {{ base_form('') }}
+</div>
+{% else %}
+
+{% if error %}
+<div class="notice notice-warning" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>{{ error }}</div>
+</div>
+{% endif %}
+
+{% if diff %}
+<div class="card">
+    <div class="card-header">
+        <h3 class="section-title">
+            База: <a href="/projects/{{ diff.base_project }}">{{ diff.base_project }}</a>
+            {% if diff.base_version %}<span class="text-muted">{{ diff.base_version }}</span>{% endif %}
+            {% if diff.current_version and diff.current_version != diff.base_version %}
+            → <span class="text-muted">{{ diff.current_version }}</span>{% endif %}
+        </h3>
+    </div>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{ totals.modules_changed|num }}</div>
+            <div class="stat-label">Изменено типовых модулей из {{ diff.modules_total|num }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ totals.procedures_changed|num }}</div>
+            <div class="stat-label">Изменено типовых процедур</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ (totals.procedures_added + totals.procedures_in_added_modules)|num }}</div>
+            <div class="stat-label">Новых процедур</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ totals.objects_added|num }}</div>
+            <div class="stat-label">Новых объектов</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ totals.attributes_added|num }}</div>
+            <div class="stat-label">Новых реквизитов у типовых</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ (totals.objects_removed + totals.modules_removed + totals.procedures_removed + totals.attributes_removed)|num }}</div>
+            <div class="stat-label">Удалено из типовой</div>
+        </div>
+    </div>
+    <p class="text-muted" style="font-size:var(--fs-sm)">
+        Модулей: новых {{ totals.modules_added|num }}, удалено {{ totals.modules_removed|num }}.
+        Процедуры изменённых модулей: добавлено {{ totals.procedures_added|num }}, удалено
+        {{ totals.procedures_removed|num }}, сигнатура изменена у {{ totals.procedures_signature|num }}.
+        Реквизиты типовых: удалено {{ totals.attributes_removed|num }}, тип изменён у
+        {{ totals.attributes_retyped|num }}; форм добавлено {{ totals.forms_added|num }}.
+    </p>
+</div>
+
+<div class="card">
+    <div class="diff-tabs">
+        {% for key, label in sections.items() %}
+        <a href="?section={{ key }}" class="diff-tab {% if key == section %}active{% endif %}">{{ label }}
+            <span class="text-muted">{{ counts[key]|num }}</span></a>
+        {% endfor %}
+        <input type="search" id="diff-filter" class="diff-filter" placeholder="Фильтр по имени"
+               aria-label="Фильтр по имени объекта">
+    </div>
+
+    {% if items %}
+    <div class="diff-list" id="diff-list">
+        {% for o in items %}
+        <details class="diff-item" data-name="{{ (o.full_name ~ ' ' ~ o.synonym)|lower }}">
+            <summary>
+                <span class="mono">{{ o.full_name }}</span>
+                {% if o.synonym %}<span class="text-muted">{{ o.synonym }}</span>{% endif %}
+                <span class="diff-badges">
+                    {% if o.attrs_added %}<span class="badge badge-ready">реквизиты +{{ o.attrs_added|length }}</span>{% endif %}
+                    {% if o.attrs_removed %}<span class="badge badge-danger">реквизиты −{{ o.attrs_removed|length }}</span>{% endif %}
+                    {% if o.attrs_retyped %}<span class="badge badge-warning">тип изменён {{ o.attrs_retyped|length }}</span>{% endif %}
+                    {% if o.forms_added %}<span class="badge badge-ready">формы +{{ o.forms_added|length }}</span>{% endif %}
+                    {% if o.forms_removed %}<span class="badge badge-danger">формы −{{ o.forms_removed|length }}</span>{% endif %}
+                    {% if o.modules %}<span class="badge badge-accent">модулей {{ o.modules|length }}</span>{% endif %}
+                </span>
+            </summary>
+            <div class="diff-body">
+                {% if o.synonym_was is not none %}
+                <p>Синоним: «{{ o.synonym_was }}» → «{{ o.synonym }}»</p>
+                {% endif %}
+                {% if o.attrs_added or o.attrs_removed or o.attrs_retyped %}
+                <table class="detail-table">
+                    <tr><th>Реквизит</th><th>Тип</th><th></th></tr>
+                    {% for n, t in o.attrs_added %}<tr><td class="mono">{{ n }}</td><td>{{ t }}</td><td><span class="badge badge-ready">добавлен</span></td></tr>{% endfor %}
+                    {% for n, t in o.attrs_removed %}<tr><td class="mono">{{ n }}</td><td>{{ t }}</td><td><span class="badge badge-danger">удалён</span></td></tr>{% endfor %}
+                    {% for n, was, now in o.attrs_retyped %}<tr><td class="mono">{{ n }}</td><td>{{ was or '—' }} → {{ now or '—' }}</td><td><span class="badge badge-warning">тип изменён</span></td></tr>{% endfor %}
+                </table>
+                {% endif %}
+                {% if o.forms_added %}<p>Формы добавлены: {{ o.forms_added|join(', ') }}</p>{% endif %}
+                {% if o.forms_removed %}<p>Формы удалены: {{ o.forms_removed|join(', ') }}</p>{% endif %}
+                {% for m in o.modules %}
+                <div class="diff-module">
+                    <div><span class="mono">{{ m.name }}</span> <span class="text-muted">— {{ module_counts(m) }}</span></div>
+                    {% if m.changed %}<div class="diff-procs"><span class="text-muted">изменены:</span> {{ proc_links(m, m.changed, 'diff-proc-changed') }}</div>{% endif %}
+                    {% if m.added %}<div class="diff-procs"><span class="text-muted">добавлены:</span> {{ proc_links(m, m.added, 'diff-proc-added') }}</div>{% endif %}
+                    {% if m.removed %}<div class="diff-procs"><span class="text-muted">удалены:</span> {{ proc_links(m, m.removed, 'diff-proc-removed') }}</div>{% endif %}
+                </div>
+                {% endfor %}
+                {% if o.status != 'removed' %}
+                <p><a href="/projects/{{ project.id }}/object/{{ o.full_name|urlencode }}">Объект в проекте →</a></p>
+                {% endif %}
+            </div>
+        </details>
+        {% endfor %}
+    </div>
+    <p class="text-muted" id="diff-empty" style="display:none">Ничего не найдено.</p>
+    {% else %}
+    <p class="text-muted" style="margin-top:var(--space-3)">Нет.</p>
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+    <h3 class="section-title">Базовый проект</h3>
+    {{ base_form(project.base_project) }}
+</div>
+
+<script>
+(function () {
+    const input = document.getElementById('diff-filter');
+    const list = document.getElementById('diff-list');
+    if (!input || !list) return;
+    const empty = document.getElementById('diff-empty');
+    input.addEventListener('input', function () {
+        const q = input.value.trim().toLowerCase();
+        let shown = 0;
+        list.querySelectorAll('.diff-item').forEach(function (el) {
+            const ok = !q || el.dataset.name.includes(q);
+            el.style.display = ok ? '' : 'none';
+            if (ok) shown++;
+        });
+        empty.style.display = shown ? 'none' : '';
+    });
+})();
+</script>
+{% endif %}
+{% endblock %}

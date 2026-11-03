@@ -48,7 +48,7 @@ from mcp import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
-EXPECTED_TOOLS = 21
+EXPECTED_TOOLS = 22
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
 
@@ -75,6 +75,8 @@ PARITY_CASES = {
     # Удаление дважды подряд успешным не бывает — сверяется одинаковая ошибка.
     'remove_glossary_term': {'entry_id': 'нет'},
     'diagnose_index': {},
+    # Базы у временного проекта нет — сверяется одинаковая ошибка.
+    'diff_from_base': {},
     'reindex': {},
     'remove_source': {'source_id': 'main'},          # без confirm — только предпросмотр
 }
@@ -314,7 +316,7 @@ def check_indexing(ctx: LiveContext) -> list[Result]:
 # ============================================
 
 # Сверяется одинаковая ошибка: удаление дважды подряд успешным не бывает.
-PARITY_EXPECTED_ERRORS = {'remove_glossary_term'}
+PARITY_EXPECTED_ERRORS = {'remove_glossary_term', 'diff_from_base'}
 
 
 def check_playground_parity(ctx: LiveContext) -> list[Result]:

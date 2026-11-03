@@ -17,12 +17,14 @@
 import logging
 import re
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .metadata_model import (
     OBJECT_TYPE_MAP, AttributeInfo, CommonModuleInfo, ConfigInfo, EnumValueInfo,
     FormInfo, MetadataObject, SubsystemInfo,
 )
+from .xml_walker import IO_THREADS
 
 logger = logging.getLogger('ariadna')
 
@@ -361,7 +363,6 @@ def parse_xml_dump(xml_root: str | Path) -> tuple[ConfigInfo, list[MetadataObjec
         compatibility_mode=compat,
     )
 
-    objects: list[MetadataObject] = []
     sub_word = 'Подсистемы' if lang.ru else 'Subsystems'
 
     def load(path: Path):
@@ -371,28 +372,35 @@ def parse_xml_dump(xml_root: str | Path) -> tuple[ConfigInfo, list[MetadataObjec
             logger.warning('Метаданные: не прочитан %s (%s)', path, e)
             return None
 
-    def add_subsystem(dir_path: Path, name: str, full_name: str):
+    def subsystem(dir_path: Path, name: str, full_name: str) -> list[MetadataObject]:
         el = load(dir_path / f'{name}.xml')
         if el is None:
-            return
-        objects.append(_build_object(el, 'Subsystem', 'Подсистема', full_name, lang))
+            return []
+        found = [_build_object(el, 'Subsystem', 'Подсистема', full_name, lang)]
         for nested in _children(_child(el, 'ChildObjects'), 'Subsystem'):
             nested_name = (nested.text or '').strip()
             if nested_name:
-                add_subsystem(dir_path / name / 'Subsystems', nested_name,
-                              f'{full_name}.{sub_word}.{nested_name}')
+                found += subsystem(dir_path / name / 'Subsystems', nested_name,
+                                   f'{full_name}.{sub_word}.{nested_name}')
+        return found
 
-    for child in _children_of(conf_el, 'ChildObjects'):
+    def child_objects(child) -> list[MetadataObject]:
         kind_en = _local(child.tag)
         name = (child.text or '').strip()
         if kind_en not in _KINDS or not name:
-            continue
+            return []
         plural, kind_ru = _KINDS[kind_en]
         if kind_en == 'Subsystem':
-            add_subsystem(root / plural, name, f'Подсистема.{name}')
-            continue
+            return subsystem(root / plural, name, f'Подсистема.{name}')
         el = load(root / plural / f'{name}.xml')
-        if el is not None:
-            objects.append(_build_object(el, kind_en, kind_ru, f'{kind_ru}.{name}', lang))
+        return [_build_object(el, kind_en, kind_ru, f'{kind_ru}.{name}', lang)] if el is not None else []
+
+    # Файлы объектов читаются параллельно: через 9p (Docker Desktop на
+    # Windows) чтение десятков тысяч файлов упирается в задержку каждого
+    # обращения, а не в разбор. Порядок объектов — как в Configuration.xml.
+    objects: list[MetadataObject] = []
+    with ThreadPoolExecutor(IO_THREADS) as pool:
+        for found in pool.map(child_objects, list(_children_of(conf_el, 'ChildObjects'))):
+            objects += found
 
     return config, objects

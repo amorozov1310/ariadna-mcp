@@ -203,7 +203,7 @@ def format_procedure_context(ctx: dict) -> str:
 # листать через offset.
 MAX_LIMIT = 500
 _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
-                'search_procedures', 'search_code')
+                'search_procedures', 'search_code', 'diff_from_base')
 
 # Сколько процедур «Missing from index» показывает diagnose_index: на большой
 # конфигурации их тысячи, а для диагностики хватает первых.
@@ -214,6 +214,121 @@ DIAGNOSE_MISSING_SHOWN = 100
 CONTEXT_CALLS_SHOWN = 20
 CONTEXT_COMMENT_LINES = 12
 CONTEXT_COMMENT_CHARS = 800
+
+
+# ============================================
+# DIFF FROM BASE
+# ============================================
+
+_DIFF_SECTIONS = {'changed': 'Доработанные объекты типовой (больше изменений — выше)',
+                  'added': 'Новые объекты', 'removed': 'Удалённые объекты'}
+# Сколько имён процедур/реквизитов перечислять в одной строке сводки.
+DIFF_NAMES_SHOWN = 5
+
+
+def _names(items: list[str], shown: int = DIFF_NAMES_SHOWN) -> str:
+    return ', '.join(items[:shown]) + (f' … (+{len(items) - shown})' if len(items) > shown else '')
+
+
+def _module_short(module_name: str, object_name: str) -> str:
+    """«Документ.X.Форма.ФормаДокумента» у объекта Документ.X → «Форма.ФормаДокумента»."""
+    prefix = object_name + '.'
+    return module_name[len(prefix):] if object_name and module_name.startswith(prefix) else module_name
+
+
+def _module_counts(m) -> str:
+    if m.status == 'added':
+        return f"новый модуль, процедур {m.procedures}"
+    if m.status == 'removed':
+        return f"модуль удалён, процедур было {m.procedures}"
+    parts = [f"{label} {len(items)}" for label, items in
+             (('изменено', m.changed), ('добавлено', m.added), ('удалено', m.removed)) if items]
+    return 'процедуры: ' + ', '.join(parts) if parts else 'правка вне процедур'
+
+
+def format_base_diff_summary(project_id: str, diff) -> str:
+    t = diff.totals()
+    versions = f": {diff.base_version or '?'} → {diff.current_version or '?'}" \
+        if diff.base_version != diff.current_version else (f" ({diff.base_version})" if diff.base_version else '')
+    return '\n'.join([
+        f"Отличия «{project_id}» от базы «{diff.base_project}»{versions}",
+        f"Код: изменено модулей {t['modules_changed']} из {diff.modules_total}, новых "
+        f"{t['modules_added']}, удалено {t['modules_removed']}. Процедуры в изменённых модулях: "
+        f"изменено {t['procedures_changed']} (сигнатура — у {t['procedures_signature']}), "
+        f"добавлено {t['procedures_added']}, удалено {t['procedures_removed']}; "
+        f"в новых модулях — {t['procedures_in_added_modules']}",
+        f"Метаданные: новых объектов {t['objects_added']}, удалено {t['objects_removed']}; "
+        f"у типовых: реквизитов добавлено {t['attributes_added']}, удалено "
+        f"{t['attributes_removed']}, тип изменён у {t['attributes_retyped']}, форм добавлено "
+        f"{t['forms_added']}",
+        f"Доработано типовых объектов: {t['objects_changed']}",
+    ])
+
+
+def format_object_change_line(o) -> str:
+    syn = f" — {o.synonym}" if o.synonym else ''
+    parts = []
+    if o.attrs_added:
+        parts.append(f"реквизиты +{len(o.attrs_added)}")
+    if o.attrs_removed:
+        parts.append(f"реквизиты −{len(o.attrs_removed)}")
+    if o.attrs_retyped:
+        parts.append(f"тип изменён у {len(o.attrs_retyped)}")
+    if o.forms_added:
+        parts.append(f"формы +{len(o.forms_added)}")
+    if o.forms_removed:
+        parts.append(f"формы −{len(o.forms_removed)}")
+    if o.synonym_was is not None:
+        parts.append("синоним изменён")
+    for m in o.modules:
+        parts.append(f"{_module_short(m.name, o.full_name)}: {_module_counts(m)}")
+    return f"  {o.full_name}{syn}" + (f": {'; '.join(parts)}" if parts else '')
+
+
+def format_object_change(o, project_id: str, base_project: str) -> str:
+    status = {'changed': 'доработан', 'added': f'новый (в базе «{base_project}» его нет)',
+              'removed': f'удалён (есть только в базе «{base_project}»)'}[o.status]
+    syn = f" ({o.synonym})" if o.synonym else ''
+    lines = [f"{o.full_name}{syn} — {status}"]
+    if o.synonym_was is not None:
+        lines.append(f"Синоним: «{o.synonym_was}» → «{o.synonym}»")
+    for title, items in (('Реквизиты добавлены', o.attrs_added), ('Реквизиты удалены', o.attrs_removed)):
+        if items:
+            lines.append(f"{title} ({len(items)}):")
+            lines += [f"  {n}" + (f": {t}" if t else '') for n, t in items]
+    if o.attrs_retyped:
+        lines.append(f"Тип изменён ({len(o.attrs_retyped)}):")
+        lines += [f"  {n}: {was or '—'} → {now or '—'}" for n, was, now in o.attrs_retyped]
+    for title, items in (('Формы добавлены', o.forms_added), ('Формы удалены', o.forms_removed)):
+        if items:
+            lines.append(f"{title}: {', '.join(items)}")
+    if o.modules:
+        lines.append("Модули:")
+        for m in o.modules:
+            lines.append(f"  {m.name} — {_module_counts(m)}")
+            for label, items in (('изменены', m.changed), ('добавлены', m.added), ('удалены', m.removed)):
+                if items:
+                    lines.append(f"    {label}: {', '.join(items)}")
+            if m.signature_changed:
+                lines.append(f"    сигнатура изменена: {', '.join(m.signature_changed)}")
+        lines.append("Текст изменения процедуры: diff_from_base(module_name=..., procedure_name=...)")
+    return '\n'.join(lines)
+
+
+def format_procedure_diff(result: dict) -> str:
+    name, base = result['name'], result['base_project']
+    match result['status']:
+        case 'missing':
+            return f"Процедуры {name} нет ни в проекте, ни в базе «{base}». Имя модуля и процедуры — из search_procedures."
+        case 'same':
+            return f"{name}: текст в проекте и в базе «{base}» совпадает."
+        case 'unreadable':
+            side = f"базы «{base}»" if result['base_unreadable'] else "проекта"
+            return (f"{name}: процедура есть в обоих индексах, но файл выгрузки {side} недоступен на "
+                    f"сервере — текст не сравнить (переиндексируйте или проверьте путь к выгрузке).")
+    note = {'added': f"процедуры нет в базе «{base}» — добавлена",
+            'removed': f"процедура есть только в базе «{base}» — удалена"}.get(result['status'], '')
+    return (f"// {note}\n" if note else '') + (result['diff'] or f"{name}: изменение не прочитать.")
 
 
 def is_error_text(text: str) -> bool:
@@ -603,6 +718,42 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     f"  {p['kind']} {p['name']}({p.get('params', '')[:40]}){exp}{dir_str} "
                     f"[{p['start_line']}-{p['end_line']}]"
                 )
+            return '\n'.join(lines)
+
+        case 'diff_from_base':
+            module_name = (args.get('module_name') or '').strip()
+            proc_name = (args.get('procedure_name') or '').strip()
+            object_name = (args.get('object_name') or '').strip()
+            try:
+                if proc_name:
+                    if not module_name:
+                        return "Error: для текста процедуры нужен и module_name (из search_procedures или сводки)"
+                    return format_procedure_diff(pm.get_procedure_diff(
+                        project_id, module_name, proc_name, source_id=source_id or 'main'))
+                diff = pm.get_base_diff(project_id, source_id=source_id or 'main')
+            except ValueError as e:
+                return f"Error: {e}"
+            if object_name or module_name:
+                o = diff.find_object(object_name or module_name)
+                if o is None:
+                    return (f"«{object_name or module_name}» не отличается от базы «{diff.base_project}» "
+                            f"(или такого объекта нет — полное имя из search_metadata).")
+                return format_object_change(o, project_id, diff.base_project)
+            section = (args.get('section') or 'changed').strip().lower()
+            if section not in _DIFF_SECTIONS:
+                return f"Error: section — одно из {', '.join(_DIFF_SECTIONS)}"
+            limit = max(1, int(limit_arg or 30))
+            items = diff.by_status(section)
+            shown = items[offset:offset + limit]
+            lines = [format_base_diff_summary(project_id, diff), ''] if offset == 0 else []
+            lines.append(f"{_DIFF_SECTIONS[section]} ({len(items)}):")
+            lines += [format_object_change_line(o) for o in shown] or ["  нет"]
+            if shown:
+                lines.append(_page_trailer(len(shown), offset, limit, offset + limit < len(items)))
+            if offset == 0:
+                lines.append("Подробно по объекту: diff_from_base(object_name=...); текст процедуры: "
+                             "diff_from_base(module_name=..., procedure_name=...); другие разделы: "
+                             "section=added | removed")
             return '\n'.join(lines)
 
         case 'semantic_search_code':

@@ -26,7 +26,7 @@ from src.mcp_server.tools import MAX_LIMIT, execute_tool
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
-# Аргументы для каждого из 21 инструмента (без project_id) — так, чтобы
+# Аргументы для каждого из 22 инструментов (без project_id) — так, чтобы
 # ответ был содержательным на фикстуре. Дополняются умолчаниями схемы.
 CASES = {
     'list_projects': {},
@@ -49,13 +49,15 @@ CASES = {
     'search_code': {'query': 'Возврат'},
     'semantic_search_code': {'query': 'расчет цены со скидкой', 'limit': '3'},
     'diagnose_index': {},
+    # Базы у проекта нет — сверяется одинаковая ошибка с подсказкой.
+    'diff_from_base': {},
     'reindex': {},
     'remove_source': {'source_id': 'main'},          # без confirm — только предпросмотр
 }
 
 
 # Инструменты, у которых сверяется ожидаемая ошибка (см. CASES).
-EXPECTED_ERRORS = {'remove_glossary_term'}
+EXPECTED_ERRORS = {'remove_glossary_term', 'diff_from_base'}
 
 
 def _zip(src: Path) -> io.BytesIO:
@@ -139,7 +141,7 @@ def _play(client, tool: str, params: dict) -> dict:
 
 def test_cases_cover_every_mcp_tool():
     assert set(CASES) == set(_schemas())
-    assert len(CASES) == 21
+    assert len(CASES) == 22
 
 
 @pytest.mark.parametrize('tool', sorted(CASES))

@@ -244,6 +244,27 @@ CREATE TABLE IF NOT EXISTS parser_state (
     last_full_reparse_reason TEXT DEFAULT ''
 );
 
+-- Размер и время изменения файла модуля (и Form.xml) при последнем чтении —
+-- src/core/indexer.py:module_file_stat. Совпали — файл не читается и хеш не
+-- считается: на крупной выгрузке через 9p чтение всех файлов шло минуты.
+-- Отдельная таблица (IF NOT EXISTS): индекс старого формата не пересоздаётся,
+-- строки появятся при следующем reindex.
+CREATE TABLE IF NOT EXISTS module_stat (
+    module_id INTEGER PRIMARY KEY REFERENCES modules(id) ON DELETE CASCADE,
+    stat      TEXT NOT NULL DEFAULT ''
+);
+
+-- Функции-фабрики общих модулей (Indexer.scan_known_factory_functions) по
+-- файлу: stat — module_file_stat и отпечаток парсера. Разбор всех общих
+-- модулей ради них — минута на крупной конфигурации; при обновлении заново
+-- разбираются только изменённые (ProjectManager._factory_functions).
+CREATE TABLE IF NOT EXISTS factory_cache (
+    file_path   TEXT PRIMARY KEY,
+    object_name TEXT NOT NULL,
+    stat        TEXT NOT NULL,
+    functions   TEXT NOT NULL DEFAULT ''
+);
+
 -- Поисковые карточки процедур (src/core/cards.py, docs/hybrid-search.md):
 -- фрагмент = заголовок карточки + кусок тела. Текст не хранится —
 -- card_fts contentless, как module_text_fts; но detail=full: без позиций
@@ -577,7 +598,7 @@ class Database:
         if not self.conn:
             self.connect()
         for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes', 'object_properties',
-                      'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
+                      'module_stat', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:
             self.conn.execute(f"DELETE FROM {table}")
