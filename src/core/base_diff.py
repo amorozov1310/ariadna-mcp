@@ -143,12 +143,13 @@ def _objects(conn, source_id: str) -> dict[str, dict]:
 
 
 def _members(conn, source_id: str) -> tuple[dict, dict]:
-    """{объект: {реквизит: тип}}, {объект: {форма}} — одним запросом каждое."""
+    """{объект: {реквизит: тип}}, {объект: {форма}} — одним запросом каждое.
+    Реквизиты — с табличными частями, их реквизитами и значениями перечислений."""
     attrs: dict[str, dict[str, str]] = defaultdict(dict)
     for r in conn.execute(
             """SELECT o.full_name, a.name, a.type_desc FROM attributes a
                JOIN metadata_objects o ON o.id = a.object_id
-               WHERE o.source_id = ? AND a.kind != 'ЗначениеПеречисления'""", (source_id,)):
+               WHERE o.source_id = ?""", (source_id,)):
         attrs[r['full_name']][r['name']] = r['type_desc'] or ''
     forms: dict[str, set[str]] = defaultdict(set)
     for r in conn.execute(
@@ -209,17 +210,17 @@ def compute_base_diff(current_conn, base_conn, base_project: str,
         if name in cm and name in bm:
             if cm[name]['file_hash'] == bm[name]['file_hash']:
                 continue
-            bp, cp = _procedures(base_conn, bm[name]['id']), _procedures(current_conn, cm[name]['id'])
-            both = bp.keys() & cp.keys()
+            was, now = _procedures(base_conn, bm[name]['id']), _procedures(current_conn, cm[name]['id'])
+            both = was.keys() & now.keys()
             change = ModuleChange(
                 name, _object_of(name), 'changed',
-                added=sorted(cp[k]['name'] for k in cp.keys() - bp.keys()),
-                removed=sorted(bp[k]['name'] for k in bp.keys() - cp.keys()),
-                changed=sorted(cp[k]['name'] for k in both
-                               if (cp[k]['content_hash'] or '') != (bp[k]['content_hash'] or '')
-                               or cp[k]['signature'] != bp[k]['signature']),
-                signature_changed=sorted(cp[k]['name'] for k in both
-                                         if cp[k]['signature'] != bp[k]['signature']))
+                added=sorted(now[k]['name'] for k in now.keys() - was.keys()),
+                removed=sorted(was[k]['name'] for k in was.keys() - now.keys()),
+                changed=sorted(now[k]['name'] for k in both
+                               if (now[k]['content_hash'] or '') != (was[k]['content_hash'] or '')
+                               or now[k]['signature'] != was[k]['signature']),
+                signature_changed=sorted(now[k]['name'] for k in both
+                                         if now[k]['signature'] != was[k]['signature']))
             # Без изменённых процедур модуль всё равно в списке: правка вне
             # процедур (переменные модуля, области, комментарии) — тоже доработка.
         else:
