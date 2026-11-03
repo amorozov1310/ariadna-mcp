@@ -655,5 +655,54 @@
       "next_offset": "integer|null",
       "warnings": "array"
     }
+  },
+  "update_conflicts": {
+    "params": {
+      "release_project": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "object_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "module_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "procedure_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 50
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
   }
 }

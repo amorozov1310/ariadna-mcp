@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "_diff_view.html" import status_badge, diff_body %}
+{% block title %}{{ name }} — обновление{% endblock %}
+{% block active_nav %}diff{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+    <a href="/projects/{{ project.id }}/diff">Отличия от типовой</a> /
+    <a href="/projects/{{ project.id }}/diff/update?release={{ release|urlencode }}">Обновление на «{{ release }}»</a> /
+    <span class="mono">{{ name }}</span>
+</div>
+
+{% for title, result, lines, current in sides %}
+<div class="card">
+    <div class="card-header">
+        <h3 class="section-title">{{ title }}</h3>
+        {{ status_badge(result) }}
+    </div>
+    {{ diff_body(result, lines, result.base_project, current) }}
+</div>
+{% endfor %}
+{% endblock %}

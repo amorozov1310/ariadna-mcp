@@ -203,9 +203,9 @@ class ProjectManager:
         # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
         # собственной записи; None — кэш не сверен с диском.
         self._registry_sig: tuple[int, int] | None = None
-        # Последняя сводка отличий от базы по проекту: (ключ, BaseDiff) — см.
-        # get_base_diff. На крупной конфигурации сравнение — секунды.
-        self._base_diffs: dict[str, tuple] = {}
+        # Последняя сводка отличий по паре (проект, с чем, источник): (ключ,
+        # BaseDiff) — см. _diff_between. На крупной конфигурации — секунды.
+        self._base_diffs: dict[tuple, tuple] = {}
         self._base_diff_lock = threading.Lock()
 
         # Ensure directories exist
@@ -916,7 +916,8 @@ class ProjectManager:
             project.base_project = base_id
             self._save_registry()
         with self._base_diff_lock:
-            self._base_diffs.pop(project_id, None)
+            for key in [k for k in self._base_diffs if project_id in k[:2]]:
+                del self._base_diffs[key]
         return project
 
     def _base_of(self, project_id: str) -> str:
@@ -945,29 +946,56 @@ class ProjectManager:
         """Отличия проекта от базы (src/core/base_diff.py). Пересчитывается,
         только когда переиндексирован проект или база. ValueError — базы нет,
         она не готова или проект сейчас индексируется."""
+        return self._diff_between(project_id, self._base_of(project_id), source_id)
+
+    def _diff_between(self, project_id: str, base_id: str, source_id: str = 'main'):
+        """BaseDiff проекта против любого другого проекта (кэш — по паре)."""
         from .base_diff import compute_base_diff
-        base_id = self._base_of(project_id)
         if self.get_project(project_id).status == 'indexing':
             raise ValueError(f"Проект «{project_id}» сейчас индексируется — сравнение после окончания")
         db, base_db = self.get_db(project_id), self.get_db(base_id)
-        key = (base_id, source_id, self._diff_key(db), self._diff_key(base_db))
+        key = (self._diff_key(db), self._diff_key(base_db))
         with self._base_diff_lock:
-            cached = self._base_diffs.get(project_id)
+            cached = self._base_diffs.get((project_id, base_id, source_id))
             if cached and cached[0] == key:
                 return cached[1]
             diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, source_id)
-            self._base_diffs[project_id] = (key, diff)
+            self._base_diffs[(project_id, base_id, source_id)] = (key, diff)
             return diff
 
+    def get_update_conflicts(self, project_id: str, release_id: str, source_id: str = 'main'):
+        """Конфликты обновления (base_diff.compute_update_conflicts): доработки
+        проекта против его базы × изменения релиза release_id (новая типовая)
+        против той же базы. ValueError — базы или релиза нет, они не готовы."""
+        from .base_diff import compute_update_conflicts
+        base_id = self._base_of(project_id)
+        release_id = (release_id or '').strip()
+        if not release_id:
+            raise ValueError("Укажите проект с новым релизом типовой (release_project)")
+        if release_id in (project_id, base_id):
+            raise ValueError(f"Новый релиз должен быть отдельным проектом — не самим проектом "
+                             f"и не его базой «{base_id}»")
+        try:
+            release = self.get_project(release_id)
+        except KeyError:
+            raise ValueError(f"Проект «{release_id}» не найден")
+        if release.status != 'ready':
+            raise ValueError(f"Индекс релиза «{release_id}» не готов (статус {release.status}) — "
+                             f"проиндексируйте его")
+        return compute_update_conflicts(self.get_base_diff(project_id, source_id),
+                                        self._diff_between(release_id, base_id, source_id),
+                                        release_id)
+
     def get_procedure_diff(self, project_id: str, module_name: str, procedure_name: str,
-                           source_id: str = 'main') -> dict:
+                           source_id: str = 'main', base_id: str | None = None) -> dict:
         """Текст процедуры в базе и в проекте и их diff. status: changed |
         same | added | removed | missing (нет ни там, ни там) | unreadable
         (процедура в индексе есть, а файла выгрузки нет — base_unreadable /
-        current_unreadable говорят, с какой стороны)."""
+        current_unreadable говорят, с какой стороны). base_id — сравнить не с
+        базой проекта, а с другим проектом (релиз против базы проекта)."""
         from .base_diff import procedure_text_diff
         from .bsl_parser import read_bsl_text
-        base_id = self._base_of(project_id)
+        base_id = base_id or self._base_of(project_id)
 
         def side(pid: str) -> tuple[str, list[str] | None, bool]:
             engine = self.get_search(pid)

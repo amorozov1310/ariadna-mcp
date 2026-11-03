@@ -71,6 +71,8 @@ INSTRUCTIONS = """\
   .СрезПоследних, поля «РесурсОстаток»), у документа — регистры его движений;
 - «что доработано относительно типовой», «правлена ли эта процедура»: diff_from_base
   (сводка → object_name → module_name + procedure_name), если у проекта задана база.
+- обновление на новый релиз: update_conflicts(release_project=проект с новой типовой) —
+  где доработки пересекаются с изменениями релиза, и обе правки процедуры.
 
 Имена — как в конфигураторе, RU или EN (Справочник == Catalog), регистр не важен.
 Выдача постраничная: строка «use offset=N for more» означает, что есть продолжение.
@@ -416,6 +418,30 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     ) -> str:
         return run('diff_from_base', project_id=project_id, object_name=object_name,
                    module_name=module_name, procedure_name=procedure_name, section=section,
+                   source_id=source_id, limit=limit, offset=offset)
+
+    @mcp.tool(
+        description="Подготовка к обновлению на новый релиз типовой: где доработки проекта "
+                     "пересекаются с изменениями релиза — процедуры, которые правили и вы, и "
+                     "релиз; правленное вами, но удалённое в релизе; добавленное вами, что "
+                     "появилось в релизе с тем же именем; реквизиты объектов, которые меняли оба. "
+                     "release_project — проект с выгрузкой нового релиза; база проекта — старый "
+                     "релиз. module_name + procedure_name — обе правки процедуры (ваша и релиза) "
+                     "как diff от базы.",
+        annotations=_READ_ONLY,
+    )
+    def update_conflicts(
+        release_project: Annotated[str, Field(description="ID проекта с новым релизом типовой (list_projects)")],
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        object_name: Annotated[str | None, Field(description="Полное имя объекта — пересечения только по нему")] = None,
+        module_name: Annotated[str | None, Field(description="Модуль процедуры (вместе с procedure_name — обе правки)")] = None,
+        procedure_name: Annotated[str | None, Field(description="Процедура: ваша правка и правка релиза")] = None,
+        source_id: Annotated[str | None, Field(description="ID источника (по умолчанию main — основная конфигурация)")] = None,
+        limit: Annotated[int, Field(description=_LIMIT)] = 50,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+    ) -> str:
+        return run('update_conflicts', project_id=project_id, release_project=release_project,
+                   object_name=object_name, module_name=module_name, procedure_name=procedure_name,
                    source_id=source_id, limit=limit, offset=offset)
 
     @mcp.tool(
