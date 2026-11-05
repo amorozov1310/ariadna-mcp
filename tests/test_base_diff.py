@@ -145,6 +145,10 @@ def test_web_diff_pages(pm):
                           params={'module': 'ОбщийМодуль.ЦеныСервер.Модуль', 'name': 'РассчитатьЦену'})
         assert proc.status_code == 200 and 'diff-line-add' in proc.text
         assert 'База — проект с типовой' in client.get('/projects/typical/diff').text
+        # Без базы — не ошибка, а подсказка: база и релиз необязательны.
+        no_base = client.get('/projects/typical/diff/update').text
+        assert 'Для этого раздела нужны база' in no_base and 'notice-warning' not in no_base
+        assert 'необязательно' in client.get('/projects/typical/diff').text
         resp = client.post('/api/projects/typical/base', data={'base_project': 'custom'},
                            follow_redirects=False)
         assert resp.status_code == 303 and pm.get_project('typical').base_project == 'custom'

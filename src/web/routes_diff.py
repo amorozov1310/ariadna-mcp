@@ -100,13 +100,15 @@ async def update_page(request: Request, project_id: str, release: str = ''):
     from ..core.base_diff import CONFLICT_KINDS
     project = _project(project_id)
     pm = get_pm()
-    result, error, pending = None, '', False
+    result, error, hint, pending = None, '', '', False
     release = release or project.release_project
+    # Не ошибка: база и новый релиз необязательны — подсказка, что для раздела нужно.
     if not project.base_project:
-        error = "Сначала задайте базу — типовую того же релиза, что и этот проект («Выбрать базу и новый релиз» у схемы выше)."
+        hint = ("Для этого раздела нужны база — типовая того же релиза, что и этот проект, — и "
+                "новый релиз, на который обновляетесь («Выбрать базу и новый релиз» у схемы выше).")
     elif not release:
-        error = ("Задайте новый релиз — проект с выгрузкой типовой, на которую обновляетесь "
-                 "(«Изменить сравнение» у схемы выше).")
+        hint = ("Для этого раздела нужен новый релиз — проект с выгрузкой типовой, на которую "
+                "обновляетесь («Изменить сравнение» у схемы выше).")
     else:
         try:
             pending = not await run_in_threadpool(pm.warm_diffs, project_id, release)
@@ -124,6 +126,7 @@ async def update_page(request: Request, project_id: str, release: str = ''):
         "groups": groups,
         "kinds": CONFLICT_KINDS,
         "error": error,
+        "hint": hint,
         "scheme": _scheme(project, release),
         "candidates": _candidates(project_id),
     })
