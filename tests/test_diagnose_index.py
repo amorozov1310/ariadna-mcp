@@ -128,3 +128,29 @@ def test_diagnose_index_tool_includes_graph_section():
             assert 'Resolved edges:' in text
         finally:
             pm.close_all()
+
+
+def test_diagnose_index_counts_async_procedures():
+    """«Асинх Процедура» / «Async Function» — объявления: diagnose_index не
+    должен показывать такие процедуры «лишними в индексе»."""
+    import shutil
+    from src.core.search import diagnose_index
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(data_dir=tmpdir)
+        pm.create_project('p1', 'p1')
+        src_dir = Path(pm.projects_dir) / 'p1' / 'sources' / 'main' / 'xml'
+        shutil.copytree(FIXTURES / 'xml_ru', src_dir)
+        module = next((src_dir / 'CommonModules').glob('*/Ext/Module.bsl'))
+        module.write_text(module.read_text(encoding='utf-8-sig')
+                          + '\nАсинх Процедура ЖдатьОтвет() Экспорт\nКонецПроцедуры\n'
+                          + '\nAsync Function WaitAnswer() Export\nEndFunction\n',
+                          encoding='utf-8-sig')
+        pm.add_source('p1', 'main', 'Main')
+        pm.reindex('p1')
+        try:
+            result = diagnose_index(pm, 'p1')
+            assert result['missing_count'] == 0
+            assert result['extra_count'] == 0, [e['name'] for e in result['extra']]
+            assert result['total_in_files'] == result['total_indexed']
+        finally:
+            pm.close_all()

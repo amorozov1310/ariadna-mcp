@@ -1471,9 +1471,10 @@ def diagnose_index(project_manager, project_id: str) -> dict:
     db = pm.get_db(project_id)
     conn = db.read_conn()  # read-only (Этап 4/D7)
 
-    # Greedy regex: catches more than the parser (no $ anchor, allows ; and whitespace)
+    # Greedy regex: catches more than the parser (no $ anchor, allows ; and whitespace).
+    # «Асинх Процедура» / «Async Function» — тоже объявление.
     RE_GREEDY = re.compile(
-        r'^\s*(Процедура|Функция|Procedure|Function)\s+'
+        r'^\s*(?:(?:Асинх|Async)\s+)?(Процедура|Функция|Procedure|Function)\s+'
         r'([А-Яа-яA-Za-z0-9_]+)\s*\(',
         re.IGNORECASE | re.MULTILINE
     )
