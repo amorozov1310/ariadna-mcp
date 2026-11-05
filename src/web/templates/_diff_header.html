@@ -13,7 +13,7 @@
 </div>
 {% endmacro %}
 
-{% macro diff_header(scheme, active) %}
+{% macro diff_header(scheme, active, candidates, next_url) %}
 <h1 class="page-title">
     <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg>
     Отличия от типовой
@@ -27,6 +27,15 @@
         <span class="diff-scheme-arrow" aria-hidden="true">→</span>
         {{ chip('Новый релиз — на что обновляетесь', scheme.release, 'diff-chip-release') }}
     </div>
+    {# Выбор базы и нового релиза — здесь же, у схемы: раньше форма была
+       только внизу страницы, под результатами, и её не находили. #}
+    <details class="disclosure diff-edit" id="comparison" {% if not scheme.base %}open{% endif %}>
+        <summary>
+            <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
+            {{ 'Изменить сравнение' if scheme.base else 'Выбрать базу и новый релиз' }}
+        </summary>
+        <div class="disclosure-body">{{ comparison_fields(candidates, next_url) }}</div>
+    </details>
     {% if scheme.versions_differ %}
     <div class="notice notice-warning" style="margin-top:var(--space-3)">
         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
@@ -52,10 +61,10 @@
             <ol>
                 <li><b>Этот проект</b> — выгрузка вашей конфигурации из Конфигуратора.</li>
                 <li><b>База</b> — отдельный проект с выгрузкой типовой <b>того же релиза</b>, что и ваша
-                    конфигурация. Выберите её ниже — раздел «Что доработано» покажет новые объекты и
+                    конфигурация. Выберите её в «Изменить сравнение» у схемы — раздел «Что доработано» покажет новые объекты и
                     реквизиты, изменённые и добавленные процедуры и текст каждой правки.</li>
                 <li><b>Новый релиз</b> — когда вышло обновление, заведите проект с выгрузкой новой
-                    типовой и выберите его ниже. Раздел «Обновление на новый релиз» покажет, где ваши
+                    типовой и выберите его там же. Раздел «Обновление на новый релиз» покажет, где ваши
                     доработки пересекаются с изменениями релиза: эти места при обновлении сливаются
                     вручную.</li>
                 <li><b>После обновления</b> вашей конфигурации загрузите её новую выгрузку в этот
@@ -69,9 +78,8 @@
 </div>
 {% endmacro %}
 
-{% macro comparison_form(candidates, next_url) %}
-<div class="card" id="comparison">
-    <h3 class="section-title">Настройка сравнения</h3>
+{# Форма базы и нового релиза: у схемы в «Отличиях» и в настройках проекта. #}
+{% macro comparison_fields(candidates, next_url) %}
     <form action="/api/projects/{{ project.id }}/comparison" method="post" class="diff-base-form">
         <input type="hidden" name="next" value="{{ next_url }}">
         <label for="base-project">База — проект с типовой того же релиза, что и этот проект</label>
@@ -94,7 +102,6 @@
             <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
         </div>
     </form>
-</div>
 {% endmacro %}
 
 {# Сравнение ещё считается в фоне (ProjectManager.warm_diffs): карточка

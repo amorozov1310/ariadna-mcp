@@ -103,10 +103,10 @@ async def update_page(request: Request, project_id: str, release: str = ''):
     result, error, pending = None, '', False
     release = release or project.release_project
     if not project.base_project:
-        error = "Сначала задайте базу — типовую того же релиза, что и этот проект (форма ниже)."
+        error = "Сначала задайте базу — типовую того же релиза, что и этот проект («Выбрать базу и новый релиз» у схемы выше)."
     elif not release:
         error = ("Задайте новый релиз — проект с выгрузкой типовой, на которую обновляетесь "
-                 "(форма ниже).")
+                 "(«Изменить сравнение» у схемы выше).")
     else:
         try:
             pending = not await run_in_threadpool(pm.warm_diffs, project_id, release)

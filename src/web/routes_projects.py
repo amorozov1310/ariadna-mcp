@@ -118,7 +118,7 @@ def _kinds_breakdown(kinds: dict[str, int]) -> list[dict]:
 
 @router.get("/projects/{project_id}/settings", response_class=HTMLResponse)
 def project_settings(request: Request, project_id: str):
-    """Настройки проекта: имя и описание."""
+    """Настройки проекта: имя и описание, база и новый релиз для «Отличий»."""
     pm = get_pm()
     try:
         project = pm.get_project(project_id)
@@ -127,6 +127,7 @@ def project_settings(request: Request, project_id: str):
 
     return templates.TemplateResponse(name="project_settings.html", request=request, context={
         "project": project,
+        "candidates": [p for p in pm.list_projects() if p.id != project_id],
     })
 
 
