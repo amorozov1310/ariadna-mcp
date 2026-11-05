@@ -52,6 +52,8 @@ _PLATFORM_MANAGER_EXTRA = {s.lower() for s in (
     'СоздатьКлючЗаписи', 'CreateRecordKey', 'ПустойКлюч', 'EmptyKey',
     'СоздатьНаборЗаписей', 'CreateRecordSet', 'СоздатьМенеджерЗаписи', 'CreateRecordManager',
     'Количество', 'Count', 'ПолучитьИмяПредопределенного', 'GetPredefinedItemName',
+    'УстановитьИнициализациюПредопределенныхДанных', 'SetPredefinedDataInitialization',
+    'ПолучитьИнициализациюПредопределенныхДанных', 'GetPredefinedDataInitialization',
     # Итоги регистров накопления и бухгалтерии
     'УстановитьИспользованиеИтогов', 'SetTotalsUse', 'ПолучитьИспользованиеИтогов', 'GetTotalsUse',
     'УстановитьИспользованиеТекущихИтогов', 'SetPresentTotalsUse',

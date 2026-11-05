@@ -110,7 +110,9 @@ _RE_EXT_DIRECTIVE = re.compile(
 _RE_PROC_START = re.compile(
     r'^\s*(?:(Асинх|Async)\s+)?(Процедура|Функция|Procedure|Function)\s+'
     r'([А-Яа-яA-Za-z0-9_]+)\s*'
-    r'\(([^)]*)\)\s*'
+    # Параметры — до закрывающей скобки вне строк: в значении по умолчанию
+    # бывает строка со скобками (`Убрать = "()<>"`, кавычка внутри — "").
+    r'\(((?:"(?:[^"]|"")*"|[^)"])*)\)\s*'
     r'(Экспорт|Export)?\s*;?\s*(?://.*)?$',
     re.IGNORECASE
 )
@@ -368,6 +370,59 @@ _RE_DYNAMIC_MODULE_LOAD = re.compile(
     r'\.(?:ОбщийМодуль|CommonModule)\s*\(\s*"([^"]+)"',
     re.IGNORECASE
 )
+
+# Тот же приём без модуля-владельца: `Модуль = Вычислить("ИмяМодуля")` /
+# `Eval("Name")` и локальная обёртка `ОбщийМодуль("Имя")`. Строка — имя
+# общего модуля или менеджер (`Вычислить("Справочники.Имя")`); у Вычислить
+# псевдоним — только для имени известного модуля или менеджера: в строке
+# может быть любое выражение.
+_RE_EVAL_MODULE_LOAD = re.compile(
+    r'(?<![.\"\x27А-Яа-яA-Za-z0-9_])'
+    r'([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)'
+    r'\s*=\s*'
+    r'(?<![.А-Яа-яA-Za-z0-9_])(ОбщийМодуль|CommonModule|Вычислить|Eval)'
+    r'\s*\(\s*"\s*([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*(?:\.[А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)?)\s*"\s*\)',
+    re.IGNORECASE
+)
+
+# Переменная-менеджер: `Менеджер = Справочники.Номенклатура;` и
+# `Менеджер = ОбщегоНазначения.МенеджерОбъектаПоПолномуИмени("Справочник.Имя")`
+# (ObjectManagerByFullName("Catalog.Name")) — дальше `Менеджер.Метод()` —
+# вызов процедуры модуля менеджера этого объекта.
+_RE_MANAGER_REF_ASSIGN = re.compile(
+    r'(?<![.\"\x27А-Яа-яA-Za-z0-9_])'
+    r'([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)'
+    r'\s*=\s*'
+    r'([А-Яа-яA-Za-z]+)\.([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)\s*;',
+    re.IGNORECASE
+)
+_RE_MANAGER_BY_FULL_NAME = re.compile(
+    r'(?<![.\"\x27А-Яа-яA-Za-z0-9_])'
+    r'([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)'
+    r'\s*=\s*'
+    r'(?:[А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*\.)?'
+    r'(?:МенеджерОбъектаПоПолномуИмени|ObjectManagerByFullName)'
+    r'\s*\(\s*"\s*([А-Яа-яA-Za-z]+)\.([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)\s*"\s*\)',
+    re.IGNORECASE
+)
+
+# Вид объекта в единственном числе (полное имя «Справочник.Имя» /
+# «Catalog.Name») → русское имя вида, как в _METADATA_MANAGERS.
+_SINGULAR_KINDS = {v.lower(): v for v in _METADATA_MANAGERS.values()} | {
+    'catalog': 'Справочник', 'document': 'Документ',
+    'informationregister': 'РегистрСведений', 'accumulationregister': 'РегистрНакопления',
+    'accountingregister': 'РегистрБухгалтерии', 'report': 'Отчет',
+    'dataprocessor': 'Обработка', 'enum': 'Перечисление',
+    'calculationregister': 'РегистрРасчета',
+    'chartofcharacteristictypes': 'ПланВидовХарактеристик',
+    'chartofaccounts': 'ПланСчетов', 'exchangeplan': 'ПланОбмена',
+    'businessprocess': 'БизнесПроцесс', 'task': 'Задача',
+}
+
+# Значение псевдонима-менеджера в module_aliases: префикс отличает его от
+# имени общего модуля (в имени модуля символа \x00 не бывает).
+_MANAGER_ALIAS = '\x00manager:'
+
 
 # Общее правило «присвоено не-модуль» (Этап 7, остаток). В 1С переменная
 # хранит ссылку на общий модуль, только если ей присвоено голое имя модуля
@@ -1088,6 +1143,10 @@ class BSLParser:
                     proc_aliases[var_name] = load_m.group(2)
                     if var_name in module_level_var_names:
                         module_level_aliases[var_name] = load_m.group(2)
+                for var_name, target in self._extra_aliases(clean_comments_only):
+                    proc_aliases[var_name] = target
+                    if var_name in module_level_var_names:
+                        module_level_aliases[var_name] = target
                 for alias_m in _RE_BARE_ALIAS_ASSIGN.finditer(clean_for_ctor):
                     target = alias_m.group(2)
                     if target.lower() in self.known_modules:
@@ -1243,6 +1302,42 @@ class BSLParser:
             callee_kind='override',
         )
 
+    def _manager_alias(self, kind_word: str, obj_name: str, plural: bool) -> str | None:
+        """Значение псевдонима-менеджера или None: вид не менеджер, или объекта
+        такого вида нет в выгрузке (когда по виду есть данные)."""
+        singular = (_METADATA_MANAGERS if plural else _SINGULAR_KINDS).get(kind_word.lower())
+        if not singular:
+            return None
+        bucket = self.known_objects.get(singular)
+        if bucket and obj_name.lower() not in bucket:
+            return None
+        return f'{_MANAGER_ALIAS}{singular}.{obj_name}'
+
+    def _extra_aliases(self, text: str) -> list[tuple[str, str]]:
+        """Переменные-модули и переменные-менеджеры строки (без комментариев,
+        строки не вырезаны): Вычислить("Имя"), ОбщийМодуль("Имя") без
+        владельца, Справочники.Имя, МенеджерОбъектаПоПолномуИмени("Вид.Имя")."""
+        found = []
+        for m in _RE_EVAL_MODULE_LOAD.finditer(text):
+            var_name, loader, target = m.group(1).lower(), m.group(2).lower(), m.group(3)
+            if '.' in target:
+                kind_word, obj_name = target.split('.', 1)
+                alias = self._manager_alias(kind_word, obj_name, plural=True)
+                if alias:
+                    found.append((var_name, alias))
+            elif loader in ('общиймодуль', 'commonmodule') \
+                    or target.lower() in self.known_modules:
+                found.append((var_name, target))
+        for m in _RE_MANAGER_REF_ASSIGN.finditer(text):
+            alias = self._manager_alias(m.group(2), m.group(3), plural=True)
+            if alias:
+                found.append((m.group(1).lower(), alias))
+        for m in _RE_MANAGER_BY_FULL_NAME.finditer(text):
+            alias = self._manager_alias(m.group(2), m.group(3), plural=False)
+            if alias:
+                found.append((m.group(1).lower(), alias))
+        return found
+
     def _extract_calls(self, line: str, line_num: int,
                         current_proc: ProcedureInfo,
                         local_proc_names: set[str],
@@ -1316,6 +1411,21 @@ class BSLParser:
             # above) — takes priority over every other check below, since
             # it redirects to the real module rather than just suppressing.
             aliased = module_aliases.get(module_name.lower())
+            if aliased and aliased.startswith(_MANAGER_ALIAS):
+                # Переменная-менеджер: вызов процедуры модуля менеджера,
+                # как трёхчастный `Справочники.Имя.Метод(`.
+                if method_name.lower() in _PLATFORM_MANAGER_METHODS:
+                    continue
+                module_full = f'{aliased[len(_MANAGER_ALIAS):]}.МодульМенеджера'
+                calls.append(CallInfo(
+                    callee_name=f'{module_full}.{method_name}',
+                    callee_module=module_full,
+                    callee_proc=method_name,
+                    line=line_num,
+                    context=line.strip()[:120],
+                    callee_kind='manager',
+                ))
+                continue
             if aliased:
                 module_name = aliased
 

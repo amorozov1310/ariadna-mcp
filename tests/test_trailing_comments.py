@@ -59,3 +59,13 @@ def test_end_with_trailing_comment_closes_procedure():
 def test_call_from_procedure_after_commented_end():
     calls = {(c.callee_proc, c.callee_kind) for c in BSLParser().parse(CODE).calls}
     assert ('Наименование', 'local') in calls
+
+
+def test_parentheses_inside_default_string():
+    code = '''Функция БезСимволов(Строка, Убрать = " .,""'«»()<>:;") Экспорт
+	Возврат Строка;
+КонецФункции
+'''
+    procs = BSLParser().parse(code).procedures
+    assert [(p.name, p.is_export, p.end_line) for p in procs] == [('БезСимволов', True, 3)]
+    assert procs[0].params.endswith('"')

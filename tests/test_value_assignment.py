@@ -174,11 +174,10 @@ def test_real_modules_aliases_and_loaders_unchanged():
     calls = _calls(code)
     assert ('ОбщегоНазначения', 'СообщитьПользователю') in calls
     assert ('УправлениеПечатью', 'Напечатать') in calls
-    # Алиасы резолвятся в модуль, а не пропадают.
-    assert not any(m in ('МодульА', 'МодульБ', 'МодульВ') for m, _ in calls), calls
-    # Загрузчики, которые парсер не разворачивает, остаются вызовами.
-    assert ('МодульГ', 'Напечатать') in calls, calls
-    assert ('МодульД', 'Напечатать') in calls, calls
+    # Алиасы резолвятся в модуль, а не пропадают — в том числе загрузчики по
+    # строке без модуля-владельца: ОбщийМодуль("…") и Вычислить("…").
+    assert not any(m in ('МодульА', 'МодульБ', 'МодульВ', 'МодульГ', 'МодульД')
+                   for m, _ in calls), calls
 
 
 def test_alias_has_priority_over_value_assignment():
@@ -425,3 +424,41 @@ def test_multiline_call_does_not_mark_module_named_variable():
 КонецПроцедуры
 '''
     assert ('УправлениеПечатью', 'Напечатать') in _calls(code)
+
+
+def test_module_and_manager_variables_by_name():
+    """Модуль или менеджер, полученный по строке, — вызов в него, а не в
+    переменную: Вычислить("Модуль") (так зовут модуль из расширения,
+    которого может не быть), переменная-менеджер (Справочники.Имя,
+    МенеджерОбъектаПоПолномуИмени("Справочник.Имя"), Вычислить("Справочники.Имя"))."""
+    code = '''
+Функция Тест(Агент)
+	МодульДанных = Eval("AgentDataUtils");
+	Возврат МодульДанных.AgentGetNextTask(Агент);
+	МенеджерА = Справочники.Склады;
+	МенеджерА.ЗаполнитьКэш();
+	МенеджерА.Выбрать();
+	МенеджерБ = ОбщегоНазначения.МенеджерОбъектаПоПолномуИмени("Справочник.Склады");
+	МенеджерБ.Пересчитать(1);
+	МенеджерВ = Вычислить("Справочники.Склады");
+	МенеджерВ.Обновить();
+	МенеджерГ = Catalogs.Склады;
+	МенеджерГ.Refresh();
+	Чужой = Вычислить("Справочники.НетТакого");
+	Чужой.Метод();
+	Выражение = Вычислить("ВыражениеНеМодуль");
+	Выражение.Метод();
+КонецФункции
+'''
+    parser = BSLParser(known_modules={'agentdatautils', 'общегоназначения'},
+                       known_objects={'Справочник': {'склады'}})
+    calls = {(c.callee_kind, c.callee_module, c.callee_proc) for c in parser.parse(code).calls}
+    assert ('common_module', 'AgentDataUtils', 'AgentGetNextTask') in calls
+    manager = 'Справочник.Склады.МодульМенеджера'
+    for proc in ('ЗаполнитьКэш', 'Пересчитать', 'Обновить', 'Refresh'):
+        assert ('manager', manager, proc) in calls, proc
+    assert not any(p == 'Выбрать' for _, _, p in calls)            # платформенный метод
+    assert not any(m.startswith('Справочник.НетТакого') for _, m, _ in calls)
+    assert not any(m in ('МодульДанных', 'МенеджерА', 'МенеджерБ') for _, m, _ in calls)
+    # Вычислить с неизвестным именем — не псевдоним.
+    assert ('common_module', 'AgentDataUtils', 'Метод') not in calls
