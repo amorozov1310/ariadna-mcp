@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Отличия — {{ project.name }}{% endblock %}
 {% block active_nav %}diff{% endblock %}
-{% from "_diff_header.html" import diff_header, comparison_form, pending_card with context %}
+{% from "_diff_header.html" import diff_header, pending_card with context %}
 
 {% macro module_counts(m) -%}
 {%- if m.status == 'added' -%}новый модуль, процедур {{ m.procedures|num }}
@@ -22,11 +22,9 @@
 {%- endmacro %}
 
 {% block content %}
-{{ diff_header(scheme, 'diff') }}
+{{ diff_header(scheme, 'diff', candidates, '/projects/' ~ project.id ~ '/diff') }}
 
-{% if not project.base_project %}
-{{ comparison_form(candidates, '/projects/' ~ project.id ~ '/diff') }}
-{% else %}
+{% if project.base_project %}
 
 {% if error %}
 <div class="notice notice-warning" style="margin-bottom:var(--space-4)">
@@ -138,8 +136,6 @@
     {% endif %}
 </div>
 {% endif %}
-
-{{ comparison_form(candidates, '/projects/' ~ project.id ~ '/diff') }}
 
 <script>
 (function () {

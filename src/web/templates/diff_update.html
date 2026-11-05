@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Обновление — {{ project.name }}{% endblock %}
 {% block active_nav %}diff{% endblock %}
-{% from "_diff_header.html" import diff_header, comparison_form, pending_card with context %}
+{% from "_diff_header.html" import diff_header, pending_card with context %}
 
 {% block content %}
-{{ diff_header(scheme, 'update') }}
+{{ diff_header(scheme, 'update', candidates, '/projects/' ~ project.id ~ '/diff/update') }}
 
 {% if error %}
 <div class="notice notice-warning" style="margin-bottom:var(--space-4)">
@@ -64,5 +64,4 @@
 {% endfor %}
 {% endif %}
 
-{{ comparison_form(candidates, '/projects/' ~ project.id ~ '/diff/update') }}
 {% endblock %}
