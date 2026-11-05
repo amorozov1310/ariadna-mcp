@@ -387,3 +387,55 @@ def test_intercept_of_procedure_removed_in_release():
     assert kinds['ОбщийМодуль.X.Модуль.Новая'][0] == 'intercepted_changed'
     assert 'сигнатура' in kinds['ОбщийМодуль.X.Модуль.Новая'][1]
     assert 'ОбщийМодуль.Y.Модуль.Любая' not in kinds        # релиз модуль не трогал
+
+
+# ============================================
+# Отчёты файлом
+# ============================================
+
+def test_reports_export(release_pm):
+    import csv
+    import io
+    from src.core import diff_report
+
+    diff = release_pm.get_base_diff('custom')
+    md = diff_report.diff_report('custom', diff, 'md').decode('utf-8')
+    assert md.startswith('# Что доработано: «custom»') and 'База — «typical»' in md
+    assert '### ОбщийМодуль.ЦеныСервер' in md and 'РассчитатьЦену' in md
+    assert 'НашПроизводитель' in md
+    raw = diff_report.diff_report('custom', diff, 'csv')
+    assert raw.startswith(b'\xef\xbb\xbf')              # BOM — Excel узнаёт UTF-8
+    rows = list(csv.reader(io.StringIO(raw.decode('utf-8-sig')), delimiter=';'))
+    assert rows[0][:3] == ['Объект', 'Синоним', 'Статус объекта']
+    assert any(r[3] == 'процедура' and r[4].endswith('.РассчитатьЦену') and r[5] == 'изменена'
+               for r in rows[1:])
+    assert any(r[3] == 'реквизит' and r[4] == 'НашПроизводитель' and r[5] == 'добавлен' for r in rows)
+
+    result = release_pm.get_update_conflicts('custom', 'release')
+    md = diff_report.update_report('custom', result, 'md').decode('utf-8')
+    assert '- [ ] `ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену`' in md
+    assert f'Всего: {len(result.items)}.' in md
+    rows = list(csv.reader(io.StringIO(diff_report.update_report('custom', result, 'csv')
+                                       .decode('utf-8-sig')), delimiter=';'))
+    assert rows[0][-2:] == ['Решение', 'Ответственный'] and len(rows) == len(result.items) + 1
+    assert rows[1][1] == 'правили и вы, и релиз'
+
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    previous = app_module._pm
+    app_module.set_pm(release_pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        resp = client.get('/projects/custom/diff/update/export',
+                          params={'release': 'release', 'format': 'csv'})
+        assert resp.status_code == 200 and resp.headers['content-type'].startswith('text/csv')
+        assert 'attachment' in resp.headers['content-disposition']
+        assert 'obnovlenie_custom_' in resp.headers['content-disposition']
+        resp = client.get('/projects/custom/diff/export', params={'format': 'md'})
+        assert resp.status_code == 200 and 'Что доработано' in resp.text
+        assert client.get('/projects/custom/diff/export', params={'format': 'xlsx'}).status_code == 400
+        assert client.get('/projects/typical/diff/update/export').status_code == 400   # нет базы
+        page = client.get('/projects/custom/diff/update', params={'release': 'release'}).text
+        assert '/diff/update/export?release=release&format=csv' in page
+    finally:
+        app_module.set_pm(previous)

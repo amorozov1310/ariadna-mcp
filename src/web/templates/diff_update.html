@@ -27,7 +27,13 @@
 {% if result %}
 {% set t = result.release_totals %}
 <div class="card">
-    <h3 class="section-title">Обновление: доработки «{{ project.id }}» × изменения «{{ result.release_project }}»</h3>
+    <div class="diff-title-row">
+        <h3 class="section-title">Обновление: доработки «{{ project.id }}» × изменения «{{ result.release_project }}»</h3>
+        <span class="diff-export">Скачать:
+            <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/update/export?release={{ result.release_project|urlencode }}&format=csv" title="Таблица для Excel: пересечения с колонками «Решение» и «Ответственный»">Excel (CSV)</a>
+            <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/update/export?release={{ result.release_project|urlencode }}&format=md" title="Чек-лист пересечений в Markdown">Markdown</a>
+        </span>
+    </div>
     <p class="text-muted" style="font-size:var(--fs-sm)">
         Обе стороны сравниваются с базой «{{ result.base_project }}» ({{ result.base_version }}).
         Релиз {{ result.release_version }} изменил модулей {{ t.modules_changed|num }} (новых

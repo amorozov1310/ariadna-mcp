@@ -3,7 +3,9 @@
 удалённые объекты, diff текста процедуры."""
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from urllib.parse import quote
+
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from .app import get_pm, templates
@@ -130,6 +132,51 @@ async def update_page(request: Request, project_id: str, release: str = ''):
         "scheme": _scheme(project, release),
         "candidates": _candidates(project_id),
     })
+
+
+def _download(body: bytes, fmt: str, name: str) -> Response:
+    from ..core.diff_report import FORMATS
+    ascii_name = name.encode('ascii', 'replace').decode().replace('?', '_')
+    return Response(body, media_type=FORMATS[fmt], headers={
+        'Content-Disposition': f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}"})
+
+
+def _format(fmt: str) -> str:
+    from ..core.diff_report import FORMATS
+    if fmt not in FORMATS:
+        raise HTTPException(400, f"Формат «{fmt}» не поддерживается: {', '.join(FORMATS)}")
+    return fmt
+
+
+@router.get("/projects/{project_id}/diff/export")
+async def diff_export(project_id: str, format: str = 'md'):
+    """«Что доработано» файлом. Если сравнение ещё не посчитано — считает
+    (до полуминуты на больших конфигурациях), страница при этом не ждёт."""
+    from ..core import diff_report
+    fmt = _format(format)
+    _project(project_id)
+    try:
+        diff = await run_in_threadpool(get_pm().get_base_diff, project_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    body = await run_in_threadpool(diff_report.diff_report, project_id, diff, fmt)
+    return _download(body, fmt, diff_report.filename('dorabotki', project_id, fmt))
+
+
+@router.get("/projects/{project_id}/diff/update/export")
+async def update_export(project_id: str, release: str = '', format: str = 'md'):
+    """«Обновление на новый релиз» файлом: Markdown — чек-лист пересечений,
+    CSV — таблица для Excel с пустыми колонками «Решение» и «Ответственный»."""
+    from ..core import diff_report
+    fmt = _format(format)
+    project = _project(project_id)
+    release = release or project.release_project
+    try:
+        result = await run_in_threadpool(get_pm().get_update_conflicts, project_id, release)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    body = await run_in_threadpool(diff_report.update_report, project_id, result, fmt)
+    return _download(body, fmt, diff_report.filename('obnovlenie', project_id, fmt))
 
 
 @router.get("/projects/{project_id}/diff/conflict", response_class=HTMLResponse)

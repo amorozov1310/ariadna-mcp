@@ -39,7 +39,13 @@
 
 {% if diff %}
 <div class="card">
-    <h3 class="section-title">Что доработано: «{{ project.id }}» против базы «{{ diff.base_project }}»</h3>
+    <div class="diff-title-row">
+        <h3 class="section-title">Что доработано: «{{ project.id }}» против базы «{{ diff.base_project }}»</h3>
+        <span class="diff-export">Скачать:
+            <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/export?format=csv" title="Таблица для Excel: строка — одно изменение">Excel (CSV)</a>
+            <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/export?format=md" title="Отчёт по объектам в Markdown">Markdown</a>
+        </span>
+    </div>
     <div class="stats-grid">
         <div class="stat-card">
             <div class="stat-value">{{ totals.modules_changed|num }}</div>
