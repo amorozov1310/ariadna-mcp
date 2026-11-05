@@ -582,3 +582,22 @@ a:hover { text-decoration: underline; }
 .diff-line-hunk { color: var(--text3); }
 .diff-line-add-mark { color: var(--success); font-weight: 600; }
 .diff-line-del-mark { color: var(--danger); font-weight: 600; }
+.diff-scheme { display: flex; align-items: stretch; gap: var(--space-2); flex-wrap: wrap; }
+.diff-scheme-arrow { align-self: center; color: var(--text3); font-size: var(--fs-md); }
+.diff-chip { flex: 1 1 180px; min-width: 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--border);
+             border-radius: var(--radius-sm); background: var(--bg-inset); }
+.diff-chip-project { border-color: var(--accent); }
+.diff-chip-role { font-size: var(--fs-sm); color: var(--text2); }
+.diff-chip-name { font-family: var(--mono); font-weight: 500; overflow-wrap: anywhere; }
+.diff-chip-version { font-size: var(--fs-sm); color: var(--text2); }
+.diff-sections { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-4); }
+.diff-section { flex: 1 1 220px; display: flex; flex-direction: column; padding: var(--space-2) var(--space-3);
+                border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }
+.diff-section:hover { text-decoration: none; border-color: var(--accent); }
+.diff-section.active { border-color: var(--accent); background: var(--accent-soft); }
+.diff-section-title { font-weight: 500; }
+.diff-section.active .diff-section-title { color: var(--accent-strong); }
+.diff-section-hint { font-size: var(--fs-sm); color: var(--text2); }
+.diff-help { margin-top: var(--space-3); }
+.diff-help ol { margin: var(--space-2) 0 var(--space-2) var(--space-5); }
+.diff-help li { margin-bottom: var(--space-1); }

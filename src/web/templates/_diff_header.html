@@ -1,0 +1,98 @@
+{# Шапка раздела «Отличия»: схема сравнения с версиями, вкладки двух разделов,
+   инструкция. Контекст — routes_diff._scheme: scheme.base / project / release
+   (id, версия или None) и active ('diff' | 'update'). #}
+{% macro chip(role, item, cls) %}
+<div class="diff-chip {{ cls }}">
+    <div class="diff-chip-role">{{ role }}</div>
+    {% if item %}
+    <a class="diff-chip-name" href="/projects/{{ item.id }}">{{ item.id }}</a>
+    <div class="diff-chip-version">{{ item.version or 'индекс не построен' }}</div>
+    {% else %}
+    <div class="diff-chip-version">не задан</div>
+    {% endif %}
+</div>
+{% endmacro %}
+
+{% macro diff_header(scheme, active) %}
+<h1 class="page-title">
+    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg>
+    Отличия от типовой
+</h1>
+
+<div class="card">
+    <div class="diff-scheme">
+        {{ chip('База — типовая текущего релиза', scheme.base, 'diff-chip-base') }}
+        <span class="diff-scheme-arrow" aria-hidden="true">→</span>
+        {{ chip('Этот проект — ваша конфигурация', scheme.project, 'diff-chip-project') }}
+        <span class="diff-scheme-arrow" aria-hidden="true">→</span>
+        {{ chip('Новый релиз — на что обновляетесь', scheme.release, 'diff-chip-release') }}
+    </div>
+    {% if scheme.versions_differ %}
+    <div class="notice notice-warning" style="margin-top:var(--space-3)">
+        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+        <div>Версии проекта и базы различаются — в «Что доработано» попадут и изменения типовой
+            между этими релизами. Базой должна быть типовая того же релиза, что и проект.</div>
+    </div>
+    {% endif %}
+
+    <div class="diff-sections">
+        <a href="/projects/{{ project.id }}/diff" class="diff-section {% if active == 'diff' %}active{% endif %}">
+            <span class="diff-section-title">1. Что доработано</span>
+            <span class="diff-section-hint">этот проект против базы</span>
+        </a>
+        <a href="/projects/{{ project.id }}/diff/update" class="diff-section {% if active == 'update' %}active{% endif %}">
+            <span class="diff-section-title">2. Обновление на новый релиз</span>
+            <span class="diff-section-hint">ваши доработки × изменения релиза</span>
+        </a>
+    </div>
+
+    <details class="disclosure diff-help" {% if not scheme.base %}open{% endif %}>
+        <summary>Как пользоваться</summary>
+        <div class="disclosure-body">
+            <ol>
+                <li><b>Этот проект</b> — выгрузка вашей конфигурации из Конфигуратора.</li>
+                <li><b>База</b> — отдельный проект с выгрузкой типовой <b>того же релиза</b>, что и ваша
+                    конфигурация. Выберите её ниже — раздел «Что доработано» покажет новые объекты и
+                    реквизиты, изменённые и добавленные процедуры и текст каждой правки.</li>
+                <li><b>Новый релиз</b> — когда вышло обновление, заведите проект с выгрузкой новой
+                    типовой и выберите его ниже. Раздел «Обновление на новый релиз» покажет, где ваши
+                    доработки пересекаются с изменениями релиза: эти места при обновлении сливаются
+                    вручную.</li>
+                <li><b>После обновления</b> вашей конфигурации загрузите её новую выгрузку в этот
+                    проект и выберите базой проект нового релиза (поле «Новый релиз» очистится
+                    само); проект старой типовой больше не нужен.</li>
+            </ol>
+            <p class="text-muted">Агенту то же доступно инструментами <span class="mono">diff_from_base</span>
+                и <span class="mono">update_conflicts</span>; подробно — docs/diff.md в репозитории.</p>
+        </div>
+    </details>
+</div>
+{% endmacro %}
+
+{% macro comparison_form(candidates, next_url) %}
+<div class="card" id="comparison">
+    <h3 class="section-title">Настройка сравнения</h3>
+    <form action="/api/projects/{{ project.id }}/comparison" method="post" class="diff-base-form">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        <label for="base-project">База — проект с типовой того же релиза, что и этот проект</label>
+        <div class="diff-base-row">
+            <select id="base-project" name="base_project">
+                <option value="">— нет —</option>
+                {% for p in candidates %}
+                <option value="{{ p.id }}" {% if p.id == project.base_project %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <label for="release-project">Новый релиз — проект с типовой, на которую обновляетесь (необязательно)</label>
+        <div class="diff-base-row">
+            <select id="release-project" name="release_project">
+                <option value="">— нет —</option>
+                {% for p in candidates %}
+                <option value="{{ p.id }}" {% if p.id == project.release_project %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+        </div>
+    </form>
+</div>
+{% endmacro %}

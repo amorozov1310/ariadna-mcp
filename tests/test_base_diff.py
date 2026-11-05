@@ -229,3 +229,43 @@ def test_update_conflicts_tool_and_pages(release_pm):
         assert conflict.status_code == 200 and conflict.text.count('diff-line-add') >= 2
     finally:
         app_module.set_pm(previous)
+
+
+def test_saved_release_and_comparison_settings(release_pm):
+    pm = release_pm
+    with pytest.raises(ValueError, match='разные проекты'):
+        pm.set_comparison('custom', 'typical', 'typical')
+    with pytest.raises(ValueError, match='не задан новый релиз'):
+        pm.get_update_conflicts('custom')
+    pm.set_comparison('custom', 'typical', 'release')
+    assert pm.get_update_conflicts('custom').release_project == 'release'
+    text = execute_tool(pm, 'update_conflicts', {'project_id': 'custom'})
+    assert 'релиз «release»' in text
+    assert '+\tВозврат 110;' in execute_tool(pm, 'update_conflicts', {
+        'project_id': 'custom', 'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
+    # Проект обновлён на новый релиз: релиз становится базой, поле релиза сбрасывается.
+    pm.set_base_project('custom', 'release')
+    assert (pm.get_project('custom').base_project, pm.get_project('custom').release_project) == ('release', '')
+
+
+def test_web_scheme_and_comparison_form(release_pm):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    previous = app_module._pm
+    app_module.set_pm(release_pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        r = client.post('/api/projects/custom/comparison', data={
+            'base_project': 'typical', 'release_project': 'release', 'next': '/projects/custom/diff/update'},
+            follow_redirects=False)
+        assert r.status_code == 303 and r.headers['location'] == '/projects/custom/diff/update'
+        page = client.get('/projects/custom/diff').text
+        for text in ('База — типовая текущего релиза', 'ДемоКонфигурация 1.2.3.4', '1. Что доработано',
+                     '2. Обновление на новый релиз', 'Как пользоваться'):
+            assert text in page
+        update = client.get('/projects/custom/diff/update').text
+        assert 'ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену' in update
+        assert client.post('/api/projects/custom/comparison', data={
+            'base_project': 'typical', 'release_project': 'typical'}).status_code == 400
+    finally:
+        app_module.set_pm(previous)

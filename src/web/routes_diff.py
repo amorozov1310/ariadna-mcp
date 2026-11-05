@@ -20,6 +20,30 @@ def _project(project_id: str):
         raise HTTPException(404, f"Проект «{project_id}» не найден")
 
 
+def _scheme(project, release_id: str = '') -> dict:
+    """Схема сравнения для шапки (_diff_header.html): база, этот проект, новый
+    релиз — id и версия конфигурации из индекса; None — не задан или удалён."""
+    pm = get_pm()
+    known = {p.id for p in pm.list_projects()}
+
+    def item(project_id: str):
+        if not project_id or project_id not in known:
+            return None
+        return {'id': project_id, 'version': pm.config_version(project_id)}
+
+    base, current = item(project.base_project), item(project.id)
+    return {
+        'base': base, 'project': current,
+        'release': item(release_id or project.release_project),
+        'versions_differ': bool(base and base['version'] and current['version']
+                                and base['version'] != current['version']),
+    }
+
+
+def _candidates(project_id: str) -> list:
+    return [p for p in get_pm().list_projects() if p.id != project_id]
+
+
 @router.get("/projects/{project_id}/diff", response_class=HTMLResponse)
 async def diff_page(request: Request, project_id: str, section: str = 'changed'):
     project = _project(project_id)
@@ -40,7 +64,8 @@ async def diff_page(request: Request, project_id: str, section: str = 'changed')
         "section": section,
         "sections": _SECTIONS,
         "error": error,
-        "candidates": [p for p in pm.list_projects() if p.id != project_id],
+        "scheme": _scheme(project),
+        "candidates": _candidates(project_id),
     })
 
 
@@ -73,7 +98,12 @@ async def update_page(request: Request, project_id: str, release: str = ''):
     project = _project(project_id)
     pm = get_pm()
     result, error = None, ''
-    if release:
+    if not project.base_project:
+        error = "Сначала задайте базу — типовую того же релиза, что и этот проект (форма ниже)."
+    elif not (release or project.release_project):
+        error = ("Задайте новый релиз — проект с выгрузкой типовой, на которую обновляетесь "
+                 "(форма ниже).")
+    else:
         try:
             result = await run_in_threadpool(pm.get_update_conflicts, project_id, release)
         except ValueError as e:
@@ -86,10 +116,9 @@ async def update_page(request: Request, project_id: str, release: str = ''):
         "result": result,
         "groups": groups,
         "kinds": CONFLICT_KINDS,
-        "release": release,
         "error": error,
-        "candidates": [p for p in pm.list_projects()
-                       if p.id not in (project_id, project.base_project)],
+        "scheme": _scheme(project, release),
+        "candidates": _candidates(project_id),
     })
 
 
@@ -113,6 +142,18 @@ async def conflict_page(request: Request, project_id: str, release: str, module:
         "sides": [(f"Ваша правка: {base_id} → {project_id}", ours, _diff_lines(ours), project_id),
                   (f"Изменение релиза: {base_id} → {release}", theirs, _diff_lines(theirs), release)],
     })
+
+
+@router.post("/api/projects/{project_id}/comparison")
+async def set_comparison(project_id: str, base_project: str = Form(''), release_project: str = Form(''),
+                         next: str = Form('')):
+    _project(project_id)
+    try:
+        get_pm().set_comparison(project_id, base_project, release_project)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e).strip("'\""))
+    target = next if next.startswith(f"/projects/{project_id}/") else f"/projects/{project_id}/diff"
+    return RedirectResponse(target, status_code=303)
 
 
 @router.post("/api/projects/{project_id}/base")

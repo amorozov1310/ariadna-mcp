@@ -71,6 +71,12 @@ class BaseDiff:
     modules_total: int = 0
     objects: dict[str, ObjectChange] = field(default_factory=dict)
 
+    @property
+    def versions_differ(self) -> bool:
+        """Проект и база — разные релизы: отличия — не только доработки."""
+        return bool(self.base_version and self.current_version
+                    and self.base_version != self.current_version)
+
     def by_status(self, status: str) -> list[ObjectChange]:
         """Объекты с данным статусом; изменённые — по объёму доработки."""
         found = [o for o in self.objects.values() if o.status == status]

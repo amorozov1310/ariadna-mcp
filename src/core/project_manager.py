@@ -164,6 +164,9 @@ class ProjectInfo:
     # с ней сравнивает get_base_diff, из её индекса строится первый индекс
     # проекта (_seed_from_base). '' — базы нет.
     base_project: str = ''
+    # Новый релиз той же типовой — проект с его выгрузкой: с ним
+    # get_update_conflicts пересекает доработки проекта. '' — не задан.
+    release_project: str = ''
 
 
 class ProjectManager:
@@ -393,6 +396,7 @@ class ProjectManager:
             'sources': [asdict(s) for s in proj.sources],
             'index_stats': asdict(proj.index_stats),
             'base_project': proj.base_project,
+            'release_project': proj.release_project,
         }
 
     def _save_registry(self):
@@ -910,15 +914,29 @@ class ProjectManager:
     # ============================================
 
     def set_base_project(self, project_id: str, base_id: str) -> ProjectInfo:
-        """Задать базу проекта ('' — убрать). База — другой проект реестра."""
-        base_id = (base_id or '').strip()
+        """Задать базу проекта ('' — убрать). База — другой проект реестра.
+        Новый релиз, ставший базой (проект обновлён на него), сбрасывается."""
+        release_id = self.get_project(project_id).release_project
+        return self.set_comparison(project_id, base_id,
+                                   '' if release_id == (base_id or '').strip() else release_id)
+
+    def set_comparison(self, project_id: str, base_id: str, release_id: str = '') -> ProjectInfo:
+        """База (типовая того же релиза, что проект) и новый релиз (типовая, на
+        которую предстоит обновление) проекта; '' — не задан. Оба — другие
+        проекты реестра, новый релиз — не база."""
+        base_id, release_id = (base_id or '').strip(), (release_id or '').strip()
         with self._registry_lock():
             project = self.get_project(project_id)
-            if base_id:
-                if base_id == project_id:
-                    raise ValueError("Проект не может быть базой самому себе")
-                self.get_project(base_id)
+            for other, what in ((base_id, 'базой'), (release_id, 'новым релизом')):
+                if other == project_id:
+                    raise ValueError(f"Проект не может быть {what} самому себе")
+                if other:
+                    self.get_project(other)
+            if release_id and release_id == base_id:
+                raise ValueError("Новый релиз и база — разные проекты: база — типовая того же "
+                                 "релиза, что и проект, новый релиз — типовая, на которую обновляетесь")
             project.base_project = base_id
+            project.release_project = release_id
             self._save_registry()
         with self._base_diff_lock:
             for key in [k for k in self._base_diffs if project_id in k[:2]]:
@@ -940,6 +958,15 @@ class ProjectManager:
             raise ValueError(f"Индекс базы «{base_id}» не готов (статус {base.status}) — "
                              f"проиндексируйте её")
         return base_id
+
+    def config_version(self, project_id: str, source_id: str = 'main') -> str:
+        """«Имя версия» конфигурации источника из индекса; '' — нет индекса."""
+        try:
+            row = self.get_db(project_id).read_conn().execute(
+                "SELECT config_name, config_version FROM sources WHERE id = ?", (source_id,)).fetchone()
+        except (KeyError, IndexRemovedError):
+            return ''
+        return f"{row['config_name']} {row['config_version']}".strip() if row else ''
 
     @staticmethod
     def _diff_key(db: Database) -> tuple:
@@ -968,15 +995,17 @@ class ProjectManager:
             self._base_diffs[(project_id, base_id, source_id)] = (key, diff)
             return diff
 
-    def get_update_conflicts(self, project_id: str, release_id: str, source_id: str = 'main'):
+    def get_update_conflicts(self, project_id: str, release_id: str = '', source_id: str = 'main'):
         """Конфликты обновления (base_diff.compute_update_conflicts): доработки
         проекта против его базы × изменения релиза release_id (новая типовая)
-        против той же базы. ValueError — базы или релиза нет, они не готовы."""
+        против той же базы; release_id пуст — новый релиз из настроек проекта.
+        ValueError — базы или релиза нет, они не готовы."""
         from .base_diff import compute_update_conflicts
         base_id = self._base_of(project_id)
-        release_id = (release_id or '').strip()
+        release_id = (release_id or '').strip() or self.get_project(project_id).release_project
         if not release_id:
-            raise ValueError("Укажите проект с новым релизом типовой (release_project)")
+            raise ValueError(f"У проекта «{project_id}» не задан новый релиз — укажите его в Web UI "
+                             f"(«Отличия», настройка сравнения) или передайте release_project")
         if release_id in (project_id, base_id):
             raise ValueError(f"Новый релиз должен быть отдельным проектом — не самим проектом "
                              f"и не его базой «{base_id}»")

@@ -1,37 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Обновление — {{ project.name }}{% endblock %}
 {% block active_nav %}diff{% endblock %}
+{% from "_diff_header.html" import diff_header, comparison_form with context %}
 
 {% block content %}
-<div class="breadcrumbs">
-    <a href="/projects/{{ project.id }}/diff">Отличия от типовой</a> / <span>Подготовка к обновлению</span>
-</div>
-
-<h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#refresh"/></svg>
-    Подготовка к обновлению
-</h1>
-
-<div class="card">
-    <p class="text-muted">
-        Где доработки проекта пересекаются с изменениями нового релиза типовой — места ручного
-        слияния при обновлении. База проекта{% if project.base_project %} «{{ project.base_project }}»{% endif %} —
-        текущий релиз; новый релиз — отдельный проект с его выгрузкой. Агенту то же доступно
-        инструментом <span class="mono">update_conflicts</span>.
-    </p>
-    <form method="get" class="diff-base-form">
-        <label for="release-project">Новый релиз — проект с выгрузкой новой типовой</label>
-        <div class="diff-base-row">
-            <select id="release-project" name="release">
-                <option value="">— выберите —</option>
-                {% for p in candidates %}
-                <option value="{{ p.id }}" {% if p.id == release %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
-                {% endfor %}
-            </select>
-            <button type="submit" class="btn btn-primary btn-sm">Сравнить</button>
-        </div>
-    </form>
-</div>
+{{ diff_header(scheme, 'update') }}
 
 {% if error %}
 <div class="notice notice-warning" style="margin-bottom:var(--space-4)">
@@ -43,14 +16,14 @@
 {% if result %}
 {% set t = result.release_totals %}
 <div class="card">
-    <h3 class="section-title">
-        {{ result.base_project }} <span class="text-muted">{{ result.base_version }}</span>
-        → {{ result.release_project }} <span class="text-muted">{{ result.release_version }}</span>
-    </h3>
+    <h3 class="section-title">Обновление: доработки «{{ project.id }}» × изменения «{{ result.release_project }}»</h3>
     <p class="text-muted" style="font-size:var(--fs-sm)">
-        Релиз изменил модулей {{ t.modules_changed|num }} (новых {{ t.modules_added|num }}, удалено
-        {{ t.modules_removed|num }}); процедур изменено {{ t.procedures_changed|num }}, добавлено
-        {{ t.procedures_added|num }}, удалено {{ t.procedures_removed|num }}; новых объектов {{ t.objects_added|num }}.
+        Обе стороны сравниваются с базой «{{ result.base_project }}» ({{ result.base_version }}).
+        Релиз {{ result.release_version }} изменил модулей {{ t.modules_changed|num }} (новых
+        {{ t.modules_added|num }}, удалено {{ t.modules_removed|num }}); процедур изменено
+        {{ t.procedures_changed|num }}, добавлено {{ t.procedures_added|num }}, удалено
+        {{ t.procedures_removed|num }}; новых объектов {{ t.objects_added|num }}. Ниже — только места,
+        которые тронуты и вами, и релизом: остальное при обновлении сливается само.
     </p>
     <div class="stats-grid">
         {% for kind, title in kinds.items() %}
@@ -74,7 +47,7 @@
         <tr>
             <td>
                 {% if c.procedure %}
-                <a class="mono" href="/projects/{{ project.id }}/diff/conflict?release={{ release|urlencode }}&module={{ c.module|urlencode }}&name={{ c.procedure|urlencode }}">{{ c.target }}</a>
+                <a class="mono" href="/projects/{{ project.id }}/diff/conflict?release={{ result.release_project|urlencode }}&module={{ c.module|urlencode }}&name={{ c.procedure|urlencode }}">{{ c.target }}</a>
                 {% else %}
                 <span class="mono">{{ c.target }}</span>
                 {% endif %}
@@ -86,4 +59,6 @@
 </div>
 {% endfor %}
 {% endif %}
+
+{{ comparison_form(candidates, '/projects/' ~ project.id ~ '/diff/update') }}
 {% endblock %}
