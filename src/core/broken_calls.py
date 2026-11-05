@@ -11,7 +11,8 @@
   dynamic     — такой же вызов, но через переменную-модуль (`Модуль =
                 ОбщегоНазначения.ОбщийМодуль("Имя"); Модуль.Метод()`): так библиотеки
                 и типовые зовут методы, которых в этой версии библиотеки может
-                не быть, — платформа такие вызовы не проверяет, код обычно
+                не быть (так же — `Модуль = Вычислить("Имя")`), — платформа
+                такие вызовы не проверяет, код обычно
                 защищён проверкой ПодсистемаСуществует. Только счётчик.
   external    — модуля нет в выгрузке вообще: внешняя библиотека (тестовый
                 фреймворк, не выгруженная подсистема) или опечатка в имени
@@ -90,7 +91,25 @@ def _direct(context: str, module: str, proc: str) -> bool:
 
 # Глобальные объекты платформы, которые парсер может принять за общий модуль:
 # в сводку «модулей нет в выгрузке» не попадают.
-_PLATFORM_GLOBALS = {s.casefold() for s in ('ИсторияДанных', 'DataHistory')}
+_PLATFORM_GLOBALS = {s.casefold() for s in (
+    'ИсторияДанных', 'DataHistory', 'РегламентныеЗадания', 'ScheduledJobs',
+    'ФоновыеЗадания', 'BackgroundJobs', 'ВнешниеОбработки', 'ExternalDataProcessors',
+    'ВнешниеОтчеты', 'ExternalReports', 'РасширенияКонфигурации', 'ConfigurationExtensions',
+    'КлиентскоеПриложение', 'ClientApplication', 'СредстваБуфераОбмена', 'ClipboardTools',
+    'ПользователиИнформационнойБазы', 'InfoBaseUsers', 'ХранилищеОбщихНастроек',
+    'CommonSettingsStorage', 'ХранилищеСистемныхНастроек', 'SystemSettingsStorage',
+    'ХранилищеНастроекДанныхФорм', 'FormDataSettingsStorage', 'ХранилищеВариантовОтчетов',
+    'ReportsVariantsStorage', 'ХранилищеПользовательскихНастроекОтчетов',
+    'ReportsUserSettingsStorage', 'БиблиотекаКартинок', 'PictureLib', 'БиблиотекаСтилей',
+    'StyleLib', 'ОбщиеМакеты', 'CommonTemplates', 'Метаданные', 'Metadata',
+    'ПолнотекстовыйПоиск', 'FullTextSearch', 'ЖурналРегистрации', 'EventLog',
+    'СредстваКриптографии', 'CryptoToolsManager', 'НастройкиКлиентскогоПриложения',
+    'ClientApplicationSettings', 'СредстваГеопозиционирования', 'LocationTools',
+    'СредстваМультимедиа', 'MultimediaTools', 'ДоставляемыеУведомления',
+    'DeliverableNotifications', 'НастройкиЖурналаРегистрации', 'EventLogSettings')}
+
+
+_IDENT = re.compile(r'[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*')
 
 
 def _short(name_cf: str) -> str:
@@ -103,7 +122,7 @@ def _module_key(kind: str, module_cf: str) -> str:
 
 
 def find_broken_calls(conn, source_id: str = '', module_name: str = '',
-                      hints_limit: int = 3) -> dict:
+                      hints_limit: int = 3, read_module=None) -> dict:
     """{'missing': [...], 'not_export': [...], 'external': [...], 'dynamic': N}. source_id —
     только вызовы из этого источника; module_name — вызывающий или вызываемый
     модуль содержит эту строку (без учёта регистра)."""
@@ -147,7 +166,8 @@ def find_broken_calls(conn, source_id: str = '', module_name: str = '',
     calls = conn.execute(
         """SELECT c.callee_kind AS kind, c.callee_module AS module, c.callee_proc AS name,
                   c.line, c.context, p.name AS caller_proc, m.name AS caller_module,
-                  m.name_cf AS caller_cf, m.source_id AS src, cr.call_id AS resolved
+                  m.name_cf AS caller_cf, m.source_id AS src, m.id AS caller_mid,
+                  cr.call_id AS resolved
            FROM calls c
            JOIN procedures p ON p.id = c.caller_id
            JOIN modules m ON m.id = p.module_id
@@ -169,8 +189,9 @@ def find_broken_calls(conn, source_id: str = '', module_name: str = '',
                     and module_cf not in _PLATFORM_GLOBALS):
                 ext = external.setdefault(r['module'], {'module': r['module'], 'kind': r['kind'],
                                                         'calls': 0, 'methods': set(),
-                                                        'sample': None})
+                                                        'sample': None, 'mids': set()})
                 ext['calls'] += 1
+                ext['mids'].add(r['caller_mid'])
                 ext['methods'].add(r['name'] or '')
                 if ext['sample'] is None:
                     ext['sample'] = item(r)
@@ -197,6 +218,29 @@ def find_broken_calls(conn, source_id: str = '', module_name: str = '',
     order = lambda i: (i['caller_module'], i['source_id'], i['line'], i['name'])  # noqa: E731
     missing.sort(key=order)
     not_export.sort(key=order)
+    # `Модуль = Вычислить("ИмяМодуля")` — тоже переменная-модуль, а не модуль,
+    # которого нет в выгрузке. Индекс текста модулей отбирает вызывающие
+    # модули, где есть и имя, и Вычислить/Eval (позиций слов в нём нет), а
+    # само присваивание проверяется по тексту этих модулей (read_module).
+    for name in [n for n, e in external.items() if e['kind'] == 'common_module']:
+        e = external[name]
+        mids = sorted(m for m in e['mids'] if m is not None)
+        if read_module is None or not mids or not _IDENT.fullmatch(name):
+            continue
+        try:
+            hits = [r[0] for r in conn.execute(
+                f"SELECT rowid FROM module_text_fts WHERE module_text_fts MATCH ? "
+                f"AND rowid IN ({','.join('?' * len(mids))})",
+                [f'"{name}" AND (eval OR вычислить)', *mids])]
+        except Exception:               # индекс текста недоступен — оставить как есть
+            hits = []
+        assign = re.compile(r'(?<![\wА-Яа-яЁё.])' + re.escape(name)
+                            + r'\s*=\s*(?:Вычислить|Eval)\s*\(', re.IGNORECASE)
+        if any(assign.search(read_module(mid) or '') for mid in hits):
+            dynamic += e['calls']
+            del external[name]
+    for e in external.values():
+        e.pop('mids', None)
     ext_list = sorted(external.values(), key=lambda e: (-e['calls'], e['module']))
     for e in ext_list:
         e['methods'] = len(e['methods'])
