@@ -439,3 +439,76 @@ def test_reports_export(release_pm):
         assert '/diff/update/export?release=release&format=csv' in page
     finally:
         app_module.set_pm(previous)
+
+
+
+FORM = 'Catalogs/Склады/Forms/ФормаЭлемента/Ext'
+
+
+def _with_form_events(form_ext: Path, events: str) -> None:
+    form = form_ext / 'Form.xml'
+    text = form.read_text(encoding='utf-8-sig')
+    form.write_text(text.replace('<Attributes>', f'<Events>{events}</Events>\n\t<Attributes>', 1),
+                    encoding='utf-8-sig')
+
+
+def test_form_event_intercepts(release_pm):
+    """Перехват события заимствованной формы — callType в Form.xml расширения,
+    без аннотации в коде: релиз изменил обработчик основной формы."""
+    pm = release_pm
+    main = pm.projects_dir / 'custom' / 'sources' / 'main' / 'xml'
+    _with_form_events(main / FORM, '<Event name="OnCreateAtServer">ПриСозданииНаСервере</Event>'
+                                   '<Event name="AfterWrite">ПослеЗаписи</Event>')
+    ext = pm.projects_dir / 'custom' / 'sources' / 'ext' / 'xml'
+    shutil.copytree(main / FORM, ext / FORM)
+    _with_form_events(ext / FORM, '<Event name="OnCreateAtServer" callType="After">'
+                                  'Расш_ПриСозданииПосле</Event>')
+    (ext / FORM / 'Form' / 'Module.bsl').write_text(
+        '&НаСервере\nПроцедура Расш_ПриСозданииПосле(Отказ, СтандартнаяОбработка)\n'
+        'КонецПроцедуры\n', encoding='utf-8-sig')
+    pm.add_source('custom', 'ext', 'Расширение', source_type='extension')
+
+    release_form = pm.projects_dir / 'release' / 'sources' / 'main' / 'xml' / FORM / 'Form' / 'Module.bsl'
+    release_form.write_text(release_form.read_text(encoding='utf-8-sig').replace(
+        'Объект.ТипСклада = Перечисления.ТипыСкладов.Оптовый;',
+        'Объект.ТипСклада = Перечисления.ТипыСкладов.Розничный;'), encoding='utf-8-sig')
+    pm.reindex('release')
+    pm.reindex('custom')
+
+    module = 'Справочник.Склады.Форма.ФормаЭлемента'
+    found = [i for i in pm.intercepts('custom') if i.module == module]
+    assert [(i.procedure, i.ext_procedure, i.keyword, i.form_event) for i in found] == [
+        ('ПриСозданииНаСервере', 'Расш_ПриСозданииПосле', 'После', True)]
+    assert found[0].label == '&После("ПриСозданииНаСервере"), событие формы'
+    assert pm.intercepts('custom', module_name=module, procedure_name='ПослеЗаписи') == []
+
+    result = pm.get_update_conflicts('custom', 'release')
+    target = f'{module}.ПриСозданииНаСервере'
+    conflict = next(c for c in result.items if c.target == target)
+    assert conflict.kind == 'intercepted_changed' and 'событие формы' in conflict.note
+
+
+def test_main_source_with_any_id(release_pm):
+    """Основная конфигурация проекта не обязана называться «main»: у проекта
+    источник «conf», у базы и релиза — «main»; сравнение — по основным."""
+    pm = release_pm
+    pm.create_project('named', 'named')
+    shutil.copytree(pm.projects_dir / 'custom' / 'sources' / 'main' / 'xml',
+                    pm.projects_dir / 'named' / 'sources' / 'conf' / 'xml')
+    pm.add_source('named', 'conf', 'Конфигурация')
+    pm.set_base_project('named', 'typical')
+    pm.reindex('named')
+    assert pm.main_source('named') == 'conf' and pm.main_source('typical') == 'main'
+    assert pm.config_version('named') == pm.config_version('typical') != ''
+
+    ours = pm.get_base_diff('custom').totals()
+    assert pm.get_base_diff('named').totals() == ours and ours['procedures_changed'] > 0
+    found = {(c.kind, c.target) for c in pm.get_update_conflicts('named', 'release').items}
+    assert found == {(c.kind, c.target) for c in pm.get_update_conflicts('custom', 'release').items}
+    assert ('both_changed', 'ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену') in found
+    detail = pm.get_procedure_diff('named', 'ЦеныСервер', 'РассчитатьЦену')
+    assert detail['status'] == 'changed' and '+\tВозврат 120;' in detail['diff']
+    text = execute_tool(pm, 'update_conflicts', {'project_id': 'named', 'release_project': 'release',
+                                                 'module_name': 'ЦеныСервер',
+                                                 'procedure_name': 'РассчитатьЦену'})
+    assert '+\tВозврат 120; // наценка' in text and '+\tВозврат 110;' in text

@@ -209,7 +209,7 @@ def _intercept_code(pm, project_id: str, module: str, procedure: str) -> list[di
     from ..core.bsl_parser import read_bsl_text
     engine = pm.get_search(project_id)
     found = []
-    for it in pm.intercepts(project_id, 'main', module, procedure):
+    for it in pm.intercepts(project_id, None, module, procedure):
         outline = engine.get_module_outline(it.module, source_id=it.source_id)
         proc = next((p for p in (outline or {}).get('procedures', [])
                      if p['name'].casefold() == it.ext_procedure.casefold()), None)

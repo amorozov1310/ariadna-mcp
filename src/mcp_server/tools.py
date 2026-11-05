@@ -755,8 +755,8 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     if not module_name:
                         return "Error: для текста процедуры нужен и module_name (из search_procedures или сводки)"
                     return format_procedure_diff(pm.get_procedure_diff(
-                        project_id, module_name, proc_name, source_id=source_id or 'main'))
-                diff = pm.get_base_diff(project_id, source_id=source_id or 'main')
+                        project_id, module_name, proc_name, source_id=source_id or None))
+                diff = pm.get_base_diff(project_id, source_id=source_id or None)
             except ValueError as e:
                 return f"Error: {e}"
             if object_name or module_name:
@@ -787,7 +787,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             module_name = (args.get('module_name') or '').strip()
             proc_name = (args.get('procedure_name') or '').strip()
             object_name = (args.get('object_name') or '').strip()
-            src = source_id or 'main'
+            src = source_id or None           # None — основная конфигурация проекта
             try:
                 result = pm.get_update_conflicts(project_id, release_id, source_id=src)
                 if proc_name:

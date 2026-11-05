@@ -189,12 +189,15 @@ def _members(conn, source_id: str) -> tuple[dict, dict]:
 # ---------------------------------------------------------------- сравнение
 
 def compute_base_diff(current_conn, base_conn, base_project: str,
-                      source_id: str = 'main') -> BaseDiff:
+                      source_id: str = 'main', base_source_id: str | None = None) -> BaseDiff:
+    """source_id — источник проекта, base_source_id — источник базы (основная
+    конфигурация у проектов может называться по-разному); None — тот же id."""
+    bsrc = base_source_id or source_id
     diff = BaseDiff(base_project=base_project, source_id=source_id,
-                    base_version=_source_version(base_conn, source_id),
+                    base_version=_source_version(base_conn, bsrc),
                     current_version=_source_version(current_conn, source_id))
 
-    bo, co = _objects(base_conn, source_id), _objects(current_conn, source_id)
+    bo, co = _objects(base_conn, bsrc), _objects(current_conn, source_id)
 
     def entry(full_name: str) -> ObjectChange:
         if full_name not in diff.objects:
@@ -211,7 +214,7 @@ def compute_base_diff(current_conn, base_conn, base_project: str,
     for name in bo.keys() - co.keys():
         entry(name)
 
-    battrs, bforms = _members(base_conn, source_id)
+    battrs, bforms = _members(base_conn, bsrc)
     cattrs, cforms = _members(current_conn, source_id)
     for name in co.keys() & bo.keys():
         ba, ca = battrs.get(name, {}), cattrs.get(name, {})
@@ -231,7 +234,7 @@ def compute_base_diff(current_conn, base_conn, base_project: str,
         if synonym_changed:
             o.synonym_was = bo[name]['synonym'] or ''
 
-    bm, cm = _modules(base_conn, source_id), _modules(current_conn, source_id)
+    bm, cm = _modules(base_conn, bsrc), _modules(current_conn, source_id)
     diff.modules_total = len(bm)
     changed = sorted(n for n in cm.keys() & bm.keys() if cm[n]['file_hash'] != bm[n]['file_hash'])
     added, removed = sorted(cm.keys() - bm.keys()), sorted(bm.keys() - cm.keys())
@@ -310,8 +313,18 @@ class Intercept:
         return match.group(1) if match else ''
 
     @property
+    def form_event(self) -> bool:
+        """Перехват события заимствованной формы (callType в Form.xml), а не
+        аннотация в коде — src/core/form_events.py."""
+        from .form_events import FORM_EVENT_MARK
+        return self.directive.endswith(FORM_EVENT_MARK)
+
+    @property
     def label(self) -> str:
-        return f'&{self.keyword}("{self.procedure}")' if self.keyword else self.directive
+        if not self.keyword:
+            return self.directive
+        label = f'&{self.keyword}("{self.procedure}")'
+        return f'{label}, событие формы' if self.form_event else label
 
 
 # Перехват, который заменяет типовую процедуру целиком: её изменения в релизе

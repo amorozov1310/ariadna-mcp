@@ -966,8 +966,27 @@ class ProjectManager:
                              f"проиндексируйте её")
         return base_id
 
-    def config_version(self, project_id: str, source_id: str = 'main') -> str:
+    def main_source(self, project_id: str) -> str:
+        """id основной конфигурации проекта: источник вида main (первый), иначе
+        первый источник. Называться он может как угодно — не обязательно «main»."""
+        try:
+            sources = self.get_project(project_id).sources
+        except KeyError:
+            return 'main'
+        main = next((s for s in sources if (s.source_type or 'main') == 'main'), None)
+        return (main or (sources[0] if sources else None)).id if sources else 'main'
+
+    def _diff_sources(self, project_id: str, base_id: str, source_id: str | None) -> tuple[str, str]:
+        """(источник проекта, источник базы) для сравнения: по умолчанию — их
+        основные конфигурации; явный source_id, отличный от основной, — тот же
+        id с обеих сторон (расширение против расширения)."""
+        own = self.main_source(project_id)
+        src = source_id or own
+        return src, (self.main_source(base_id) if src == own else src)
+
+    def config_version(self, project_id: str, source_id: str | None = None) -> str:
         """«Имя версия» конфигурации источника из индекса; '' — нет индекса."""
+        source_id = source_id or self.main_source(project_id)
         try:
             row = self.get_db(project_id).read_conn().execute(
                 "SELECT config_name, config_version FROM sources WHERE id = ?", (source_id,)).fetchone()
@@ -981,20 +1000,21 @@ class ProjectManager:
             "SELECT updated_at, status FROM index_state WHERE id = 1").fetchone()
         return (db.db_path, row['updated_at'] if row else '', row['status'] if row else '')
 
-    def get_base_diff(self, project_id: str, source_id: str = 'main'):
+    def get_base_diff(self, project_id: str, source_id: str | None = None):
         """Отличия проекта от базы (src/core/base_diff.py). Пересчитывается,
         только когда переиндексирован проект или база. ValueError — базы нет,
         она не готова или проект сейчас индексируется."""
         return self._diff_between(project_id, self._base_of(project_id), source_id)
 
-    def _cached_diff(self, project_id: str, base_id: str, source_id: str = 'main'):
+    def _cached_diff(self, project_id: str, base_id: str, source_id: str | None = None):
         """Посчитанный и не устаревший BaseDiff пары; None — нет."""
         key = (self._diff_key(self.get_db(project_id)), self._diff_key(self.get_db(base_id)))
+        pair = (project_id, base_id, *self._diff_sources(project_id, base_id, source_id))
         with self._base_diff_lock:
-            cached = self._base_diffs.get((project_id, base_id, source_id))
+            cached = self._base_diffs.get(pair)
         return cached[1] if cached and cached[0] == key else None
 
-    def _diff_between(self, project_id: str, base_id: str, source_id: str = 'main'):
+    def _diff_between(self, project_id: str, base_id: str, source_id: str | None = None):
         """BaseDiff проекта против любого другого проекта (кэш — по паре).
 
         Первый раз после запуска на крупной конфигурации — десятки секунд:
@@ -1002,18 +1022,19 @@ class ProjectManager:
         from .base_diff import compute_base_diff
         if self.get_project(project_id).status == 'indexing':
             raise ValueError(f"Проект «{project_id}» сейчас индексируется — сравнение после окончания")
-        pair = (project_id, base_id, source_id)
-        diff = self._cached_diff(*pair)
+        src, base_src = self._diff_sources(project_id, base_id, source_id)
+        pair = (project_id, base_id, src, base_src)
+        diff = self._cached_diff(project_id, base_id, source_id)
         if diff is not None:
             return diff
         with self._base_diff_lock:
             lock = self._diff_pair_locks.setdefault(pair, threading.Lock())
         with lock:
-            diff = self._cached_diff(*pair)
+            diff = self._cached_diff(project_id, base_id, source_id)
             if diff is None:
                 db, base_db = self.get_db(project_id), self.get_db(base_id)
                 key = (self._diff_key(db), self._diff_key(base_db))
-                diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, source_id)
+                diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, src, base_src)
                 with self._base_diff_lock:
                     self._base_diffs[pair] = (key, diff)
         return diff
@@ -1070,7 +1091,7 @@ class ProjectManager:
             except (ValueError, KeyError):
                 pass
 
-    def get_update_conflicts(self, project_id: str, release_id: str = '', source_id: str = 'main'):
+    def get_update_conflicts(self, project_id: str, release_id: str = '', source_id: str | None = None):
         """Конфликты обновления (base_diff.compute_update_conflicts): доработки
         проекта против его базы × изменения релиза release_id (новая типовая)
         против той же базы; release_id пуст — новый релиз из настроек проекта.
@@ -1091,16 +1112,23 @@ class ProjectManager:
         if release.status != 'ready':
             raise ValueError(f"Индекс релиза «{release_id}» не готов (статус {release.status}) — "
                              f"проиндексируйте его")
+        # Основная конфигурация у релиза — своя (её id может отличаться);
+        # явный источник-расширение — тот же id и в релизе.
+        own = self.main_source(project_id)
+        release_src = None if (source_id or own) == own else source_id
         return compute_update_conflicts(self.get_base_diff(project_id, source_id),
-                                        self._diff_between(release_id, base_id, source_id),
-                                        release_id, self.intercepts(project_id, source_id))
+                                        self._diff_between(release_id, base_id, release_src),
+                                        release_id, self.intercepts(project_id, source_id or own))
 
-    def intercepts(self, project_id: str, source_id: str = 'main', module_name: str = '',
+    def intercepts(self, project_id: str, source_id: str | None = None, module_name: str = '',
                    procedure_name: str = '') -> list:
         """Перехваты процедур источника source_id в остальных источниках проекта
-        (расширениях): рёбра override графа вызовов. module_name/procedure_name
-        сужают до одной процедуры (имена — как в индексе, регистр не важен)."""
+        (расширениях): рёбра override графа вызовов (&Вместо/&После/… в коде) и
+        перехваты событий заимствованных форм (callType в Form.xml расширения,
+        src/core/form_events.py). module_name/procedure_name сужают до одной
+        процедуры (имена — как в индексе, регистр не важен)."""
         from .base_diff import Intercept
+        source_id = source_id or self.main_source(project_id)
         # Только ребро самой директивы (строка объявления): ПродолжитьВызов()
         # внутри перехвата — тоже override, но это вызов, а не перехват.
         conds = ["c.callee_kind = 'override'", "c.line = p.start_line", "m.source_id != ?"]
@@ -1117,11 +1145,54 @@ class ProjectManager:
                 JOIN modules m ON m.id = p.module_id
                 WHERE {' AND '.join(conds)}
                 ORDER BY c.callee_module, c.callee_proc, m.source_id""", params).fetchall()
-        return [Intercept(r['callee_module'], r['callee_proc'], r['source_id'], r['ext_proc'],
-                          (r['context'] or '').strip()) for r in rows]
+        found = [Intercept(r['callee_module'], r['callee_proc'], r['source_id'], r['ext_proc'],
+                           (r['context'] or '').strip()) for r in rows]
+        found += self._form_event_intercepts(project_id, source_id, module_name, procedure_name)
+        found.sort(key=lambda it: (it.module, it.procedure, it.source_id))
+        return found
+
+    def _form_event_intercepts(self, project_id: str, source_id: str, module_name: str = '',
+                               procedure_name: str = '') -> list:
+        """Перехваты событий заимствованных форм: модуль формы расширения с тем
+        же именем, что в source_id, и callType у события в его Form.xml."""
+        from .base_diff import Intercept
+        from .form_events import FORM_EVENT_MARK, intercepted_events
+        from .indexer import form_xml_for_module
+        from .xml_metadata import is_russian_dump
+        project = self.get_project(project_id)
+        roots = {s.id: self.source_path(project_id, s.xml_path)
+                 for s in project.sources if s.xml_path}
+        if source_id not in roots:
+            return []
+        # Первый параметр — источник основной формы (JOIN), второй — «не он».
+        conds, params = ["e.source_id != ?", "e.module_type = 'МодульФормы'"], [source_id, source_id]
+        if module_name:
+            conds.append("casefold(e.name) = ?")
+            params.append(module_name.casefold())
+        rows = self.get_db(project_id).read_conn().execute(
+            f"""SELECT e.name, e.source_id, e.file_path AS ext_path, m.file_path AS main_path
+                FROM modules e JOIN modules m ON m.name = e.name AND m.source_id = ?
+                WHERE {' AND '.join(conds)}""", params).fetchall()
+        result, russian = [], {}
+        for r in rows:
+            if r['source_id'] not in roots or not r['ext_path'] or not r['main_path']:
+                continue
+            ext_xml = form_xml_for_module(roots[r['source_id']] / r['ext_path'], 'МодульФормы')
+            main_xml = form_xml_for_module(roots[source_id] / r['main_path'], 'МодульФормы')
+            if not ext_xml or not main_xml:
+                continue
+            if r['source_id'] not in russian:
+                russian[r['source_id']] = is_russian_dump(roots[r['source_id']])
+            for target, handler, keyword in intercepted_events(ext_xml, main_xml,
+                                                               russian[r['source_id']]):
+                if procedure_name and target.casefold() != procedure_name.strip().casefold():
+                    continue
+                result.append(Intercept(r['name'], target, r['source_id'], handler,
+                                        f'&{keyword}:{target} {FORM_EVENT_MARK}'))
+        return result
 
     def get_procedure_diff(self, project_id: str, module_name: str, procedure_name: str,
-                           source_id: str = 'main', base_id: str | None = None) -> dict:
+                           source_id: str | None = None, base_id: str | None = None) -> dict:
         """Текст процедуры в базе и в проекте и их diff. status: changed |
         same | added | removed | missing (нет ни там, ни там) | unreadable
         (процедура в индексе есть, а файла выгрузки нет — base_unreadable /
@@ -1130,10 +1201,13 @@ class ProjectManager:
         from .base_diff import procedure_text_diff
         from .bsl_parser import read_bsl_text
         base_id = base_id or self._base_of(project_id)
+        own = self.main_source(project_id)
+        explicit = source_id if source_id and source_id != own else None
 
         def side(pid: str) -> tuple[str, list[str] | None, bool]:
             engine = self.get_search(pid)
-            outline = engine.get_module_outline(module_name, source_id=source_id)
+            outline = engine.get_module_outline(module_name,
+                                                source_id=explicit or self.main_source(pid))
             if not outline:
                 return '', None, False
             mod = outline['module']
