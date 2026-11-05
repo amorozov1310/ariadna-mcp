@@ -72,6 +72,59 @@ def _paginate(fetch, limit: int, offset: int):
     return rows[:limit], has_more
 
 
+def format_broken_call(i: dict) -> str:
+    where = f"{i['caller_module']}.{i['caller_proc']}:{i['line']} @{i['source_id']}"
+    target = f"{i['module']}.{i['name']}"
+    if 'defined_in' in i:
+        homes = ', '.join(f"{d['module']} @{d['source_id']}" for d in i['defined_in'])
+        hint = f" — с таким именем есть в: {homes}" if homes else ''
+        return f"  {where}\n    → {target}: метода в модуле нет{hint}"
+    return f"  {where}\n    → {target}: метод без «Экспорт», а вызов из другого модуля"
+
+
+def format_broken_calls(project_id: str, result: dict, offset: int, limit: int) -> str:
+    """Выдача find_broken_calls: сначала ошибки (постранично), затем — на первой
+    странице — модули, которых нет в выгрузке."""
+    missing, not_export = result['missing'], result['not_export']
+    items = [('missing', i) for i in missing] + [('not_export', i) for i in not_export]
+    shown = items[offset:offset + limit]
+    lines = []
+    if offset == 0:
+        ext_calls = sum(e['calls'] for e in result['external'])
+        lines += [
+            f"Проверка вызовов «{project_id}»: метода в модуле нет — {len(missing)}, "
+            f"неэкспортный метод из другого модуля — {len(not_export)}.",
+            f"Модулей нет в выгрузке: {len(result['external'])} ({ext_calls} вызовов) — "
+            f"внешние библиотеки или опечатки, список ниже. Через переменную-модуль "
+            f"(ОбщийМодуль(\"…\")) к таким методам — {result['dynamic']}: платформа их не "
+            f"проверяет, в список не входят.",
+        ]
+        if not items:
+            lines.append("\nВызовов несуществующих и неэкспортных методов не найдено.")
+    section = None
+    for kind, i in shown:
+        if kind != section:
+            section = kind
+            title = ('Метода в модуле нет' if kind == 'missing'
+                     else 'Неэкспортный метод из другого модуля')
+            count = len(missing) if kind == 'missing' else len(not_export)
+            lines.append(f"\n{title} ({count}):")
+        lines.append(format_broken_call(i))
+    if shown:
+        lines.append(_page_trailer(len(shown), offset, limit, offset + limit < len(items)))
+    if offset == 0 and result['external']:
+        lines.append("\nМодулей нет в выгрузке (первые 10):")
+        for e in result['external'][:10]:
+            s = e['sample']
+            lines.append(f"  {e['module']} — вызовов {e['calls']}, методов {e['methods']} "
+                         f"(например {s['caller_module']}.{s['caller_proc']}:{s['line']} "
+                         f"@{s['source_id']})")
+    if offset == 0 and items:
+        lines.append("\nКод вызывающей процедуры: get_procedure_code(module_name=..., "
+                     "procedure_name=..., source_id=...)")
+    return '\n'.join(lines).lstrip('\n')
+
+
 def _page_trailer(page_len: int, offset: int, limit: int, has_more: bool) -> str:
     if has_more:
         return f"(use offset={offset + limit} for more)"
@@ -203,7 +256,8 @@ def format_procedure_context(ctx: dict) -> str:
 # листать через offset.
 MAX_LIMIT = 500
 _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
-                'search_procedures', 'search_code', 'diff_from_base', 'update_conflicts')
+                'search_procedures', 'search_code', 'diff_from_base', 'update_conflicts',
+                'find_broken_calls')
 
 # Сколько процедур «Missing from index» показывает diagnose_index: на большой
 # конфигурации их тысячи, а для диагностики хватает первых.
@@ -831,6 +885,11 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
         case 'semantic_search_code':
             data = semantic_search_payload(pm, args)
             return data if isinstance(data, str) else semantic_search.format_text(data)
+
+        case 'find_broken_calls':
+            result = pm.broken_calls(project_id, source_id or '',
+                                     (args.get('module_name') or '').strip())
+            return format_broken_calls(project_id, result, offset, max(1, int(limit_arg or 50)))
 
         case 'diagnose_index':
             from ..core.search import diagnose_index

@@ -71,6 +71,8 @@ INSTRUCTIONS = """\
   .СрезПоследних, поля «РесурсОстаток»), у документа — регистры его движений;
 - «что доработано относительно типовой», «правлена ли эта процедура»: diff_from_base
   (сводка → object_name → module_name + procedure_name), если у проекта задана база.
+- «что сломано», «проверь код перед выкладкой»: find_broken_calls — вызовы методов, которых
+  нет в модуле или которые не экспортные (упадут «Метод объекта не обнаружен»).
 - обновление на новый релиз: update_conflicts(release_project=проект с новой типовой) —
   где доработки пересекаются с изменениями релиза, и обе правки процедуры.
 
@@ -532,6 +534,25 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     ) -> str:
         return run('get_module_outline', project_id=project_id,
                     module_name=module_name, source_id=source_id)
+
+    @mcp.tool(
+        description="Проверка кода без запуска: вызовы `Модуль.Метод()` и `Справочники.Х.Метод()`, "
+                     "которые упадут с «Метод объекта не обнаружен» — метода в модуле нет (с "
+                     "подсказкой, где процедура с таким именем есть) или он без «Экспорт», а "
+                     "вызывается из другого модуля. Отдельно — модули, которых нет в выгрузке "
+                     "(внешние библиотеки, опечатки). Вызовы через ОбщийМодуль(\"…\") не "
+                     "проверяются — как и платформой.",
+        annotations=_READ_ONLY,
+    )
+    def find_broken_calls(
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        source_id: Annotated[str | None, Field(description="Только вызовы из этого источника (пусто — все)")] = None,
+        module_name: Annotated[str | None, Field(description="Только вызовы из модуля или в модуль, чьё имя содержит эту строку")] = None,
+        limit: Annotated[int, Field(description="Макс. результатов на страницу (не больше 500; дальше — через offset)")] = 50,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+    ) -> str:
+        return run('find_broken_calls', project_id=project_id, source_id=source_id,
+                   module_name=module_name, limit=limit, offset=offset)
 
     @mcp.tool(
         description="Диагностика индекса: процедуры в файлах против проиндексированных (пропущенные "

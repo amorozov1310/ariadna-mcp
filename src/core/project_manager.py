@@ -214,6 +214,8 @@ class ProjectManager:
         # результат); фоновый прогрев — warm_diffs.
         self._diff_pair_locks: dict[tuple, threading.Lock] = {}
         self._warming: dict[str, threading.Thread] = {}
+        # project_id -> (ключ состояния индекса, результат find_broken_calls)
+        self._broken_calls: dict[str, tuple] = {}
         # Фоновые переиндексации (reindex_async) — close_all их дожидается.
         self._reindexing: set[threading.Thread] = set()
         self._warm_failed: dict[str, tuple] = {}
@@ -1190,6 +1192,35 @@ class ProjectManager:
                 result.append(Intercept(r['name'], target, r['source_id'], handler,
                                         f'&{keyword}:{target} {FORM_EVENT_MARK}'))
         return result
+
+    def broken_calls(self, project_id: str, source_id: str = '', module_name: str = '') -> dict:
+        """Вызовы несуществующих и неэкспортных методов (src/core/broken_calls.py).
+        Полный результат кэшируется до переиндексации: страница и постраничная
+        выдача MCP не пересчитывают его на каждый запрос."""
+        from .broken_calls import find_broken_calls
+        db = self.get_db(project_id)
+        key = self._diff_key(db)
+        with self._base_diff_lock:
+            cached = self._broken_calls.get(project_id)
+        if not cached or cached[0] != key:
+            cached = (key, find_broken_calls(db.read_conn()))
+            with self._base_diff_lock:
+                self._broken_calls[project_id] = cached
+        result = cached[1]
+        if not source_id and not module_name:
+            return result
+        mf = module_name.strip().casefold()
+
+        def keep(i: dict) -> bool:
+            return ((not source_id or i['source_id'] == source_id)
+                    and (not mf or mf in i['caller_module'].casefold() or mf in i['module'].casefold()))
+        return {
+            'missing': [i for i in result['missing'] if keep(i)],
+            'not_export': [i for i in result['not_export'] if keep(i)],
+            'external': [e for e in result['external']
+                         if keep(e['sample']) or (mf and mf in e['module'].casefold())],
+            'dynamic': result['dynamic'],
+        }
 
     def get_procedure_diff(self, project_id: str, module_name: str, procedure_name: str,
                            source_id: str | None = None, base_id: str | None = None) -> dict:
