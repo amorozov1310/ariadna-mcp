@@ -1290,8 +1290,16 @@ class ProjectManager:
             # scans + dict joins, no per-call queries) and a partial reindex
             # of one source can change how other sources' calls resolve
             # (e.g. an extension now overriding a main-config procedure).
-            db.update_state(progress_phase='resolving')
-            indexer.resolve_calls()
+            # Пересчёт пропускается, если с прошлого его входы не менялись
+            # (graph_state): обновление без изменений в выгрузке.
+            resolver = Indexer.resolver_fingerprint()
+            if db.graph_is_current(resolver):
+                logger.info('Проект %s: модули не изменились — граф вызовов не пересчитывается',
+                            project_id)
+            else:
+                db.update_state(progress_phase='resolving')
+                indexer.resolve_calls()
+                db.set_graph_resolved(resolver)
 
             # Поисковые карточки процедур — только для изменившихся модулей
             # (src/core/cards.py). Вспомогательный индекс: его сбой пишется в
@@ -1610,7 +1618,8 @@ class ProjectManager:
         if xml_path and has_configuration(xml_path):
             meta_stats = indexer.index_xml_metadata(str(xml_path), source_id=source.id,
                                                     source_label=source.label,
-                                                    source_type=source.source_type)
+                                                    source_type=source.source_type,
+                                                    force=force_reparse)
             for k in ('objects', 'attributes', 'forms', 'modules', 'duration_sec'):
                 stats[k] = meta_stats.get(k, 0)
         elif xml_path and xml_path.exists():
@@ -1621,6 +1630,20 @@ class ProjectManager:
 
         # 2. Index BSL code (from XML dump)
         if xml_path and xml_path.exists():
+            # Граф вызовов устарел, если модули переразобраны, добавлены или
+            # удалены (src/core/db.py: graph_state). Здесь, а не в index_bsl:
+            # его исходник входит в отпечаток парсера. Флаг — до записи: если
+            # индексация оборвётся, граф пересчитает следующий reindex; ничего
+            # не изменилось — прежнее состояние возвращается.
+            db = indexer.db
+
+            def module_count():
+                return db.conn.execute(
+                    "SELECT COUNT(*) FROM modules WHERE source_id=?", (source.id,)).fetchone()[0]
+            modules_before = module_count()
+            was_dirty = db.graph_dirty()
+            db.mark_graph_dirty()
+            db.conn.commit()
             bsl_stats = indexer.index_bsl(str(xml_path), source_id=source.id,
                                            known_modules=known_modules,
                                            known_objects=known_objects,
@@ -1630,6 +1653,8 @@ class ProjectManager:
                                            force_reparse=force_reparse,
                                            progress_cb=progress_cb,
                                            module_files=module_files)
+            if not was_dirty and not bsl_stats.get('files') and module_count() == modules_before:
+                db.set_graph_dirty(False)
             stats['modules'] += bsl_stats.get('modules', 0)
             stats['procedures'] = bsl_stats.get('procedures', 0)
             stats['calls'] = bsl_stats.get('calls', 0)
@@ -1669,6 +1694,7 @@ class ProjectManager:
         conn.execute("DELETE FROM modules WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        db.mark_graph_dirty()
 
         # Rebuild FTS
         conn.execute("INSERT INTO metadata_fts(metadata_fts) VALUES('rebuild')")

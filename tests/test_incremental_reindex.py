@@ -402,3 +402,97 @@ def _check_stat_skip(db, xml, monkeypatch):
     assert hashed == [str(touched)] and third['files'] == 0
     hashed.clear()
     assert indexer.index_bsl(str(xml), source_id='main')['files'] == 0 and hashed == []
+
+
+def test_unchanged_metadata_objects_are_not_rewritten():
+    """Объект, чей отпечаток не изменился, не перезаписывается (id его
+    реквизитов сохраняются); изменённый — перезаписывается; force — все."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        xml_dir = Path(tmpdir) / 'xml'
+        shutil.copytree(FIXTURES / 'xml_ru', xml_dir)
+        db = Database(os.path.join(tmpdir, 'index.db'))
+        db.connect()
+        db.init_schema()
+        indexer = Indexer(db)
+        conn = db.conn
+
+        first = indexer.index_xml_metadata(str(xml_dir))
+        assert first['unchanged'] == 0 and first['objects'] > 0
+        assert _count(conn, 'object_stat') == first['objects']
+        attrs_before = {tuple(r) for r in conn.execute("SELECT id, object_id, name FROM attributes")}
+
+        second = indexer.index_xml_metadata(str(xml_dir))
+        assert second['unchanged'] == second['objects'] == first['objects']
+        assert second['attributes'] == first['attributes'] and second['forms'] == first['forms']
+        assert {tuple(r) for r in conn.execute("SELECT id, object_id, name FROM attributes")} == attrs_before
+
+        catalog = xml_dir / 'Catalogs' / 'Номенклатура.xml'
+        text = catalog.read_text(encoding='utf-8-sig')
+        start = text.index('<Attribute', text.index('<Name>Производитель</Name>') - 400)
+        end = text.index('</Attribute>', start) + len('</Attribute>')
+        clone = text[start:end].replace('<Name>Производитель</Name>', '<Name>НовыйРеквизит</Name>')
+        catalog.write_text(text[:end] + clone + text[end:], encoding='utf-8-sig')
+
+        third = indexer.index_xml_metadata(str(xml_dir))
+        assert third['unchanged'] == first['objects'] - 1
+        assert third['attributes'] == first['attributes'] + 1
+        names = {r[0] for r in conn.execute(
+            """SELECT a.name FROM attributes a JOIN metadata_objects o ON o.id = a.object_id
+               WHERE o.full_name = 'Справочник.Номенклатура'""")}
+        assert 'НовыйРеквизит' in names and 'Производитель' in names
+        assert _count(conn, 'attributes') == len(attrs_before) + 1
+
+        forced = indexer.index_xml_metadata(str(xml_dir), force=True)
+        assert forced['unchanged'] == 0 and forced['attributes'] == third['attributes']
+        assert _count(conn, 'attributes') == len(attrs_before) + 1
+        db.close()
+
+
+def test_call_graph_is_not_resolved_again_when_nothing_changed(monkeypatch):
+    """Обновление без изменений не пересчитывает граф вызовов; правка
+    модуля, правка кода resolve_calls и прерванная индексация — пересчитывают."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(tmpdir)
+        _make_project_with_bsl(pm, 'proj', FIXTURES / 'xml_ru')
+        calls = []
+        original = Indexer.resolve_calls
+
+        def spy(self):
+            calls.append(1)
+            return original(self)
+
+        monkeypatch.setattr(Indexer, 'resolve_calls', spy)
+        pm.reindex('proj')
+        assert len(calls) == 1
+        conn = pm.get_db('proj').conn
+        resolved = _count(conn, 'calls_resolved')
+        assert resolved > 0
+
+        pm.reindex('proj')
+        assert len(calls) == 1, 'ничего не изменилось — граф не пересчитывается'
+        assert _count(conn, 'calls_resolved') == resolved
+
+        module = next((Path(pm.projects_dir) / 'proj' / 'sources' / 'main' / 'xml'
+                       / 'CommonModules').glob('*/Ext/Module.bsl'))
+        module.write_text(module.read_text(encoding='utf-8-sig')
+                          + '\nПроцедура НоваяДляГрафа() Экспорт\nКонецПроцедуры\n',
+                          encoding='utf-8-sig')
+        pm.reindex('proj')
+        assert len(calls) == 2, 'модуль переразобран — граф пересчитан'
+
+        module.unlink()
+        pm.reindex('proj')
+        assert len(calls) == 3, 'модуль удалён — граф пересчитан'
+        pm.reindex('proj')
+        assert len(calls) == 3
+
+        # Прерванная индексация: правка записана, граф не пересчитан.
+        pm.get_db('proj').mark_graph_dirty()
+        conn.commit()
+        pm.reindex('proj')
+        assert len(calls) == 4
+
+        monkeypatch.setattr(Indexer, 'resolver_fingerprint', staticmethod(lambda: 'другой'))
+        pm.reindex('proj')
+        assert len(calls) == 5, 'сменился код resolve_calls — граф пересчитан'
+        pm.close_all()
