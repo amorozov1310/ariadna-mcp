@@ -13,6 +13,13 @@
 </div>
 {% endif %}
 
+{% if hint %}
+<div class="notice notice-info" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
+    <div>{{ hint }}</div>
+</div>
+{% endif %}
+
 {% if pending %}
 {{ pending_card() }}
 {% endif %}
