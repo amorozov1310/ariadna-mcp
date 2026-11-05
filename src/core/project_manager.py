@@ -214,6 +214,8 @@ class ProjectManager:
         # результат); фоновый прогрев — warm_diffs.
         self._diff_pair_locks: dict[tuple, threading.Lock] = {}
         self._warming: dict[str, threading.Thread] = {}
+        # Фоновые переиндексации (reindex_async) — close_all их дожидается.
+        self._reindexing: set[threading.Thread] = set()
         self._warm_failed: dict[str, tuple] = {}
 
         # Ensure directories exist
@@ -1440,8 +1442,13 @@ class ProjectManager:
                                  project_id, source_id or 'все')
             finally:
                 lock.release()
+                with self._base_diff_lock:
+                    self._reindexing.discard(threading.current_thread())
 
-        threading.Thread(target=_run, daemon=True, name=f'reindex-{project_id}').start()
+        thread = threading.Thread(target=_run, daemon=True, name=f'reindex-{project_id}')
+        with self._base_diff_lock:
+            self._reindexing.add(thread)
+        thread.start()
         return {'status': 'started', 'project_id': project_id}
 
     def reset_stale_indexing(self) -> list[str]:
@@ -1686,8 +1693,15 @@ class ProjectManager:
 
     def close_all(self):
         """Close all open database connections."""
-        # Фоновые сравнения (warm_diffs) читают индексы — дождаться их, иначе
-        # закрытие оборвёт чтение, а на Windows файлы останутся занятыми.
+        # Фоновые переиндексации и сравнения (warm_diffs) работают с индексами —
+        # дождаться их. Переиндексация пишет status='ready' чуть раньше, чем
+        # отпускает соединение: закрыть его под ней — на Windows access
+        # violation, а файлы останутся занятыми. Сначала переиндексации: в
+        # конце они сами запускают прогрев сравнений.
+        with self._base_diff_lock:
+            reindexing = list(self._reindexing)
+        for thread in reindexing:
+            thread.join(timeout=120)
         with self._base_diff_lock:
             warming = list(self._warming.values())
         for thread in warming:
