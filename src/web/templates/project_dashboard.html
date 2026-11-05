@@ -174,7 +174,7 @@
                         Изменить
                     </summary>
                     <form action="/api/projects/{{ project.id }}/sources/{{ src.id }}/update"
-                          method="post" enctype="multipart/form-data" class="disclosure-body">
+                          method="post" enctype="multipart/form-data" class="disclosure-body js-upload">
                         <div class="form-row">
                             <div class="form-group">
                                 <label>Название</label>
@@ -217,7 +217,7 @@
             Добавить источник
         </summary>
         <form action="/api/projects/{{ project.id }}/sources" method="post"
-              enctype="multipart/form-data" class="disclosure-body">
+              enctype="multipart/form-data" class="disclosure-body js-upload">
             <div class="form-row">
                 <div class="form-group">
                     <label>ID источника</label>
@@ -289,6 +289,8 @@ const PHASE_NAMES = {
     bsl: 'разбор кода BSL',
     bsl_full: 'полный перепарс BSL: изменилась версия парсера',
     resolving: 'разрешение графа вызовов',
+    cards: 'карточки процедур для поиска',
+    base: 'копия индекса базы',
 };
 
 // Первая замеренная точка прогресса — по ней считается скорость и оценка
@@ -424,6 +426,59 @@ async function pollReindexStatus(progress, text, btn) {
 {% if project.status == 'indexing' %}
 window.addEventListener('DOMContentLoaded', attachToRunningReindex);
 {% endif %}
+
+// Добавление и замена выгрузки: архив в сотни мегабайт грузится и
+// распаковывается минутами — вместо крутящегося значка браузера показываем,
+// что происходит: загрузка с процентами, затем распаковка на сервере.
+document.querySelectorAll('form.js-upload').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        const button = form.querySelector('button[type="submit"]');
+        let line = form.querySelector('.progress-line');
+        if (!line) {
+            line = document.createElement('div');
+            line.className = 'progress-line loading';
+            line.style.marginTop = 'var(--space-2)';
+            line.innerHTML = '<div class="spinner"></div><span></span>';
+            form.appendChild(line);
+        }
+        const text = line.querySelector('span');
+        const file = form.querySelector('input[type="file"]');
+        const hasFile = file && file.files.length > 0;
+        line.className = 'progress-line loading';
+        text.textContent = hasFile ? 'Загрузка архива…' : 'Сохранение…';
+        button.disabled = true;
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', form.action);
+        xhr.setRequestHeader('Accept', 'application/json');   // ошибка — JSON с detail
+        xhr.upload.onprogress = function (e) {
+            if (!hasFile || !e.lengthComputable) return;
+            const pct = Math.round(e.loaded / e.total * 100);
+            text.textContent = pct < 100
+                ? `Загрузка архива — ${pct}% (${(e.loaded / 1048576).toFixed(0)} из ${(e.total / 1048576).toFixed(0)} МБ)`
+                : 'Архив загружен, распаковка на сервере… (на крупной выгрузке — минуты, не закрывайте страницу)';
+        };
+        xhr.onload = function () {
+            if (xhr.status < 400) {
+                text.textContent = 'Готово. Обновляю страницу…';
+                location.href = xhr.responseURL || location.href;
+                return;
+            }
+            let detail = xhr.statusText;
+            try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
+            line.className = 'progress-line error';
+            text.textContent = 'Ошибка: ' + detail;
+            button.disabled = false;
+        };
+        xhr.onerror = function () {
+            line.className = 'progress-line error';
+            text.textContent = 'Ошибка сети — запрос не дошёл до сервера';
+            button.disabled = false;
+        };
+        xhr.send(new FormData(form));
+    });
+});
 
 </script>
 {% endblock %}

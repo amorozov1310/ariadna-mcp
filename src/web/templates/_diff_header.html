@@ -96,3 +96,31 @@
     </form>
 </div>
 {% endmacro %}
+
+{# Сравнение ещё считается в фоне (ProjectManager.warm_diffs): карточка
+   ожидания, страница сама обновится, когда расчёт закончится. #}
+{% macro pending_card() %}
+<div class="card diff-pending" id="diff-pending">
+    <div class="diff-pending-row">
+        <span class="spinner" aria-hidden="true"></span>
+        <div>
+            <div class="diff-pending-title">Идёт сравнение…</div>
+            <div class="text-muted" style="font-size:var(--fs-sm)">
+                Индексы крупных конфигураций читаются с диска: первый раз после запуска — до
+                полуминуты, дальше — мгновенно. Страница обновится сама.
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+(function () {
+    function poll() {
+        fetch('/api/projects/{{ project.id }}/diff/warming', {cache: 'no-store'})
+            .then(function (r) { return r.json(); })
+            .then(function (d) { if (d.warming) setTimeout(poll, 1500); else location.reload(); })
+            .catch(function () { setTimeout(poll, 3000); });
+    }
+    setTimeout(poll, 1500);
+})();
+</script>
+{% endmacro %}

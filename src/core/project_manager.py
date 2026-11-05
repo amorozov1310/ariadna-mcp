@@ -210,6 +210,11 @@ class ProjectManager:
         # BaseDiff) — см. _diff_between. На крупной конфигурации — секунды.
         self._base_diffs: dict[tuple, tuple] = {}
         self._base_diff_lock = threading.Lock()
+        # Сравнение одной пары считается одним потоком (остальные ждут его
+        # результат); фоновый прогрев — warm_diffs.
+        self._diff_pair_locks: dict[tuple, threading.Lock] = {}
+        self._warming: dict[str, threading.Thread] = {}
+        self._warm_failed: dict[str, tuple] = {}
 
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -980,20 +985,88 @@ class ProjectManager:
         она не готова или проект сейчас индексируется."""
         return self._diff_between(project_id, self._base_of(project_id), source_id)
 
+    def _cached_diff(self, project_id: str, base_id: str, source_id: str = 'main'):
+        """Посчитанный и не устаревший BaseDiff пары; None — нет."""
+        key = (self._diff_key(self.get_db(project_id)), self._diff_key(self.get_db(base_id)))
+        with self._base_diff_lock:
+            cached = self._base_diffs.get((project_id, base_id, source_id))
+        return cached[1] if cached and cached[0] == key else None
+
     def _diff_between(self, project_id: str, base_id: str, source_id: str = 'main'):
-        """BaseDiff проекта против любого другого проекта (кэш — по паре)."""
+        """BaseDiff проекта против любого другого проекта (кэш — по паре).
+
+        Первый раз после запуска на крупной конфигурации — десятки секунд:
+        индексы (гигабайты) читаются с диска; дальше — секунды или кэш."""
         from .base_diff import compute_base_diff
         if self.get_project(project_id).status == 'indexing':
             raise ValueError(f"Проект «{project_id}» сейчас индексируется — сравнение после окончания")
-        db, base_db = self.get_db(project_id), self.get_db(base_id)
-        key = (self._diff_key(db), self._diff_key(base_db))
-        with self._base_diff_lock:
-            cached = self._base_diffs.get((project_id, base_id, source_id))
-            if cached and cached[0] == key:
-                return cached[1]
-            diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, source_id)
-            self._base_diffs[(project_id, base_id, source_id)] = (key, diff)
+        pair = (project_id, base_id, source_id)
+        diff = self._cached_diff(*pair)
+        if diff is not None:
             return diff
+        with self._base_diff_lock:
+            lock = self._diff_pair_locks.setdefault(pair, threading.Lock())
+        with lock:
+            diff = self._cached_diff(*pair)
+            if diff is None:
+                db, base_db = self.get_db(project_id), self.get_db(base_id)
+                key = (self._diff_key(db), self._diff_key(base_db))
+                diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, source_id)
+                with self._base_diff_lock:
+                    self._base_diffs[pair] = (key, diff)
+        return diff
+
+    def warm_diffs(self, project_id: str, release_id: str = '') -> bool:
+        """Готовы ли сравнения раздела «Отличия» проекта (с базой и, если задан,
+        релиза с базой). Нет — считает их в фоне и возвращает False: Web UI
+        показывает «идёт сравнение» и ждёт (diff_warming). ValueError — базы
+        или релиза нет, они не готовы."""
+        base_id = self._base_of(project_id)
+        release_id = (release_id or '').strip()
+        pairs = [(project_id, base_id)] + ([(release_id, base_id)] if release_id else [])
+        missing = tuple(p for p in pairs if self._cached_diff(*p) is None)
+        if not missing:
+            return True
+        with self._base_diff_lock:
+            if self._warm_failed.get(project_id) == missing:
+                # Фоновый расчёт этих пар упал — пусть вызывающий посчитает
+                # сам и покажет ошибку, а не ждёт бесконечно.
+                del self._warm_failed[project_id]
+                return True
+            running = self._warming.get(project_id)
+            if running is not None and running.is_alive():
+                return False
+
+            def run():
+                try:
+                    for pair in missing:
+                        self._diff_between(*pair)
+                except Exception:
+                    logger.exception("Проект %s: сравнение для «Отличий» не посчитано", project_id)
+                    with self._base_diff_lock:
+                        self._warm_failed[project_id] = missing
+
+            thread = threading.Thread(target=run, daemon=True, name=f'diff-{project_id}')
+            self._warming[project_id] = thread
+            thread.start()
+        return False
+
+    def diff_warming(self, project_id: str) -> bool:
+        """Идёт ли фоновый расчёт сравнений проекта (warm_diffs)."""
+        with self._base_diff_lock:
+            thread = self._warming.get(project_id)
+        return thread is not None and thread.is_alive()
+
+    def _warm_related(self, project_id: str) -> None:
+        """После переиндексации — заранее пересчитать сравнения, где проект —
+        сам проект, его база или новый релиз: «Отличия» откроются без ожидания."""
+        for p in self.list_projects():
+            if not p.base_project or project_id not in (p.id, p.base_project, p.release_project):
+                continue
+            try:
+                self.warm_diffs(p.id, p.release_project)
+            except (ValueError, KeyError):
+                pass
 
     def get_update_conflicts(self, project_id: str, release_id: str = '', source_id: str = 'main'):
         """Конфликты обновления (base_diff.compute_update_conflicts): доработки
@@ -1218,6 +1291,7 @@ class ProjectManager:
             db.update_state(status='ready', progress_phase='', progress_current=0,
                              progress_total=0, index_duration_sec=total_stats.duration_sec)
             self._save_project_to_disk(project_id, project)
+            self._warm_related(project_id)
 
             return total_stats
 
@@ -1587,6 +1661,12 @@ class ProjectManager:
 
     def close_all(self):
         """Close all open database connections."""
+        # Фоновые сравнения (warm_diffs) читают индексы — дождаться их, иначе
+        # закрытие оборвёт чтение, а на Windows файлы останутся занятыми.
+        with self._base_diff_lock:
+            warming = list(self._warming.values())
+        for thread in warming:
+            thread.join(timeout=60)
         with self._db_lock:
             pool = list(self._db_pool.values())
             self._db_pool.clear()

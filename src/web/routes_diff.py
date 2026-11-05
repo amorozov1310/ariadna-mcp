@@ -49,15 +49,18 @@ async def diff_page(request: Request, project_id: str, section: str = 'changed')
     project = _project(project_id)
     pm = get_pm()
     section = section if section in _SECTIONS else 'changed'
-    diff, error = None, ''
+    diff, error, pending = None, '', False
     if project.base_project:
         try:
-            diff = await run_in_threadpool(pm.get_base_diff, project_id)
+            pending = not await run_in_threadpool(pm.warm_diffs, project_id)
+            if not pending:
+                diff = await run_in_threadpool(pm.get_base_diff, project_id)
         except ValueError as e:
             error = str(e)
     return templates.TemplateResponse(name="diff.html", request=request, context={
         "project": project,
         "diff": diff,
+        "pending": pending,
         "totals": diff.totals() if diff else {},
         "items": diff.by_status(section) if diff else [],
         "counts": {s: len(diff.by_status(s)) for s in _SECTIONS} if diff else {},
@@ -97,15 +100,18 @@ async def update_page(request: Request, project_id: str, release: str = ''):
     from ..core.base_diff import CONFLICT_KINDS
     project = _project(project_id)
     pm = get_pm()
-    result, error = None, ''
+    result, error, pending = None, '', False
+    release = release or project.release_project
     if not project.base_project:
         error = "Сначала задайте базу — типовую того же релиза, что и этот проект (форма ниже)."
-    elif not (release or project.release_project):
+    elif not release:
         error = ("Задайте новый релиз — проект с выгрузкой типовой, на которую обновляетесь "
                  "(форма ниже).")
     else:
         try:
-            result = await run_in_threadpool(pm.get_update_conflicts, project_id, release)
+            pending = not await run_in_threadpool(pm.warm_diffs, project_id, release)
+            if not pending:
+                result = await run_in_threadpool(pm.get_update_conflicts, project_id, release)
         except ValueError as e:
             error = str(e)
     groups: dict[str, list] = {}
@@ -114,6 +120,7 @@ async def update_page(request: Request, project_id: str, release: str = ''):
     return templates.TemplateResponse(name="diff_update.html", request=request, context={
         "project": project,
         "result": result,
+        "pending": pending,
         "groups": groups,
         "kinds": CONFLICT_KINDS,
         "error": error,
@@ -129,7 +136,8 @@ async def conflict_page(request: Request, project_id: str, release: str, module:
     pm = get_pm()
 
     def both():
-        base_id = pm.get_update_conflicts(project_id, release).base_project
+        # Только тексты процедуры: сравнение целиком (секунды) здесь не нужно.
+        base_id = project.base_project
         return (base_id, pm.get_procedure_diff(project_id, module, name),
                 pm.get_procedure_diff(release, module, name, base_id=base_id))
 
@@ -142,6 +150,13 @@ async def conflict_page(request: Request, project_id: str, release: str, module:
         "sides": [(f"Ваша правка: {base_id} → {project_id}", ours, _diff_lines(ours), project_id),
                   (f"Изменение релиза: {base_id} → {release}", theirs, _diff_lines(theirs), release)],
     })
+
+
+@router.get("/api/projects/{project_id}/diff/warming")
+def diff_warming(project_id: str):
+    """Идёт ли фоновый расчёт сравнений — страница «идёт сравнение» ждёт false."""
+    _project(project_id)
+    return {"warming": get_pm().diff_warming(project_id)}
 
 
 @router.post("/api/projects/{project_id}/comparison")

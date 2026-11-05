@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Отличия — {{ project.name }}{% endblock %}
 {% block active_nav %}diff{% endblock %}
-{% from "_diff_header.html" import diff_header, comparison_form with context %}
+{% from "_diff_header.html" import diff_header, comparison_form, pending_card with context %}
 
 {% macro module_counts(m) -%}
 {%- if m.status == 'added' -%}новый модуль, процедур {{ m.procedures|num }}
@@ -33,6 +33,10 @@
     <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }}</div>
 </div>
+{% endif %}
+
+{% if pending %}
+{{ pending_card() }}
 {% endif %}
 
 {% if diff %}

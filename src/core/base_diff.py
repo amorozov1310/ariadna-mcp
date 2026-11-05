@@ -16,6 +16,7 @@
 """
 
 import difflib
+import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -135,12 +136,31 @@ def _modules(conn, source_id: str) -> dict[str, dict]:
         (source_id,))}
 
 
-def _procedures(conn, module_id: int) -> dict[str, dict]:
-    return {r['name_cf']: dict(r) for r in conn.execute(
-        """SELECT p.name, p.name_cf, p.signature,
-                  (SELECT c.content_hash FROM card_chunks c WHERE c.procedure_id = p.id
-                   ORDER BY c.chunk_no LIMIT 1) AS content_hash
-           FROM procedures p WHERE p.module_id = ?""", (module_id,))}
+def _ids_json(ids) -> str:
+    """Список id для «IN (SELECT value FROM json_each(?))» — один запрос на
+    тысячи модулей вместо запроса на модуль (на крупной конфигурации — секунды
+    против минуты)."""
+    return json.dumps(sorted(ids))
+
+
+def _procedures(conn, module_ids) -> dict[int, dict[str, dict]]:
+    """Процедуры модулей: {module_id: {name_cf: строка}}; content_hash —
+    отпечаток карточки (у всех фрагментов процедуры он один, берётся нулевой)."""
+    found: dict[int, dict[str, dict]] = defaultdict(dict)
+    for r in conn.execute(
+            """SELECT p.module_id, p.name, p.name_cf, p.signature, c.content_hash
+               FROM procedures p
+               LEFT JOIN card_chunks c ON c.procedure_id = p.id AND c.chunk_no = 0
+               WHERE p.module_id IN (SELECT value FROM json_each(?))""", (_ids_json(module_ids),)):
+        found[r['module_id']][r['name_cf']] = dict(r)
+    return found
+
+
+def _procedure_counts(conn, module_ids) -> dict[int, int]:
+    return dict(conn.execute(
+        """SELECT module_id, COUNT(*) FROM procedures
+           WHERE module_id IN (SELECT value FROM json_each(?)) GROUP BY module_id""",
+        (_ids_json(module_ids),)).fetchall())
 
 
 def _objects(conn, source_id: str) -> dict[str, dict]:
@@ -212,30 +232,32 @@ def compute_base_diff(current_conn, base_conn, base_project: str,
 
     bm, cm = _modules(base_conn, source_id), _modules(current_conn, source_id)
     diff.modules_total = len(bm)
-    for name in sorted(cm.keys() | bm.keys()):
-        if name in cm and name in bm:
-            if cm[name]['file_hash'] == bm[name]['file_hash']:
-                continue
-            was, now = _procedures(base_conn, bm[name]['id']), _procedures(current_conn, cm[name]['id'])
-            both = was.keys() & now.keys()
-            change = ModuleChange(
-                name, _object_of(name), 'changed',
-                added=sorted(now[k]['name'] for k in now.keys() - was.keys()),
-                removed=sorted(was[k]['name'] for k in was.keys() - now.keys()),
-                changed=sorted(now[k]['name'] for k in both
-                               if (now[k]['content_hash'] or '') != (was[k]['content_hash'] or '')
-                               or now[k]['signature'] != was[k]['signature']),
-                signature_changed=sorted(now[k]['name'] for k in both
-                                         if now[k]['signature'] != was[k]['signature']))
-            # Без изменённых процедур модуль всё равно в списке: правка вне
-            # процедур (переменные модуля, области, комментарии) — тоже доработка.
-        else:
-            conn, mod = (current_conn, cm[name]) if name in cm else (base_conn, bm[name])
-            count = conn.execute("SELECT COUNT(*) FROM procedures WHERE module_id = ?",
-                                 (mod['id'],)).fetchone()[0]
-            change = ModuleChange(name, _object_of(name), 'added' if name in cm else 'removed',
-                                  procedures=count)
+    changed = sorted(n for n in cm.keys() & bm.keys() if cm[n]['file_hash'] != bm[n]['file_hash'])
+    added, removed = sorted(cm.keys() - bm.keys()), sorted(bm.keys() - cm.keys())
+    base_procs = _procedures(base_conn, [bm[n]['id'] for n in changed])
+    cur_procs = _procedures(current_conn, [cm[n]['id'] for n in changed])
+    added_counts = _procedure_counts(current_conn, [cm[n]['id'] for n in added])
+    removed_counts = _procedure_counts(base_conn, [bm[n]['id'] for n in removed])
+    for name in changed:
+        was, now = base_procs.get(bm[name]['id'], {}), cur_procs.get(cm[name]['id'], {})
+        both = was.keys() & now.keys()
+        # Без изменённых процедур модуль всё равно в списке: правка вне
+        # процедур (переменные модуля, области, комментарии) — тоже доработка.
+        change = ModuleChange(
+            name, _object_of(name), 'changed',
+            added=sorted(now[k]['name'] for k in now.keys() - was.keys()),
+            removed=sorted(was[k]['name'] for k in was.keys() - now.keys()),
+            changed=sorted(now[k]['name'] for k in both
+                           if (now[k]['content_hash'] or '') != (was[k]['content_hash'] or '')
+                           or now[k]['signature'] != was[k]['signature']),
+            signature_changed=sorted(now[k]['name'] for k in both
+                                     if now[k]['signature'] != was[k]['signature']))
         entry(change.object_name or name).modules.append(change)
+    for names, status, mods, cnt in ((added, 'added', cm, added_counts),
+                                     (removed, 'removed', bm, removed_counts)):
+        for name in names:
+            change = ModuleChange(name, _object_of(name), status, procedures=cnt.get(mods[name]['id'], 0))
+            entry(change.object_name or name).modules.append(change)
     return diff
 
 
