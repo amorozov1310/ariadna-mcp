@@ -513,17 +513,18 @@ _REF_MANAGER = _names('ПустаяСсылка', 'EmptyRef')
 _OBJECT_MANAGER = _REF_MANAGER | _names(
     'ПолучитьСсылку', 'GetRef', 'Выбрать', 'Select',
     'НайтиПоРеквизиту', 'FindByAttribute')
+_HIERARCHICAL = _names('ВыбратьИерархически', 'SelectHierarchically')
 _CODED = _names('НайтиПоКоду', 'FindByCode', 'НайтиПоНаименованию', 'FindByDescription')
 _NUMBERED = _names('НайтиПоНомеру', 'FindByNumber')
 _REGISTER = _names('СоздатьНаборЗаписей', 'CreateRecordSet', 'Выбрать', 'Select')
 _CREATABLE = _names('Создать', 'Create')
 
 _MANAGER_METHODS_BY_KIND = {
-    'Справочник': _OBJECT_MANAGER | _CODED | _names(
+    'Справочник': _OBJECT_MANAGER | _CODED | _HIERARCHICAL | _names(
         'СоздатьЭлемент', 'CreateItem', 'СоздатьГруппу', 'CreateFolder'),
-    'ПланВидовХарактеристик': _OBJECT_MANAGER | _CODED | _names(
+    'ПланВидовХарактеристик': _OBJECT_MANAGER | _CODED | _HIERARCHICAL | _names(
         'СоздатьЭлемент', 'CreateItem', 'СоздатьГруппу', 'CreateFolder'),
-    'ПланСчетов': _OBJECT_MANAGER | _CODED | _names('СоздатьСчет', 'CreateAccount'),
+    'ПланСчетов': _OBJECT_MANAGER | _CODED | _HIERARCHICAL | _names('СоздатьСчет', 'CreateAccount'),
     'ПланОбмена': _OBJECT_MANAGER | _CODED | _names(
         'СоздатьУзел', 'CreateNode', 'ЭтотУзел', 'ThisNode'),
     'Документ': _OBJECT_MANAGER | _NUMBERED | _names('СоздатьДокумент', 'CreateDocument'),

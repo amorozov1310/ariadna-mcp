@@ -192,6 +192,15 @@ _PLATFORM_MANAGER_METHODS = {
     'создатьгруппу', 'createfolder',
     'создатьдокумент', 'createdocument',
     'выбрать', 'select',
+    'выбратьиерархически', 'selecthierarchically',
+    # Document/BusinessProcess/Task: поиск по номеру и создание
+    'найтипономеру', 'findbynumber',
+    'создатьбизнеспроцесс', 'createbusinessprocess',
+    'создатьзадачу', 'createtask',
+    # ChartOfAccounts / ExchangePlan
+    'создатьсчет', 'createaccount',
+    'создатьузел', 'createnode',
+    'этотузел', 'thisnode',
     'пустаяссылка', 'emptyref',
     'получитьмакет', 'gettemplate',
     'получитьформу', 'getform',

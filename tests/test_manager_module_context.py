@@ -152,3 +152,28 @@ def test_indexer_passes_manager_module_context():
             assert ('manager', 'ЗаполнитьКэш') in resolved
         finally:
             db.close()
+
+
+def test_platform_manager_methods_of_tasks_and_processes_are_not_calls():
+    """Трёхчастные вызовы платформенных методов менеджеров задач, бизнес-
+    процессов и иерархических справочников — не вызовы процедур модуля
+    менеджера (diagnose_index показывал их как «метода в модуле нет»)."""
+    code = """
+Процедура Тест()
+	Задача = Задачи.Согласование.НайтиПоНомеру("001");
+	Task = Tasks.Approval.FindByNumber("002");
+	Процесс = БизнесПроцессы.Заявка.СоздатьБизнесПроцесс();
+	Новая = Задачи.Согласование.СоздатьЗадачу();
+	Выборка = Справочники.Роли.ВыбратьИерархически();
+	Selection = Catalogs.Roles.SelectHierarchically();
+	БизнесПроцессы.Заявка.Запустить();
+КонецПроцедуры
+"""
+    parser = BSLParser(known_objects={'Задача': {'согласование', 'approval'},
+                                      'БизнесПроцесс': {'заявка'},
+                                      'Справочник': {'роли', 'roles'}})
+    calls = {(c.callee_module, c.callee_proc) for c in parser.parse(code).calls
+             if c.callee_kind == 'manager'}
+    assert calls == {('БизнесПроцесс.Заявка.МодульМенеджера', 'Запустить')}
+    assert 'выбратьиерархически' in module_context_methods('Справочник', 'МодульМенеджера')
+    assert 'выбратьиерархически' not in module_context_methods('Документ', 'МодульМенеджера')
