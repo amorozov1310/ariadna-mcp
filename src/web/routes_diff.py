@@ -141,18 +141,36 @@ async def conflict_page(request: Request, project_id: str, release: str, module:
     def both():
         # Только тексты процедуры: сравнение целиком (секунды) здесь не нужно.
         base_id = project.base_project
-        return (base_id, pm.get_procedure_diff(project_id, module, name),
-                pm.get_procedure_diff(release, module, name, base_id=base_id))
+        ours = pm.get_procedure_diff(project_id, module, name)
+        theirs = pm.get_procedure_diff(release, module, name, base_id=base_id)
+        full_module = (ours['name'] or theirs['name']).rsplit('.', 1)[0]
+        return base_id, ours, theirs, _intercept_code(pm, project_id, full_module, name)
 
     try:
-        base_id, ours, theirs = await run_in_threadpool(both)
+        base_id, ours, theirs, intercepts = await run_in_threadpool(both)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return templates.TemplateResponse(name="diff_conflict.html", request=request, context={
-        "project": project, "release": release, "name": ours['name'],
+        "project": project, "release": release, "name": ours['name'], "intercepts": intercepts,
         "sides": [(f"Ваша правка: {base_id} → {project_id}", ours, _diff_lines(ours), project_id),
                   (f"Изменение релиза: {base_id} → {release}", theirs, _diff_lines(theirs), release)],
     })
+
+
+def _intercept_code(pm, project_id: str, module: str, procedure: str) -> list[dict]:
+    """Перехваты процедуры в расширениях проекта с текстом процедур расширений."""
+    from ..core.bsl_parser import read_bsl_text
+    engine = pm.get_search(project_id)
+    found = []
+    for it in pm.intercepts(project_id, 'main', module, procedure):
+        outline = engine.get_module_outline(it.module, source_id=it.source_id)
+        proc = next((p for p in (outline or {}).get('procedures', [])
+                     if p['name'].casefold() == it.ext_procedure.casefold()), None)
+        path = engine.module_file_path(outline['module']) if outline and proc else None
+        text = read_bsl_text(path) if path else None
+        lines = text.split('\n')[proc['start_line'] - 1:proc['end_line']] if text else []
+        found.append({'intercept': it, 'lines': lines})
+    return found
 
 
 @router.get("/api/projects/{project_id}/diff/warming")

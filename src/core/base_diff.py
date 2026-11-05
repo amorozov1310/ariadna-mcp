@@ -17,6 +17,7 @@
 
 import difflib
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -268,6 +269,8 @@ def compute_base_diff(current_conn, base_conn, base_project: str,
 CONFLICT_KINDS = {
     'both_changed': 'правили и вы, и релиз',
     'removed_in_release': 'вы правили — в релизе удалено',
+    'intercepted_removed': 'перехвачено в расширении — в релизе удалено',
+    'intercepted_changed': 'перехвачено в расширении — релиз изменил',
     'name_clash': 'вы добавили — в релизе появилось с тем же именем',
     'removed_by_you': 'вы удалили — релиз изменил',
     'object_both': 'реквизиты объекта меняли и вы, и релиз',
@@ -290,6 +293,33 @@ class Conflict:
 
 
 @dataclass
+class Intercept:
+    """Перехват типовой процедуры в расширении: &Вместо / &После / &Перед /
+    &ИзменениеИКонтроль (англ. тоже) — ребро override графа вызовов."""
+    module: str                     # модуль, как в основной конфигурации
+    procedure: str                  # перехваченная процедура
+    source_id: str                  # расширение
+    ext_procedure: str              # процедура расширения
+    directive: str = ''             # директивы процедуры расширения, как в индексе
+
+    @property
+    def keyword(self) -> str:
+        """«Вместо», «После», … — из «&НаСервере &Вместо:Имя» (так директиву
+        хранит bsl_parser._consume_directives)."""
+        match = re.search(r'&(\w+):', self.directive)
+        return match.group(1) if match else ''
+
+    @property
+    def label(self) -> str:
+        return f'&{self.keyword}("{self.procedure}")' if self.keyword else self.directive
+
+
+# Перехват, который заменяет типовую процедуру целиком: её изменения в релизе
+# не выполнятся, пока правка не перенесена в расширение.
+_REPLACING = {'вместо', 'around', 'изменениеиконтроль', 'changeandvalidate'}
+
+
+@dataclass
 class UpdateConflicts:
     base_project: str
     release_project: str
@@ -305,10 +335,13 @@ class UpdateConflicts:
         return counts
 
 
-def compute_update_conflicts(ours: BaseDiff, release: BaseDiff, release_project: str) -> UpdateConflicts:
+def compute_update_conflicts(ours: BaseDiff, release: BaseDiff, release_project: str,
+                             intercepts: list[Intercept] = ()) -> UpdateConflicts:
     """Пересечение доработок проекта (ours: проект против базы) с изменениями
     релиза (release: новая типовая против той же базы) — места, где при
-    обновлении будет ручное слияние. Ни один из индексов здесь не читается."""
+    обновлении будет ручное слияние. intercepts — перехваты типовых процедур в
+    расширениях проекта: релиз меняет или удаляет перехваченное. Ни один из
+    индексов здесь не читается."""
     result = UpdateConflicts(ours.base_project, release_project, ours.base_version,
                              release.current_version, release_totals=release.totals())
     items = result.items
@@ -380,6 +413,26 @@ def compute_update_conflicts(ours: BaseDiff, release: BaseDiff, release_project:
             items.append(Conflict('object_both', o.full_name, o.full_name,
                                   note=f'ваших реквизитов: {len(o.attrs_added) + len(o.attrs_retyped)}, '
                                        f'реквизитов релиза: {len(rel.attrs_added) + len(rel.attrs_retyped) + len(rel.attrs_removed)}'))
+
+    for it in intercepts:
+        rel = release_modules.get(it.module)
+        if rel is None:
+            continue
+        where = f'{it.source_id}: {it.ext_procedure} ({it.label})'
+        obj = _object_of(it.module) or it.module
+        target = f'{it.module}.{it.procedure}'
+        if rel.status == 'removed' or it.procedure in rel.removed:
+            items.append(Conflict('intercepted_removed', obj, target, it.module, it.procedure,
+                                  f'{where}; {"модуль" if rel.status == "removed" else "процедура"} '
+                                  f'удалена — перехват перестанет применяться'))
+        elif rel.status == 'changed' and it.procedure in rel.changed:
+            notes = [where]
+            if it.procedure in rel.signature_changed:
+                notes.append('в релизе изменена сигнатура — перехват придётся переписать')
+            elif it.keyword.casefold() in _REPLACING:
+                notes.append('процедура заменена целиком — изменения релиза не выполнятся')
+            items.append(Conflict('intercepted_changed', obj, target, it.module, it.procedure,
+                                  '; '.join(notes)))
 
     order = list(CONFLICT_KINDS)
     items.sort(key=lambda c: (order.index(c.kind), c.target))
