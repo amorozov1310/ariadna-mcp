@@ -87,7 +87,7 @@ _RE_DIRECTIVE = re.compile(
     r'^\s*&(НаСервереБезКонтекста|НаКлиентеНаСервереБезКонтекста|НаКлиентеНаСервере|'
     r'НаСервере|НаКлиенте|'
     r'AtServerNoContext|AtClientAtServerNoContext|AtClientAtServer|'
-    r'AtServer|AtClient)\s*$',
+    r'AtServer|AtClient)\s*(?://.*)?$',
     re.IGNORECASE
 )
 
@@ -99,17 +99,19 @@ _RE_DIRECTIVE = re.compile(
 _RE_EXT_DIRECTIVE = re.compile(
     r'^\s*&(Вместо|После|Перед|ИзменениеИКонтроль|'
     r'Around|After|Before|ChangeAndValidate)'
-    r'\s*\(\s*"([^"]+)"\s*\)\s*$',
+    r'\s*\(\s*"([^"]+)"\s*\)\s*(?://.*)?$',
     re.IGNORECASE
 )
 
 # D8: "Асинх Процедура X()" / "Async Function X()" — the async modifier
 # comes before the Процедура/Функция keyword, not after.
+# Комментарий в конце строки объявления («… Экспорт // Доработка») — тоже
+# объявление: без него такие процедуры пропадали из индекса целиком.
 _RE_PROC_START = re.compile(
     r'^\s*(?:(Асинх|Async)\s+)?(Процедура|Функция|Procedure|Function)\s+'
     r'([А-Яа-яA-Za-z0-9_]+)\s*'
     r'\(([^)]*)\)\s*'
-    r'(Экспорт|Export)?\s*;?\s*$',
+    r'(Экспорт|Export)?\s*;?\s*(?://.*)?$',
     re.IGNORECASE
 )
 
@@ -129,8 +131,10 @@ _RE_PROC_START_MULTILINE = re.compile(
     re.IGNORECASE
 )
 
+# «КонецФункции // ИмяФункции()» — частый стиль типовых: без комментария в шаблоне
+# конец не распознавался, и процедура тянулась до следующей.
 _RE_PROC_END = re.compile(
-    r'^\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\s*$',
+    r'^\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\s*;?\s*(?://.*)?$',
     re.IGNORECASE
 )
 
@@ -958,10 +962,13 @@ class BSLParser:
                 directive_str, intercepts = self._consume_directives(
                     current_directive, current_intercept_keyword, current_intercept_target)
 
+                # Сигнатура — без комментария в конце строки (до конца
+                # «Экспорт» или закрывающей скобки).
+                sig_end = proc_match.end(5) if is_export else proc_match.end(4) + 1
                 current_proc = ProcedureInfo(
                     name=name, kind=kind, is_export=is_export,
                     start_line=line_num, params=params,
-                    directive=directive_str, signature=stripped,
+                    directive=directive_str, signature=stripped[:sig_end].rstrip(),
                     intercepts=intercepts, is_async=is_async,
                 )
                 constructed_vars[id(current_proc)] = (
