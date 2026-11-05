@@ -48,7 +48,7 @@ from mcp import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
-EXPECTED_TOOLS = 23
+EXPECTED_TOOLS = 24
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
 
@@ -75,6 +75,7 @@ PARITY_CASES = {
     # Удаление дважды подряд успешным не бывает — сверяется одинаковая ошибка.
     'remove_glossary_term': {'entry_id': 'нет'},
     'diagnose_index': {},
+    'find_broken_calls': {'limit': 5},
     # Базы у временного проекта нет — сверяется одинаковая ошибка.
     'diff_from_base': {},
     'update_conflicts': {'release_project': 'нет'},

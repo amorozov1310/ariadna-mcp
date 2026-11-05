@@ -51,7 +51,8 @@
 {% set nav_section = self.active_nav()|trim %}
 {% set section_paths = {
     'overview': '', 'search': '/search', 'graph': '/graph',
-    'playground': '/playground', 'glossary': '/glossary', 'diff': '/diff', 'settings': '/settings'} %}
+    'playground': '/playground', 'glossary': '/glossary', 'diff': '/diff', 'checks': '/checks',
+    'settings': '/settings'} %}
 {% macro theme_toggle() %}
 <button type="button" class="theme-toggle" onclick="toggleTheme()"
         title="Переключить тему" aria-label="Переключить светлую и тёмную тему">
@@ -114,6 +115,9 @@
         <a class="navlink" href="/projects/{{ project.id }}/diff"
            {% if nav_section == 'diff' %}aria-current="page"{% endif %}>
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg> Отличия</a>
+        <a class="navlink" href="/projects/{{ project.id }}/checks"
+           {% if nav_section == 'checks' %}aria-current="page"{% endif %}>
+            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg> Проверка</a>
         <a class="navlink" href="/projects/{{ project.id }}/settings"
            {% if nav_section == 'settings' %}aria-current="page"{% endif %}>
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#settings"/></svg> Настройки</a>
