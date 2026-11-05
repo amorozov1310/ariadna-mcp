@@ -1,21 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Отличия — {{ project.name }}{% endblock %}
 {% block active_nav %}diff{% endblock %}
-
-{% macro base_form(current) %}
-<form action="/api/projects/{{ project.id }}/base" method="post" class="diff-base-form">
-    <label for="base-project">База — проект с типовой конфигурацией</label>
-    <div class="diff-base-row">
-        <select id="base-project" name="base_project">
-            <option value="">— нет —</option>
-            {% for p in candidates %}
-            <option value="{{ p.id }}" {% if p.id == current %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
-            {% endfor %}
-        </select>
-        <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
-    </div>
-</form>
-{% endmacro %}
+{% from "_diff_header.html" import diff_header, comparison_form, pending_card with context %}
 
 {% macro module_counts(m) -%}
 {%- if m.status == 'added' -%}новый модуль, процедур {{ m.procedures|num }}
@@ -36,26 +22,10 @@
 {%- endmacro %}
 
 {% block content %}
-<h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg>
-    Отличия от типовой
-</h1>
+{{ diff_header(scheme, 'diff') }}
 
 {% if not project.base_project %}
-<div class="card">
-    <p class="text-muted">
-        Сравнение с базой показывает, что доработано в конфигурации проекта: новые объекты и
-        реквизиты, изменённые и добавленные процедуры типовых модулей — и текст каждого изменения.
-        База — отдельный проект с выгрузкой той же конфигурации без доработок (обычно типовой
-        того же релиза). Создайте его, проиндексируйте и выберите здесь. Агенту то же доступно
-        инструментом <span class="mono">diff_from_base</span>.
-    </p>
-    <p class="text-muted">
-        Пока индекс этого проекта не построен, первая индексация возьмёт индекс базы за основу и
-        переразберёт только отличающиеся модули.
-    </p>
-    {{ base_form('') }}
-</div>
+{{ comparison_form(candidates, '/projects/' ~ project.id ~ '/diff') }}
 {% else %}
 
 {% if error %}
@@ -65,16 +35,13 @@
 </div>
 {% endif %}
 
+{% if pending %}
+{{ pending_card() }}
+{% endif %}
+
 {% if diff %}
 <div class="card">
-    <div class="card-header">
-        <h3 class="section-title">
-            База: <a href="/projects/{{ diff.base_project }}">{{ diff.base_project }}</a>
-            {% if diff.base_version %}<span class="text-muted">{{ diff.base_version }}</span>{% endif %}
-            {% if diff.current_version and diff.current_version != diff.base_version %}
-            → <span class="text-muted">{{ diff.current_version }}</span>{% endif %}
-        </h3>
-    </div>
+    <h3 class="section-title">Что доработано: «{{ project.id }}» против базы «{{ diff.base_project }}»</h3>
     <div class="stats-grid">
         <div class="stat-card">
             <div class="stat-value">{{ totals.modules_changed|num }}</div>
@@ -172,19 +139,7 @@
 </div>
 {% endif %}
 
-<div class="card">
-    <h3 class="section-title">Обновление на новый релиз</h3>
-    <p class="text-muted">
-        Где ваши доработки пересекаются с изменениями нового релиза типовой — процедуры, которые
-        правили и вы, и релиз, и другие места ручного слияния.
-        <a href="/projects/{{ project.id }}/diff/update">Подготовка к обновлению →</a>
-    </p>
-</div>
-
-<div class="card">
-    <h3 class="section-title">Базовый проект</h3>
-    {{ base_form(project.base_project) }}
-</div>
+{{ comparison_form(candidates, '/projects/' ~ project.id ~ '/diff') }}
 
 <script>
 (function () {

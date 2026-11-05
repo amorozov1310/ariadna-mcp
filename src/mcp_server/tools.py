@@ -262,7 +262,13 @@ def format_base_diff_summary(project_id: str, diff) -> str:
         f"{t['attributes_removed']}, тип изменён у {t['attributes_retyped']}, форм добавлено "
         f"{t['forms_added']}",
         f"Доработано типовых объектов: {t['objects_changed']}",
-    ])
+    ] + ([VERSIONS_DIFFER] if diff.versions_differ else []))
+
+
+# Проект и база на разных релизах: отличия — уже не только доработки.
+VERSIONS_DIFFER = ("Внимание: версии проекта и базы различаются — в отличия попали и изменения "
+                   "типовой между этими релизами. Базой должна быть типовая того же релиза, что "
+                   "и проект; новый релиз для подготовки к обновлению — update_conflicts.")
 
 
 def format_object_change_line(o) -> str:
@@ -788,14 +794,14 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     if not module_name:
                         return "Error: для текста процедуры нужен и module_name (из списка конфликтов)"
                     ours = pm.get_procedure_diff(project_id, module_name, proc_name, source_id=src)
-                    theirs = pm.get_procedure_diff(release_id, module_name, proc_name, source_id=src,
-                                                   base_id=result.base_project)
+                    theirs = pm.get_procedure_diff(result.release_project, module_name, proc_name,
+                                                   source_id=src, base_id=result.base_project)
             except ValueError as e:
                 return f"Error: {e}"
             if proc_name:
                 return (f"== Ваша правка (база «{result.base_project}» → «{project_id}»):\n"
                         f"{format_procedure_diff(ours)}\n\n"
-                        f"== Изменение релиза (база «{result.base_project}» → «{release_id}»):\n"
+                        f"== Изменение релиза (база «{result.base_project}» → «{result.release_project}»):\n"
                         f"{format_procedure_diff(theirs)}")
             items = result.items
             if object_name:

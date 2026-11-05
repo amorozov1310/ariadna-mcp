@@ -396,8 +396,9 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
                     module_name=module_name, procedure_name=procedure_name, source_id=source_id)
 
     @mcp.tool(
-        description="Что доработано относительно типовой: отличия проекта от его базы (проект "
-                     "с типовой конфигурацией, задаётся в настройках проекта в Web UI). Без "
+        description="Что доработано относительно типовой: отличия проекта от его базы — проекта "
+                     "с типовой ТОГО ЖЕ релиза (задаётся в Web UI, «Отличия»; в первой строке "
+                     "ответа — с чем и какие версии сравниваются). Без "
                      "параметров — сводка и доработанные типовые объекты (больше изменений — "
                      "выше): новые и удалённые реквизиты, формы, изменённые/добавленные "
                      "процедуры по модулям; section=added — новые объекты, removed — удалённые. "
@@ -425,13 +426,14 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
                      "пересекаются с изменениями релиза — процедуры, которые правили и вы, и "
                      "релиз; правленное вами, но удалённое в релизе; добавленное вами, что "
                      "появилось в релизе с тем же именем; реквизиты объектов, которые меняли оба. "
-                     "release_project — проект с выгрузкой нового релиза; база проекта — старый "
-                     "релиз. module_name + procedure_name — обе правки процедуры (ваша и релиза) "
-                     "как diff от базы.",
+                     "Три проекта: этот (ваша конфигурация), его база (типовая текущего релиза) и "
+                     "новый релиз (типовая, на которую обновляетесь) — он задаётся в Web UI, "
+                     "«Отличия», или параметром release_project. module_name + procedure_name — обе "
+                     "правки процедуры (ваша и релиза) как diff от базы.",
         annotations=_READ_ONLY,
     )
     def update_conflicts(
-        release_project: Annotated[str, Field(description="ID проекта с новым релизом типовой (list_projects)")],
+        release_project: Annotated[str, Field(description="ID проекта с новым релизом типовой (list_projects); пустая строка — новый релиз из настроек проекта")],
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         object_name: Annotated[str | None, Field(description="Полное имя объекта — пересечения только по нему")] = None,
         module_name: Annotated[str | None, Field(description="Модуль процедуры (вместе с procedure_name — обе правки)")] = None,

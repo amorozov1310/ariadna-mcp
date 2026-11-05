@@ -4,6 +4,7 @@ import logging
 
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from .app import templates, get_pm
 from ..core.project_manager import (PROJECT_GONE, ProjectFilesNotRemovedError,
@@ -156,8 +157,8 @@ async def add_source(
         xml_fobj = xml_archive.file if xml_archive and xml_archive.filename else None
         xml_fname = xml_archive.filename if xml_archive else ''
 
-        pm.add_source(
-            project_id, source_id, label,
+        await run_in_threadpool(
+            pm.add_source, project_id, source_id, label,
             source_type=source_type,
             xml_archive=xml_fobj,
             xml_archive_filename=xml_fname,
@@ -239,8 +240,8 @@ async def update_source(
         xml_fobj = xml_archive.file if xml_archive and xml_archive.filename else None
         xml_fname = xml_archive.filename if xml_archive else ''
 
-        pm.update_source(
-            project_id, source_id,
+        await run_in_threadpool(
+            pm.update_source, project_id, source_id,
             label=label or None,
             source_type=source_type or None,
             xml_archive=xml_fobj,
@@ -260,7 +261,7 @@ async def remove_source(project_id: str, source_id: str):
     """Remove a source from the project (deletes files + indexed DB rows)."""
     pm = get_pm()
     try:
-        pm.remove_source(project_id, source_id)
+        await run_in_threadpool(pm.remove_source, project_id, source_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить источник: {e}")
     except (ValueError, KeyError) as e:
@@ -272,7 +273,7 @@ async def remove_source(project_id: str, source_id: str):
 async def delete_project(project_id: str):
     pm = get_pm()
     try:
-        pm.delete_project(project_id)
+        await run_in_threadpool(pm.delete_project, project_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except ProjectFilesNotRemovedError as e:
@@ -286,7 +287,7 @@ async def delete_project(project_id: str):
 async def delete_project_post(project_id: str):
     pm = get_pm()
     try:
-        pm.delete_project(project_id)
+        await run_in_threadpool(pm.delete_project, project_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except ProjectFilesNotRemovedError as e:
