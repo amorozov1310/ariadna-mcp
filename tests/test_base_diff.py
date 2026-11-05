@@ -314,3 +314,76 @@ def test_pending_page_while_diff_is_computed(pm, monkeypatch):
     finally:
         gate.set()
         app_module.set_pm(previous)
+
+
+# ============================================
+# Перехваты в расширениях × изменения релиза
+# ============================================
+
+def _extension(pm: ProjectManager, project_id: str) -> None:
+    """Расширение проекта: &Вместо над процедурой, которую релиз изменил, и
+    &После над процедурой модуля, который релиз тоже изменил."""
+    xml = pm.projects_dir / project_id / 'sources' / 'ext' / 'xml'
+    modules = {
+        'ЦеныСервер': '&Вместо("РассчитатьЦену")\nФункция Расш_РассчитатьЦену(Товар)\n'
+                      '\tВозврат ПродолжитьВызов(Товар) + 1;\nКонецФункции\n',
+        'СкидкиСервер': '&После("РассчитатьЦену")\nПроцедура Расш_ПослеРасчета(Товар)\n'
+                        'КонецПроцедуры\n',
+    }
+    for name, text in modules.items():
+        path = xml / 'CommonModules' / name / 'Ext' / 'Module.bsl'
+        path.parent.mkdir(parents=True)
+        path.write_text(text, encoding='utf-8-sig')
+    pm.add_source(project_id, 'ext', 'Расширение', source_type='extension')
+    pm.reindex(project_id)
+
+
+def test_intercepts_changed_by_release(release_pm):
+    pm = release_pm
+    _extension(pm, 'custom')
+    found = {(i.module, i.procedure, i.keyword) for i in pm.intercepts('custom')}
+    assert ('ОбщийМодуль.ЦеныСервер.Модуль', 'РассчитатьЦену', 'Вместо') in found
+    assert ('ОбщийМодуль.СкидкиСервер.Модуль', 'РассчитатьЦену', 'После') in found
+
+    result = pm.get_update_conflicts('custom', 'release')
+    intercepted = {c.target: c for c in result.items if c.kind == 'intercepted_changed'}
+    replaced = intercepted['ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену']
+    assert 'ext: Расш_РассчитатьЦену' in replaced.note and 'заменена целиком' in replaced.note
+    after = intercepted['ОбщийМодуль.СкидкиСервер.Модуль.РассчитатьЦену']
+    assert 'заменена целиком' not in after.note
+
+    detail = execute_tool(pm, 'update_conflicts', {
+        'project_id': 'custom', 'release_project': 'release',
+        'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
+    assert '== Перехваты в расширениях' in detail and 'Расш_РассчитатьЦену' in detail
+
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        page = client.get('/projects/custom/diff/conflict', params={
+            'release': 'release', 'module': 'ОбщийМодуль.ЦеныСервер.Модуль', 'name': 'РассчитатьЦену'}).text
+        assert 'Перехват в расширении «ext»' in page and 'ПродолжитьВызов' in page
+    finally:
+        app_module.set_pm(previous)
+
+
+def test_intercept_of_procedure_removed_in_release():
+    from src.core.base_diff import BaseDiff, Intercept, ModuleChange, ObjectChange, compute_update_conflicts
+    ours = BaseDiff('typical', 'main')
+    release = BaseDiff('typical', 'main')
+    release.objects['ОбщийМодуль.X'] = ObjectChange('ОбщийМодуль.X', 'ОбщийМодуль', modules=[
+        ModuleChange('ОбщийМодуль.X.Модуль', 'ОбщийМодуль.X', 'changed', removed=['Старая'], changed=['Новая'],
+                     signature_changed=['Новая'])])
+    result = compute_update_conflicts(ours, release, 'release', [
+        Intercept('ОбщийМодуль.X.Модуль', 'Старая', 'ext', 'Расш_Старая', '&Перед:Старая'),
+        Intercept('ОбщийМодуль.X.Модуль', 'Новая', 'ext', 'Расш_Новая', '&После:Новая'),
+        Intercept('ОбщийМодуль.Y.Модуль', 'Любая', 'ext', 'Расш_Любая', '&Вместо:Любая'),
+    ])
+    kinds = {c.target: (c.kind, c.note) for c in result.items}
+    assert kinds['ОбщийМодуль.X.Модуль.Старая'][0] == 'intercepted_removed'
+    assert kinds['ОбщийМодуль.X.Модуль.Новая'][0] == 'intercepted_changed'
+    assert 'сигнатура' in kinds['ОбщийМодуль.X.Модуль.Новая'][1]
+    assert 'ОбщийМодуль.Y.Модуль.Любая' not in kinds        # релиз модуль не трогал

@@ -799,10 +799,18 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             except ValueError as e:
                 return f"Error: {e}"
             if proc_name:
-                return (f"== Ваша правка (база «{result.base_project}» → «{project_id}»):\n"
+                text = (f"== Ваша правка (база «{result.base_project}» → «{project_id}»):\n"
                         f"{format_procedure_diff(ours)}\n\n"
                         f"== Изменение релиза (база «{result.base_project}» → «{result.release_project}»):\n"
                         f"{format_procedure_diff(theirs)}")
+                full_module = (ours['name'] or theirs['name']).rsplit('.', 1)[0]
+                found = pm.intercepts(project_id, src, full_module, proc_name)
+                if found:
+                    text += "\n\n== Перехваты в расширениях:\n" + '\n'.join(
+                        f"  {it.source_id}: {it.module}.{it.ext_procedure}  {it.label}" for it in found)
+                    text += ("\nКод перехвата: get_procedure_code(module_name=..., procedure_name=..., "
+                             "source_id=<расширение>)")
+                return text
             items = result.items
             if object_name:
                 key = object_name.casefold()

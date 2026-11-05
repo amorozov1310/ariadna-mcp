@@ -1091,7 +1091,32 @@ class ProjectManager:
                              f"проиндексируйте его")
         return compute_update_conflicts(self.get_base_diff(project_id, source_id),
                                         self._diff_between(release_id, base_id, source_id),
-                                        release_id)
+                                        release_id, self.intercepts(project_id, source_id))
+
+    def intercepts(self, project_id: str, source_id: str = 'main', module_name: str = '',
+                   procedure_name: str = '') -> list:
+        """Перехваты процедур источника source_id в остальных источниках проекта
+        (расширениях): рёбра override графа вызовов. module_name/procedure_name
+        сужают до одной процедуры (имена — как в индексе, регистр не важен)."""
+        from .base_diff import Intercept
+        # Только ребро самой директивы (строка объявления): ПродолжитьВызов()
+        # внутри перехвата — тоже override, но это вызов, а не перехват.
+        conds = ["c.callee_kind = 'override'", "c.line = p.start_line", "m.source_id != ?"]
+        params = [source_id]
+        if module_name:
+            conds.append("casefold(c.callee_module) = ?")
+            params.append(module_name.casefold())
+        if procedure_name:
+            conds.append("casefold(c.callee_proc) = ?")
+            params.append(procedure_name.casefold())
+        rows = self.get_db(project_id).read_conn().execute(
+            f"""SELECT c.callee_module, c.callee_proc, c.context, p.name AS ext_proc, m.source_id
+                FROM calls c JOIN procedures p ON p.id = c.caller_id
+                JOIN modules m ON m.id = p.module_id
+                WHERE {' AND '.join(conds)}
+                ORDER BY c.callee_module, c.callee_proc, m.source_id""", params).fetchall()
+        return [Intercept(r['callee_module'], r['callee_proc'], r['source_id'], r['ext_proc'],
+                          (r['context'] or '').strip()) for r in rows]
 
     def get_procedure_diff(self, project_id: str, module_name: str, procedure_name: str,
                            source_id: str = 'main', base_id: str | None = None) -> dict:

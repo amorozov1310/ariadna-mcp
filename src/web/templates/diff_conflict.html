@@ -19,4 +19,20 @@
     {{ diff_body(result, lines, result.base_project, current) }}
 </div>
 {% endfor %}
+
+{% for x in intercepts %}
+<div class="card">
+    <div class="card-header">
+        <h3 class="section-title">Перехват в расширении «{{ x.intercept.source_id }}»:
+            <span class="mono">{{ x.intercept.ext_procedure }}</span></h3>
+        <span class="badge badge-accent">{{ x.intercept.label }}</span>
+    </div>
+    {% if x.lines %}
+    <pre class="diff-code">{% for line in x.lines %}<span class="diff-line diff-line-ctx">{{ line }}</span>
+{% endfor %}</pre>
+    {% else %}
+    <p class="text-muted">Текст процедуры расширения недоступен на сервере.</p>
+    {% endif %}
+</div>
+{% endfor %}
 {% endblock %}
