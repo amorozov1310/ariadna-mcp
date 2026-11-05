@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Проверка вызовов — {{ project.name }}{% endblock %}
+{% block active_nav %}checks{% endblock %}
+
+{% macro caller(i) -%}
+<a class="mono" href="/projects/{{ project.id }}/calltree?procedure={{ i.caller_proc|urlencode }}&module={{ i.caller_module|urlencode }}&source_id={{ i.source_id|urlencode }}&direction=down">{{ i.caller_module }}.{{ i.caller_proc }}</a>
+<span class="text-muted">:{{ i.line }}</span>
+{%- if project.sources|length > 1 %} <span class="badge badge-empty">{{ i.source_id }}</span>{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<div class="card">
+    <h3 class="section-title">Проверка вызовов</h3>
+    <p class="text-muted" style="font-size:var(--fs-sm)">
+        Вызовы <span class="mono">Модуль.Метод()</span> и <span class="mono">Справочники.Х.Метод()</span>,
+        которые при выполнении упадут с «Метод объекта не обнаружен»: метода в модуле нет или он без
+        «Экспорт», а вызывается из другого модуля. Проверка по индексу, без запуска. Вызовы через
+        <span class="mono">ОбщийМодуль("…")</span> не проверяются — как и платформой.
+    </p>
+    <form method="get" class="checks-filter">
+        {% if project.sources|length > 1 %}
+        <label>Источник
+            <select name="source">
+                <option value="">все</option>
+                {% for s in sources %}
+                <option value="{{ s.id }}" {% if s.id == source %}selected{% endif %}>{{ s.label or s.id }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        {% endif %}
+        <label>Модуль содержит
+            <input type="text" name="module" value="{{ module }}" placeholder="например, ОбщегоНазначения">
+        </label>
+        <button type="submit" class="btn btn-secondary btn-sm">Показать</button>
+    </form>
+</div>
+
+{% if error %}
+<div class="notice notice-warning" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>{{ error }}</div>
+</div>
+{% elif not result %}
+<div class="notice notice-info" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
+    <div>Индекс проекта не готов (статус {{ project.status }}) — проверка после индексации.</div>
+</div>
+{% else %}
+<div class="card">
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{ result.missing|length|num }}</div>
+            <div class="stat-label">Метода в модуле нет</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ result.not_export|length|num }}</div>
+            <div class="stat-label">Неэкспортный метод из другого модуля</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ result.external|length|num }}</div>
+            <div class="stat-label">Модулей нет в выгрузке</div>
+        </div>
+    </div>
+    {% if not result.missing and not result.not_export %}
+    <p class="text-muted">Вызовов несуществующих и неэкспортных методов не найдено.</p>
+    {% endif %}
+</div>
+
+{% if result.missing %}
+<div class="card">
+    <h3 class="section-title">Метода в модуле нет ({{ result.missing|length }})</h3>
+    <table class="detail-table">
+        <tr><th>Где вызов</th><th>Что вызывается</th><th>С таким именем есть в</th></tr>
+        {% for i in result.missing %}
+        <tr>
+            <td>{{ caller(i) }}</td>
+            <td class="mono">{{ i.module }}.{{ i.name }}</td>
+            <td class="text-muted">{% for d in i.defined_in %}{{ d.module }}{% if project.sources|length > 1 %} ({{ d.source_id }}){% endif %}{% if not loop.last %}<br>{% endif %}{% else %}нигде{% endfor %}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+{% if result.not_export %}
+<div class="card">
+    <h3 class="section-title">Неэкспортный метод из другого модуля ({{ result.not_export|length }})</h3>
+    <table class="detail-table">
+        <tr><th>Где вызов</th><th>Что вызывается (нет «Экспорт»)</th></tr>
+        {% for i in result.not_export %}
+        <tr><td>{{ caller(i) }}</td><td class="mono">{{ i.module }}.{{ i.name }}</td></tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+{% if result.external %}
+<div class="card">
+    <h3 class="section-title">Модулей нет в выгрузке ({{ result.external|length }})</h3>
+    <p class="text-muted" style="font-size:var(--fs-sm)">
+        Внешние библиотеки (тестовый фреймворк, не выгруженная подсистема) или опечатки в имени модуля.
+        Если библиотека — расширение, добавьте её выгрузку источником проекта.
+    </p>
+    <table class="detail-table">
+        <tr><th>Модуль</th><th>Вызовов</th><th>Методов</th><th>Например</th></tr>
+        {% for e in result.external[:100] %}
+        <tr>
+            <td class="mono">{{ e.module }}</td>
+            <td>{{ e.calls|num }}</td>
+            <td>{{ e.methods|num }}</td>
+            <td>{{ caller(e.sample) }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% if result.external|length > 100 %}<p class="text-muted">Показаны первые 100 — сузьте фильтром.</p>{% endif %}
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

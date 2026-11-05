@@ -96,6 +96,40 @@
       "result": "string"
     }
   },
+  "find_broken_calls": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "module_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 50
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
   "find_references": {
     "params": {
       "object_name": {
