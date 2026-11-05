@@ -67,7 +67,10 @@ _PLATFORM_MANAGER_EXTRA = {s.lower() for s in (
     'УстановитьМаксимальныйПериодРассчитанныхИтогов', 'SetMaxTotalsPeriod',
     'ПолучитьМаксимальныйПериодРассчитанныхИтогов', 'GetMaxTotalsPeriod',
     'УстановитьМинимальныйПериодРассчитанныхИтогов', 'SetMinTotalsPeriod',
-    'ПолучитьМинимальныйПериодРассчитанныхИтогов', 'GetMinTotalsPeriod')}
+    'ПолучитьМинимальныйПериодРассчитанныхИтогов', 'GetMinTotalsPeriod',
+    'УстановитьМинимальныйИМаксимальныйПериодыРассчитанныхИтогов', 'SetMinAndMaxTotalsPeriods',
+    'ПолучитьРежимРазделенияИтогов', 'GetTotalsSplittingMode',
+    'УстановитьРежимРазделенияИтогов', 'SetTotalsSplittingMode')}
 
 
 _KINDS_CF = {k.casefold(): module_context_methods(k, 'МодульМенеджера')
