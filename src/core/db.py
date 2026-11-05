@@ -254,6 +254,28 @@ CREATE TABLE IF NOT EXISTS module_stat (
     stat      TEXT NOT NULL DEFAULT ''
 );
 
+-- Отпечаток разобранного объекта метаданных (Indexer.object_digest) при
+-- последней записи. Совпал — реквизиты, формы, свойства и состав подсистемы
+-- объекта не удаляются и не вставляются заново: на крупной конфигурации
+-- перезапись всех объектов при обновлении без изменений шла десятки секунд.
+-- Отдельная таблица (IF NOT EXISTS): индекс старого формата не пересоздаётся.
+CREATE TABLE IF NOT EXISTS object_stat (
+    object_id INTEGER PRIMARY KEY REFERENCES metadata_objects(id) ON DELETE CASCADE,
+    digest    TEXT NOT NULL DEFAULT ''
+);
+
+-- Граф вызовов (calls_resolved) актуален: resolver — отпечаток кода
+-- Indexer.resolve_calls, которым он посчитан; dirty=1 — с тех пор менялись
+-- sources/modules/procedures/calls (Database.mark_graph_dirty в той же
+-- транзакции, что и правка). Нет строки — граф пересчитывается. Обновление
+-- без изменений в выгрузке пропускает пересчёт (секунды на крупной
+-- конфигурации).
+CREATE TABLE IF NOT EXISTS graph_state (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    resolver TEXT NOT NULL DEFAULT '',
+    dirty    INTEGER NOT NULL DEFAULT 1
+);
+
 -- Функции-фабрики общих модулей (Indexer.scan_known_factory_functions) по
 -- файлу: stat — module_file_stat и отпечаток парсера. Разбор всех общих
 -- модулей ради них — минута на крупной конфигурации; при обновлении заново
@@ -598,7 +620,7 @@ class Database:
         if not self.conn:
             self.connect()
         for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes', 'object_properties',
-                      'module_stat', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
+                      'module_stat', 'object_stat', 'graph_state', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:
             self.conn.execute(f"DELETE FROM {table}")
@@ -707,6 +729,42 @@ class Database:
         diagnose_index передаёт своё читающее соединение (read_conn)."""
         conn = conn or self.conn or self.read_conn()
         return {r['source_id']: dict(r) for r in conn.execute("SELECT * FROM parser_state")}
+
+    def mark_graph_dirty(self):
+        """Входы графа вызовов изменились — следующий reindex пересчитает
+        calls_resolved. Без commit: фиксируется вместе с самой правкой."""
+        if not self.conn:
+            self.connect()
+        self.conn.execute("""INSERT INTO graph_state (id, dirty) VALUES (1, 1)
+                             ON CONFLICT(id) DO UPDATE SET dirty = 1""")
+
+    def graph_dirty(self) -> bool:
+        """Граф ждёт пересчёта (нет строки — тоже)."""
+        if not self.conn:
+            self.connect()
+        row = self.conn.execute("SELECT dirty FROM graph_state WHERE id = 1").fetchone()
+        return not row or bool(row[0])
+
+    def set_graph_dirty(self, dirty: bool):
+        """Вернуть флаг, поставленный на время записи (ProjectManager._index_source)."""
+        if not self.conn:
+            self.connect()
+        self.conn.execute("UPDATE graph_state SET dirty = ? WHERE id = 1", (int(dirty),))
+        self.conn.commit()
+
+    def graph_is_current(self, resolver: str) -> bool:
+        if not self.conn:
+            self.connect()
+        row = self.conn.execute("SELECT resolver, dirty FROM graph_state WHERE id = 1").fetchone()
+        return bool(row and resolver and not row[1] and row[0] == resolver)
+
+    def set_graph_resolved(self, resolver: str):
+        if not self.conn:
+            self.connect()
+        self.conn.execute("""INSERT INTO graph_state (id, resolver, dirty) VALUES (1, ?, 0)
+                             ON CONFLICT(id) DO UPDATE SET resolver = excluded.resolver, dirty = 0""",
+                          (resolver,))
+        self.conn.commit()
 
     def set_parser_fingerprint(self, source_id: str, fingerprint: str,
                                full_reparse_reason: str = ''):

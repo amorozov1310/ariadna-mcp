@@ -3,7 +3,9 @@ Indexer: populates per-project SQLite from an XML dump of the configuration
 (metadata — index_xml_metadata, BSL code — index_bsl), one source per call.
 """
 
+import functools
 import hashlib
+import inspect
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -60,26 +62,59 @@ class Indexer:
     def __init__(self, db: Database):
         self.db = db
 
+    # Меняется вместе с тем, как index_metadata записывает объект: старые
+    # отпечатки перестают совпадать, и объекты перезаписываются.
+    METADATA_WRITE_VERSION = 1
+
+    @staticmethod
+    @functools.cache
+    def resolver_fingerprint() -> str:
+        """Отпечаток кода resolve_calls: его правка делает сохранённый граф
+        устаревшим (graph_state.resolver). Пусто — исходника нет, граф
+        пересчитывается всегда."""
+        try:
+            source = inspect.getsource(Indexer.resolve_calls)
+        except (OSError, TypeError):
+            return ''
+        return hashlib.sha256(source.replace('\r\n', '\n').encode('utf-8')).hexdigest()[:16]
+
+    @classmethod
+    def object_digest(cls, obj: MetadataObject) -> str:
+        """Отпечаток всего, что index_metadata пишет об объекте: repr
+        dataclass-ов детерминирован (поля и порядок элементов — как в XML),
+        свойства — уже в том виде, в каком попадут в object_properties."""
+        payload = repr((cls.METADATA_WRITE_VERSION, obj, object_properties(obj)))
+        return hashlib.sha1(payload.encode('utf-8')).hexdigest()
+
     def index_xml_metadata(self, xml_path: str, source_id: str = 'main',
-                           source_label: str = '', source_type: str = 'main') -> dict:
+                           source_label: str = '', source_type: str = 'main',
+                           force: bool = False) -> dict:
         """Метаданные из XML-выгрузки Конфигуратора (Configuration.xml и
         файлы объектов)."""
         from .xml_metadata import parse_xml_dump
         start = time.time()
         config, objects = parse_xml_dump(xml_path)
-        return self.index_metadata(config, objects, source_id, source_label, source_type, start)
+        return self.index_metadata(config, objects, source_id, source_label, source_type, start,
+                                   force=force)
 
     def index_metadata(self, config: ConfigInfo, objects: list[MetadataObject],
                        source_id: str = 'main', source_label: str = '',
-                       source_type: str = 'main', start: float | None = None) -> dict:
-        """Write already-parsed metadata (from an XML dump) to the DB."""
+                       source_type: str = 'main', start: float | None = None,
+                       force: bool = False) -> dict:
+        """Write already-parsed metadata (from an XML dump) to the DB. Объекты,
+        чей отпечаток (object_digest) не изменился, не перезаписываются;
+        force — перезаписать все."""
         start = time.time() if start is None else start
         conn = self.db.conn
         if not conn:
             self.db.connect()
             conn = self.db.conn
 
-        # Register source
+        # Register source. Новый источник или сменился его вид — граф вызовов
+        # пересчитать: resolve_calls предпочитает расширения.
+        prev_type = conn.execute("SELECT source_type FROM sources WHERE id=?", (source_id,)).fetchone()
+        if prev_type is None or (prev_type[0] or 'main') != (source_type or 'main'):
+            self.db.mark_graph_dirty()
         conn.execute(
             """INSERT OR REPLACE INTO sources (id, label, source_type, indexed_at)
                VALUES (?, ?, ?, ?)""",
@@ -98,11 +133,33 @@ class Indexer:
             'subsystem_items': 0,
         }
 
+        known = {r[0]: (r[1], r[2]) for r in conn.execute(
+            """SELECT o.full_name, o.id, s.digest FROM metadata_objects o
+               LEFT JOIN object_stat s ON s.object_id = o.id WHERE o.source_id=?""", (source_id,))}
+        stats['unchanged'] = 0
+
         for obj in objects:
+            digest = self.object_digest(obj)
+            prev = known.get(obj.full_name)
+            if prev and prev[1] == digest and not force:
+                # Объект не изменился с прошлой записи — строки уже те же.
+                stats['objects'] += 1
+                stats['unchanged'] += 1
+                stats['attributes'] += len(obj.attributes) + sum(len(a) for a in obj.tabular_sections.values())
+                stats['tabular_sections'] += len(obj.tabular_sections)
+                stats['forms'] += len(obj.forms)
+                stats['enum_values'] += len(obj.enum_values)
+                stats['modules'] += 1 if obj.module_info else 0
+                stats['subsystem_items'] += len(obj.subsystem_info.content) if obj.subsystem_info else 0
+                continue
             obj_id = self._insert_object(conn, obj, source_id)
             if not obj_id:
                 continue
             stats['objects'] += 1
+            conn.execute("INSERT OR REPLACE INTO object_stat (object_id, digest) VALUES (?, ?)",
+                         (obj_id, digest))
+            if obj.module_info:
+                self.db.mark_graph_dirty()      # флаги общего модуля (is_global — в resolve_calls)
 
             # Этап 4/D7: obj_id may be a pre-existing row (UPSERT above),
             # in which case its attributes/forms/subsystem_content are
@@ -189,6 +246,7 @@ class Indexer:
         if stale_ids:
             placeholders = ','.join('?' * len(stale_ids))
             conn.execute(f"DELETE FROM metadata_objects WHERE id IN ({placeholders})", stale_ids)
+            self.db.mark_graph_dirty()          # каскадом удаляются и модули объектов
 
         conn.commit()
 
