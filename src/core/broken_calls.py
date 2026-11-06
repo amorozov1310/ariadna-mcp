@@ -28,49 +28,8 @@
 
 import re
 
-from .bsl_reference import module_context_methods
+from .bsl_reference import is_platform_manager_method, module_context_methods
 
-# Платформенные методы менеджеров, которых нет в контексте модуля менеджера
-# (bsl_reference) и в стоп-листе парсера: вызов `Справочники.Х.Метод()` с
-# таким именем — платформа, а не процедура модуля менеджера. Здесь, а не в
-# парсере: его правка переразбирает все индексы (parser_fingerprint).
-_PLATFORM_MANAGER_EXTRA = {s.lower() for s in (
-    'ПолучитьДанныеВыбора', 'GetChoiceData', 'ПолучитьФормуВыбора', 'GetChoiceForm',
-    'ПолучитьФормуСписка', 'GetListForm', 'ПолучитьФормуОбъекта', 'GetObjectForm',
-    'ПолучитьФормуНовогоОбъекта', 'GetNewObjectForm', 'ПолучитьИменаПредопределенных',
-    'GetPredefinedItemNames', 'Индекс', 'IndexOf', 'Получить', 'Get',
-    'ПолучитьПредставлениеПоляДанных', 'ПолучитьФормуЗаписи', 'GetRecordForm',
-    'Остатки', 'Balance', 'Обороты', 'Turnovers', 'ОстаткиИОбороты', 'BalanceAndTurnovers',
-    'ОборотыДтКт', 'TurnoversDrCr', 'ДвиженияССубконто', 'RecordsWithExtDimensions',
-    'ВыбратьПоРегистратору', 'SelectByRecorder', 'СрезПоследних', 'SliceLast',
-    'СрезПервых', 'SliceFirst', 'ПолучитьПоследнее', 'GetLast', 'ПолучитьПервое', 'GetFirst',
-    'Создать', 'Create', 'ПолучитьСсылку', 'GetRef', 'ПустаяСсылка', 'EmptyRef',
-    'Выбрать', 'Select', 'ВыбратьИерархически', 'SelectHierarchically',
-    'НайтиПоКоду', 'FindByCode', 'НайтиПоНаименованию', 'FindByDescription',
-    'НайтиПоНомеру', 'FindByNumber', 'НайтиПоРеквизиту', 'FindByAttribute',
-    'ПолучитьМакет', 'GetTemplate', 'ПолучитьФорму', 'GetForm', 'ЭтотУзел', 'ThisNode',
-    'СоздатьКлючЗаписи', 'CreateRecordKey', 'ПустойКлюч', 'EmptyKey',
-    'СоздатьНаборЗаписей', 'CreateRecordSet', 'СоздатьМенеджерЗаписи', 'CreateRecordManager',
-    'Количество', 'Count', 'ПолучитьИмяПредопределенного', 'GetPredefinedItemName',
-    'УстановитьИнициализациюПредопределенныхДанных', 'SetPredefinedDataInitialization',
-    'ПолучитьИнициализациюПредопределенныхДанных', 'GetPredefinedDataInitialization',
-    # Итоги регистров накопления и бухгалтерии
-    'УстановитьИспользованиеИтогов', 'SetTotalsUse', 'ПолучитьИспользованиеИтогов', 'GetTotalsUse',
-    'УстановитьИспользованиеТекущихИтогов', 'SetPresentTotalsUse',
-    'ПолучитьИспользованиеТекущихИтогов', 'GetPresentTotalsUse',
-    'УстановитьИспользованиеРазделенияИтогов', 'SetTotalsSplittingMode',
-    'ПолучитьИспользованиеРазделенияИтогов', 'GetTotalsSplittingMode',
-    'ПересчитатьИтоги', 'RecalcTotals', 'ПересчитатьТекущиеИтоги', 'RecalcPresentTotals',
-    'ПересчитатьИтогиЗаПериод', 'RecalcTotalsForPeriod',
-    'УстановитьПериодРассчитанныхИтогов', 'SetTotalsPeriod',
-    'ПолучитьПериодРассчитанныхИтогов', 'GetTotalsPeriod',
-    'УстановитьМаксимальныйПериодРассчитанныхИтогов', 'SetMaxTotalsPeriod',
-    'ПолучитьМаксимальныйПериодРассчитанныхИтогов', 'GetMaxTotalsPeriod',
-    'УстановитьМинимальныйПериодРассчитанныхИтогов', 'SetMinTotalsPeriod',
-    'ПолучитьМинимальныйПериодРассчитанныхИтогов', 'GetMinTotalsPeriod',
-    'УстановитьМинимальныйИМаксимальныйПериодыРассчитанныхИтогов', 'SetMinAndMaxTotalsPeriods',
-    'ПолучитьРежимРазделенияИтогов', 'GetTotalsSplittingMode',
-    'УстановитьРежимРазделенияИтогов', 'SetTotalsSplittingMode')}
 
 
 _KINDS_CF = {k.casefold(): module_context_methods(k, 'МодульМенеджера')
@@ -82,7 +41,7 @@ _KINDS_CF = {k.casefold(): module_context_methods(k, 'МодульМенедже
 
 def _platform_manager_method(module_cf: str, proc_cf: str) -> bool:
     kind = module_cf.split('.', 1)[0]
-    return proc_cf in _PLATFORM_MANAGER_EXTRA or proc_cf in _KINDS_CF.get(kind, set())
+    return is_platform_manager_method(kind, proc_cf) or proc_cf in _KINDS_CF.get(kind, set())
 
 
 def _direct(context: str, module: str, proc: str) -> bool:

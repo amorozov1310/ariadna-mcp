@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .bsl_reference import (
     CONSTRUCTOR_TYPES_RU,
+    is_platform_manager_method,
     CONSTRUCTOR_TYPES_EN,
     SYSTEM_ENUMERATIONS_RU,
     SYSTEM_ENUMERATIONS_EN,
@@ -426,6 +427,20 @@ _MANAGER_ALIAS = '\x00manager:'
 # через неё не считается ни вызовом менеджера, ни вызовом модуля.
 _AMBIGUOUS_ALIAS = '\x00ambiguous'
 _VALUE_TARGET = '\x00value'
+
+# Блоки кода для «какое присваивание достигает вызова» (переменные-менеджеры):
+# открытие, соседняя ветка, закрытие. Строки и комментарии уже вырезаны.
+_RE_BLOCK_TOKEN = re.compile(
+    r'(?<![.А-Яа-яЁёA-Za-z0-9_])'
+    r'(ИначеЕсли|ElsIf|Иначе|Else|Исключение|Except|'
+    r'КонецЕсли|EndIf|КонецЦикла|EndDo|КонецПопытки|EndTry|'
+    r'Если|If|Для|For|Пока|While|Попытка|Try)'
+    r'(?![А-Яа-яЁёA-Za-z0-9_])',
+    re.IGNORECASE
+)
+_BLOCK_OPEN = {'если', 'if', 'для', 'for', 'пока', 'while', 'попытка', 'try'}
+_BLOCK_SIBLING = {'иначеесли', 'elsif', 'иначе', 'else', 'исключение', 'except'}
+_RE_DOTTED_VAR = re.compile(r'(?<![.А-Яа-яЁёA-Za-z0-9_])([А-Яа-яЁёA-Za-z_][А-Яа-яЁёA-Za-z0-9_]*)\s*\.')
 
 
 # Общее правило «присвоено не-модуль» (Этап 7, остаток). В 1С переменная
@@ -897,11 +912,15 @@ class BSLParser:
         # id(proc) -> {lowercased alias var name: lowercased real module
         # name} — see _RE_BARE_ALIAS_ASSIGN / _RE_DYNAMIC_MODULE_LOAD above.
         module_aliases: dict[int, dict[str, str]] = {}
-        # id(proc) -> {var: {что ей присваивается: псевдоним-менеджер или
-        # «значение»}} — переменная-менеджер считается псевдонимом, только если
-        # в процедуре ей присваивается один и тот же менеджер (псевдоним не
-        # знает позиции: `М = Отчеты.А` в одной ветке и `М = Отчеты.Б` в другой).
-        assign_targets: dict[int, dict[str, set[str]]] = {}
+        # Переменные-менеджеры (`М = Отчеты.А`): какое присваивание достигает
+        # вызова `М.Метод()`. id(proc) (None — раздел основной программы) ->
+        # [(строка, путь блоков, переменная, менеджер или «значение»)];
+        # (id(proc), строка) -> путь блоков этой строки. См. _manager_overrides.
+        mgr_events: dict[int | None, list[tuple[int, tuple, str, str]]] = {}
+        line_paths: dict[tuple[int, int], tuple] = {}
+        block_stack: list[int] = []
+        block_seq = 0
+        block_owner = None
 
         # {lowercased name} declared via a module-level "Перем X;" (always
         # before any Процедура/Функция in valid BSL) — a var assigned in
@@ -1111,6 +1130,11 @@ class BSLParser:
             # Body line — call extraction is deferred to the second pass
             # below, once the full set of this module's procedure names
             # is known (D2).
+            if current_proc is None and procedures:
+                # Раздел основной программы — инициализация переменных модуля.
+                self._record_assignments(self._remove_comments(stripped), line_num, (),
+                                         mgr_events.setdefault(None, []))
+                continue
             if current_proc:
                 pending.append((current_proc, stripped, line_num))
                 clean_for_ctor = self._remove_strings_and_comments(stripped)
@@ -1153,18 +1177,17 @@ class BSLParser:
                     if var_name in module_level_var_names:
                         module_level_aliases[var_name] = load_m.group(2)
                 for var_name, target in self._extra_aliases(clean_comments_only):
+                    if target.startswith(_MANAGER_ALIAS):
+                        continue        # переменные-менеджеры — по присваиваниям ниже
                     proc_aliases[var_name] = target
                     if var_name in module_level_var_names:
                         module_level_aliases[var_name] = target
-                proc_targets = assign_targets.setdefault(id(current_proc), {})
-                for assign_m in _RE_VALUE_ASSIGN.finditer(clean_comments_only):
-                    rhs = assign_m.group(2).strip()
-                    if rhs.casefold() in ('неопределено', 'undefined'):
-                        continue
-                    var_name = assign_m.group(1).lower()
-                    found = self._extra_aliases(f'{assign_m.group(1)} = {rhs};')
-                    proc_targets.setdefault(var_name, set()).add(
-                        found[0][1] if found else _VALUE_TARGET)
+                if block_owner is not current_proc:
+                    block_owner, block_stack = current_proc, []
+                path, block_seq = self._block_path(clean_for_ctor, block_stack, block_seq)
+                line_paths[(id(current_proc), line_num)] = path
+                self._record_assignments(clean_comments_only, line_num, path,
+                                         mgr_events.setdefault(id(current_proc), []))
                 for alias_m in _RE_BARE_ALIAS_ASSIGN.finditer(clean_for_ctor):
                     target = alias_m.group(2)
                     if target.lower() in self.known_modules:
@@ -1276,15 +1299,17 @@ class BSLParser:
         # can be told apart from real local calls (D2).
         local_proc_names = {p.name.lower() for p in procedures}
         calls = list(synthetic_calls)
+        # Переменная модуля (Перем): присваивания по всему модулю — в любой
+        # процедуре и в разделе основной программы. Порядок вызова процедур
+        # неизвестен: менеджер — только если он везде один.
+        module_mgr: dict[str, set[str]] = {}
+        for events in mgr_events.values():
+            for _line, _path, var, target in events:
+                if var in module_level_var_names:
+                    module_mgr.setdefault(var, set()).add(target)
         for proc, stripped, line_num in pending:
             proc_vars = constructed_vars.get(id(proc)) or set()
             proc_aliases = module_aliases.get(id(proc)) or {}
-            targets = assign_targets.get(id(proc)) or {}
-            if any(v.startswith(_MANAGER_ALIAS) and len(targets.get(k, ())) > 1
-                   for k, v in proc_aliases.items()):
-                proc_aliases = {k: (_AMBIGUOUS_ALIAS if v.startswith(_MANAGER_ALIAS)
-                                    and len(targets.get(k, ())) > 1 else v)
-                                for k, v in proc_aliases.items()}
             # Module-level Перем vars are visible in every procedure, not
             # just the one that happened to construct/alias them — merge
             # last so a per-procedure shadow (a local of the same name)
@@ -1293,6 +1318,11 @@ class BSLParser:
                 proc_vars = proc_vars | module_level_constructed
             if module_level_aliases:
                 proc_aliases = {**module_level_aliases, **proc_aliases}
+            overrides = self._manager_overrides(
+                stripped, line_num, line_paths.get((id(proc), line_num), ()),
+                mgr_events.get(id(proc), ()), module_mgr, module_level_var_names)
+            if overrides:
+                proc_aliases = {**proc_aliases, **overrides}
             calls.extend(self._extract_calls(stripped, line_num, proc, local_proc_names,
                                               proc_vars, proc_aliases, context_methods))
 
@@ -1336,6 +1366,77 @@ class BSLParser:
         if bucket and obj_name.lower() not in bucket:
             return None
         return f'{_MANAGER_ALIAS}{singular}.{obj_name}'
+
+    @staticmethod
+    def _block_path(clean: str, stack: list[int], seq: int) -> tuple[tuple, int]:
+        """Путь блоков строки (Если/Для/Пока/Попытка, их ветки). Открытие и
+        соседняя ветка действуют на саму строку, закрытие — на следующие:
+        `Если А Тогда М = Х; КонецЕсли;` — присваивание внутри ветки."""
+        closes = 0
+        for m in _RE_BLOCK_TOKEN.finditer(clean):
+            word = m.group(1).lower()
+            if word in _BLOCK_OPEN:
+                seq += 1
+                stack.append(seq)
+            elif word in _BLOCK_SIBLING:
+                if stack:
+                    stack.pop()
+                seq += 1
+                stack.append(seq)
+            else:
+                closes += 1
+        path = tuple(stack)
+        for _ in range(closes):
+            if stack:
+                stack.pop()
+        return path, seq
+
+    def _record_assignments(self, text: str, line_num: int, path: tuple,
+                            events: list) -> None:
+        """Присваивания строки для переменных-менеджеров: менеджер или
+        «значение»; `= Неопределено` не в счёт."""
+        for m in _RE_VALUE_ASSIGN.finditer(text):
+            rhs = m.group(2).strip()
+            if not rhs or rhs.casefold() in ('неопределено', 'undefined'):
+                continue
+            found = [t for _, t in self._extra_aliases(f'{m.group(1)} = {rhs};')
+                     if t.startswith(_MANAGER_ALIAS)]
+            events.append((line_num, path, m.group(1).lower(),
+                           found[0] if found else _VALUE_TARGET))
+
+    @staticmethod
+    def _manager_overrides(line: str, line_num: int, path: tuple, events,
+                           module_mgr: dict[str, set[str]],
+                           module_vars: set[str]) -> dict[str, str]:
+        """Псевдонимы-менеджеры для вызовов `Переменная.Метод(` этой строки.
+
+        Достигают вызова: последнее присваивание выше на пути блоков вызова
+        (в той же ветке или во внешнем блоке) и присваивания после него в
+        соседних, уже закрытых ветках (после КонецЕсли переменная могла прийти
+        из любой). Нет присваивания на пути — у переменной модуля в счёт идут
+        её присваивания по всему модулю. Один менеджер — псевдоним; несколько
+        или менеджер вместе со значением — вызов неоднозначен и пропускается;
+        только значения — решают прежние правила (переменная-значение)."""
+        names = {m.group(1).lower() for m in _RE_DOTTED_VAR.finditer(line)}
+        if not names:
+            return {}
+        result = {}
+        for var in names:
+            evs = [e for e in events if e[2] == var and e[0] < line_num]
+            if not evs and var not in module_mgr:
+                continue
+            dom = [e for e in evs if path[:len(e[1])] == e[1]]
+            last = dom[-1] if dom else None
+            targets = {last[3]} if last else set()
+            if last is None and var in module_vars:
+                targets |= module_mgr.get(var, set())
+            after = last[0] if last else 0
+            targets |= {e[3] for e in evs if e[0] > after and path[:len(e[1])] != e[1]}
+            managers = {t for t in targets if t.startswith(_MANAGER_ALIAS)}
+            if not managers:
+                continue
+            result[var] = managers.pop() if len(targets) == 1 else _AMBIGUOUS_ALIAS
+        return result
 
     def _extra_aliases(self, text: str) -> list[tuple[str, str]]:
         """Переменные-модули и переменные-менеджеры строки (без комментариев,
@@ -1399,7 +1500,8 @@ class BSLParser:
                 continue
 
             # Skip standard platform manager methods (not user code)
-            if method_name.lower() in _PLATFORM_MANAGER_METHODS:
+            if (method_name.lower() in _PLATFORM_MANAGER_METHODS
+                    or is_platform_manager_method(singular, method_name)):
                 continue
 
             # Validate the object name against Pass 1's fact base, when we
@@ -1440,7 +1542,9 @@ class BSLParser:
             if aliased and aliased.startswith(_MANAGER_ALIAS):
                 # Переменная-менеджер: вызов процедуры модуля менеджера,
                 # как трёхчастный `Справочники.Имя.Метод(`.
-                if method_name.lower() in _PLATFORM_MANAGER_METHODS:
+                if (method_name.lower() in _PLATFORM_MANAGER_METHODS
+                    or is_platform_manager_method(
+                        aliased[len(_MANAGER_ALIAS):].split('.', 1)[0], method_name)):
                     continue
                 module_full = f'{aliased[len(_MANAGER_ALIAS):]}.МодульМенеджера'
                 calls.append(CallInfo(
