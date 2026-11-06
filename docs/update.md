@@ -49,9 +49,9 @@
   ```
 
 - **Каталог выгрузки** (`-DumpDir`) — постоянный, с путём латиницей
-  (например, `D:\Dumps\erp`). Его нельзя очищать между запусками: по файлу
+  (например, `D:\Dumps\myconf`). Его нельзя очищать между запусками: по файлу
   `ConfigDumpInfo.xml` в нём платформа выгружает только изменения. Место —
-  примерно как у самой выгрузки (ERP — около 9 ГБ).
+  примерно как у самой выгрузки (у крупной типовой — около 9 ГБ).
 - **curl.exe** — есть в Windows 10 1803 и новее.
 
 Скопируйте `scripts/update_from_infobase.ps1` на машину робота.
@@ -64,8 +64,8 @@
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File D:\Ariadna\update_from_infobase.ps1 `
-    -AriadnaUrl http://ariadna.lan:19878 -Project erp `
-    -InfoBaseServer "srv1c\erp" -User "Робот" -DumpDir D:\Dumps\erp
+    -AriadnaUrl http://ariadna.lan:19878 -Project myconf `
+    -InfoBaseServer "srv1c\myconf" -User "Робот" -DumpDir D:\Dumps\myconf
 ```
 
 В конце — строка `Готово: индекс Ариадны обновлён` и код возврата 0.
@@ -92,7 +92,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\Ariadna\update_from_infob
 ### Архивом или в папку
 
 - **Архивом** (по умолчанию) — работает с любой машины, которой доступен
-  адрес Ариадны. Передаётся вся выгрузка без макетов (ERP — несколько сотен
+  адрес Ариадны. Передаётся вся выгрузка без макетов (у крупной типовой — несколько сотен
   мегабайт в архиве).
 - **В папку** (`-TargetRoot`) — быстрее: `robocopy /MIR` копирует только
   изменённые файлы. Нужен доступ к папке источников проекта на сервере
@@ -109,14 +109,14 @@ PowerShell от имени администратора, пользовател�
 ```powershell
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
     '-NoProfile -ExecutionPolicy Bypass -File "D:\Ariadna\update_from_infobase.ps1" ' +
-    '-AriadnaUrl http://ariadna.lan:19878 -Project erp -InfoBaseServer "srv1c\erp" ' +
-    '-User "Робот" -DumpDir "D:\Dumps\erp"')
+    '-AriadnaUrl http://ariadna.lan:19878 -Project myconf -InfoBaseServer "srv1c\myconf" ' +
+    '-User "Робот" -DumpDir "D:\Dumps\myconf"')
 $trigger = New-ScheduledTaskTrigger -Daily -At '02:00'
-Register-ScheduledTask -TaskName 'Ариадна — обновление erp' -Action $action -Trigger $trigger `
+Register-ScheduledTask -TaskName 'Ариадна — обновление myconf' -Action $action -Trigger $trigger `
     -User 'DOMAIN\robot' -Password 'пароль Windows' -RunLevel Highest
 ```
 
-Проверить сразу, не дожидаясь ночи: `Start-ScheduledTask -TaskName 'Ариадна — обновление erp'`.
+Проверить сразу, не дожидаясь ночи: `Start-ScheduledTask -TaskName 'Ариадна — обновление myconf'`.
 
 ## 5. Результат и журналы
 
@@ -136,11 +136,11 @@ Register-ScheduledTask -TaskName 'Ариадна — обновление erp' -
 ```bash
 # Выгрузка уже лежит в папке источника — переиндексировать и дождаться
 curl -X POST -H "Authorization: Bearer ar_..." \
-     http://ariadna.lan:19878/api/projects/erp/sources/main/refresh
+     http://ariadna.lan:19878/api/projects/myconf/sources/main/refresh
 
 # Новая выгрузка архивом
 curl -X POST -H "Authorization: Bearer ar_..." -F "xml_archive=@dump.zip" \
-     http://ariadna.lan:19878/api/projects/erp/sources/main/refresh
+     http://ariadna.lan:19878/api/projects/myconf/sources/main/refresh
 ```
 
 Поля формы: `xml_archive` — архив выгрузки (необязательно; старая папка

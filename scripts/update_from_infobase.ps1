@@ -26,14 +26,14 @@
 
 .EXAMPLE
     # Файловая база, обновление архивом по сети, токен в переменной ARIADNA_TOKEN
-    .\update_from_infobase.ps1 -InfoBaseFile "D:\Bases\ERP" -User "Робот" -DumpDir "D:\Dumps\erp" `
-        -AriadnaUrl "http://ariadna.lan:19878" -Project erp
+    .\update_from_infobase.ps1 -InfoBaseFile "D:\Bases\MyConf" -User "Робот" -DumpDir "D:\Dumps\myconf" `
+        -AriadnaUrl "http://ariadna.lan:19878" -Project myconf
 
 .EXAMPLE
     # Серверная база с расширениями, выгрузка в общую папку сервера Ариадны
-    .\update_from_infobase.ps1 -InfoBaseServer "srv1c\erp_work" -User "Робот" -DumpDir "D:\Dumps\erp" `
-        -Extensions "Расширение1","Расширение2" -TargetRoot "\\ariadna\data\projects\erp\sources" `
-        -AriadnaUrl "http://ariadna.lan:19878" -Project erp
+    .\update_from_infobase.ps1 -InfoBaseServer "srv1c\myconf" -User "Робот" -DumpDir "D:\Dumps\myconf" `
+        -Extensions "Расширение1","Расширение2" -TargetRoot "\\ariadna\data\projects\myconf\sources" `
+        -AriadnaUrl "http://ariadna.lan:19878" -Project myconf
 #>
 [CmdletBinding()]
 param(
