@@ -186,6 +186,9 @@ async def playground_execute(request: Request, project_id: str):
         result_text = f"Error: unknown tool '{tool_name}'"
     else:
         args, result_text = build_args(schemas[tool_name], params, project_id)
+        from .routes_auth import is_admin
+        if args is not None and tool_name == 'remove_source' and args.get('confirm')                 and not is_admin(request):
+            args, result_text = None, 'Error: Удаление источника — только для администратора (роль admin)'
         if args is not None:
             try:
                 result_text = await run_in_threadpool(execute_tool, pm, tool_name, args)

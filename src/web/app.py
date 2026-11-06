@@ -235,6 +235,7 @@ from .routes_playground import router as playground_router
 from .routes_glossary import router as glossary_router
 from .routes_diff import router as diff_router
 from .routes_checks import router as checks_router
+from .routes_auth import router as auth_router
 
 app.include_router(projects_router)
 app.include_router(search_router)
@@ -242,3 +243,4 @@ app.include_router(playground_router)
 app.include_router(glossary_router)
 app.include_router(diff_router)
 app.include_router(checks_router)
+app.include_router(auth_router)

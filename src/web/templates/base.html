@@ -53,6 +53,17 @@
     'overview': '', 'search': '/search', 'graph': '/graph',
     'playground': '/playground', 'glossary': '/glossary', 'diff': '/diff', 'checks': '/checks',
     'settings': '/settings'} %}
+{% set auth_user = request.state.user if request is defined and request.state.user is defined else none %}
+{% macro user_menu() %}
+{% if auth_user %}
+<span class="appbar-user" title="Роль: {{ auth_user.role }}">
+    {% if auth_user.role == 'admin' %}<a href="/admin/tokens" class="navlink">
+        <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#key"/></svg> Токены</a>{% endif %}
+    <span class="text-muted">{{ auth_user.name }}</span>
+    <a href="/logout" class="navlink">Выйти</a>
+</span>
+{% endif %}
+{% endmacro %}
 {% macro theme_toggle() %}
 <button type="button" class="theme-toggle" onclick="toggleTheme()"
         title="Переключить тему" aria-label="Переключить светлую и тёмную тему">
@@ -131,6 +142,7 @@
                        aria-label="Поиск по конфигурации" value="{{ query|default('', true) }}">
             </label>
         </form>
+        {{ user_menu() }}
         {{ theme_toggle() }}
     </div>
     {% else %}
@@ -139,8 +151,11 @@
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#folder"/></svg> Проекты</a>
     </nav>
     <div class="appbar-right">
+        {% if not auth_user or auth_user.role == 'admin' %}
         <a href="/projects/new" class="btn btn-primary btn-sm">
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg> Создать проект</a>
+        {% endif %}
+        {{ user_menu() }}
         {{ theme_toggle() }}
     </div>
     {% endif %}

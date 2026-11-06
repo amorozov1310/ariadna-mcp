@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import os
 import re
 import secrets
 import subprocess
@@ -126,14 +127,27 @@ class LiveContext:
     quick: bool = False
     docker_container: str | None = None
     project: str | None = None
+    token: str | None = None           # личный токен (командный сервер, docs/team.md)
     temp_id: str = field(default_factory=lambda: PREFIX + secrets.token_hex(3))
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     log: callable = print
 
     # ── Web UI ──
 
+    def auth_headers(self) -> dict:
+        return {'Authorization': f'Bearer {self.token}'} if self.token else {}
+
     def http(self) -> httpx2.Client:
-        return httpx2.Client(base_url=self.web.rstrip('/'), timeout=60, follow_redirects=False)
+        return httpx2.Client(base_url=self.web.rstrip('/'), timeout=60, follow_redirects=False,
+                             headers=self.auth_headers())
+
+    def mcp_client(self) -> 'Client':
+        """Клиент MCP; с токеном — через свой HTTP-клиент с заголовком."""
+        if not self.token:
+            return Client(self.mcp)
+        from mcp.client.streamable_http import streamable_http_client
+        return Client(streamable_http_client(
+            self.mcp, http_client=httpx2.AsyncClient(headers=self.auth_headers(), timeout=60)))
 
     def web_get(self, path: str, **kw) -> httpx2.Response:
         with self.http() as c:
@@ -193,7 +207,7 @@ class LiveContext:
     def call(self, tool: str, args: dict) -> tuple[str, bool]:
         """Один вызов инструмента в своём сеансе MCP: (текст, isError)."""
         async def go():
-            async with Client(self.mcp) as client:
+            async with self.mcp_client() as client:
                 return await call_tool(client, tool, args)
         return asyncio.run(go())
 
@@ -231,7 +245,7 @@ def check_regression(ctx: LiveContext) -> list[Result]:
     out = []
 
     async def server_side():
-        async with Client(ctx.mcp) as client:
+        async with ctx.mcp_client() as client:
             tools = await client.list_tools()
             missing = await call_tool(client, 'get_index_status', {'project_id': PREFIX + 'нет_такого'})
             return client.server_info, tools.tools, missing
@@ -257,7 +271,7 @@ def check_regression(ctx: LiveContext) -> list[Result]:
     mcp_headers = {'Accept': 'application/json, text/event-stream', 'Content-Type': 'application/json'}
     port = httpx2.URL(ctx.mcp).port
     web_port = httpx2.URL(ctx.web).port
-    with httpx2.Client(timeout=30) as c:
+    with httpx2.Client(timeout=30, headers=ctx.auth_headers()) as c:
         def mcp_post(**headers):
             return c.post(ctx.mcp, json=init, headers={**mcp_headers, **headers}).status_code
 
@@ -290,7 +304,7 @@ def check_indexing(ctx: LiveContext) -> list[Result]:
     pid = ctx.temp_id
 
     async def go():
-        async with Client(ctx.mcp) as client:
+        async with ctx.mcp_client() as client:
             started = await call_tool(client, 'reindex', {'project_id': pid})
             status = await call_tool(client, 'get_index_status', {'project_id': pid})
             return started, status
@@ -327,7 +341,7 @@ def check_playground_parity(ctx: LiveContext) -> list[Result]:
 
     async def mcp_answers(cases):
         answers = {}
-        async with Client(ctx.mcp) as client:
+        async with ctx.mcp_client() as client:
             for tool, args in cases:
                 answers[tool] = await call_tool(client, tool, {'project_id': pid, **args}
                                                 if tool != 'list_projects' else args)
@@ -396,7 +410,7 @@ def _docker_path_exists(ctx: LiveContext, path: str) -> bool:
 def _mcp_reader(ctx: LiveContext, pid: str, stop: threading.Event, warmed: threading.Event,
                 bad: list, calls: list) -> None:
     async def loop():
-        async with Client(ctx.mcp) as client:
+        async with ctx.mcp_client() as client:
             while not stop.is_set():
                 for tool, args in (('search_procedures', {'query': 'Рассчитать'}),
                                    ('get_index_status', {})):
@@ -483,7 +497,7 @@ def check_stress(ctx: LiveContext) -> list[Result]:
 
     def reader():
         async def loop():
-            async with Client(ctx.mcp) as client:
+            async with ctx.mcp_client() as client:
                 while not stop.is_set():
                     text, err = await call_tool(client, 'list_projects', {})
                     reads.append(1)
@@ -539,7 +553,7 @@ def check_owner_project(ctx: LiveContext) -> list[Result]:
     out = []
 
     async def go():
-        async with Client(ctx.mcp) as client:
+        async with ctx.mcp_client() as client:
             t0 = time.perf_counter()
             procs = await call_tool(client, 'search_procedures', {'project_id': pid, 'query': 'Получить',
                                                                   'limit': 5})
@@ -639,6 +653,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--project', help='существующий проект: проверки только на чтение')
     parser.add_argument('--quick', action='store_true', help='короткий режим: 1 прогон удаления, стресс 5 с')
     parser.add_argument('--docker-container', help='имя контейнера: проверки через docker exec/logs')
+    parser.add_argument('--token', default=os.environ.get('ARIADNA_TOKEN'),
+                        help='личный токен администратора (если на сервере включены токены; '
+                             'по умолчанию — переменная ARIADNA_TOKEN)')
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         # Консоль Windows в кодировке cp1252 не уронит вывод на кириллице.
@@ -647,7 +664,8 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
     ctx = LiveContext(web=args.web, mcp=args.mcp, quick=args.quick,
-                      docker_container=args.docker_container, project=args.project)
+                      docker_container=args.docker_container, project=args.project,
+                      token=args.token)
     try:
         ctx.web_get('/health').raise_for_status()
     except Exception as e:

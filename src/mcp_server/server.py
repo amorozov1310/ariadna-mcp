@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 logger = logging.getLogger('ariadna')
 
 try:
-    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver import Context, MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import CallToolResult, TextContent, ToolAnnotations
     from pydantic import BaseModel, Field
@@ -131,6 +131,19 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
 
     mcp = MCPServer("ariadna", title="Ариадна", instructions=INSTRUCTIONS,
                     version=__version__)
+    from ..auth import TokenStore
+    tokens = TokenStore(pm.data_dir)
+
+    def _require_admin(ctx, action: str) -> None:
+        """Командный сервер (есть токены): действие — только для роли admin.
+        Пользователь — из scope, его кладёт MCPAuthMiddleware после проверки
+        токена (заголовкам клиента как таковым не доверяем)."""
+        if not tokens.enabled():
+            return
+        request = getattr(ctx.request_context, 'request', None)
+        user = (getattr(request, 'scope', None) or {}).get('ariadna_user')
+        if user is None or user.role != 'admin':
+            raise ToolError(f'{action} — только для администратора (роль admin)')
 
     def run(name: str, **kwargs) -> str:
         # Ошибка инструмента уходит клиенту с isError=true — как и ошибки
@@ -248,9 +261,12 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     )
     def remove_source(
         source_id: Annotated[str, Field(description="ID источника для удаления")],
+        ctx: Context,
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         confirm: Annotated[bool, Field(description="Подтверждение удаления — без true ничего не удаляется")] = False,
     ) -> str:
+        if confirm:
+            _require_admin(ctx, 'Удаление источника')
         return run('remove_source', project_id=project_id, source_id=source_id, confirm=confirm)
 
     # ── Metadata search ──
