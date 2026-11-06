@@ -604,14 +604,42 @@ PLATFORM_MANAGER_METHODS = {s.lower() for s in (
 # `Get` — может быть своя процедура модуля менеджера (`Catalogs.Node.Create()`).
 _KIND_ONLY = {s.lower() for s in ('Создать', 'Create', 'Получить', 'Get',
                                   'Индекс', 'IndexOf', 'Количество', 'Count')}
+# Методы регистров (итоги, остатки, наборы записей…): у документа или
+# справочника с таким именем бывает своя процедура менеджера
+# (`Документы.Х.ПересчитатьИтоги()`).
+_REGISTER_ONLY = {s.lower() for s in (
+    'УстановитьИспользованиеИтогов', 'SetTotalsUse', 'ПолучитьИспользованиеИтогов', 'GetTotalsUse',
+    'УстановитьИспользованиеТекущихИтогов', 'SetPresentTotalsUse',
+    'ПолучитьИспользованиеТекущихИтогов', 'GetPresentTotalsUse',
+    'УстановитьИспользованиеРазделенияИтогов', 'SetTotalsSplittingMode',
+    'ПолучитьИспользованиеРазделенияИтогов', 'GetTotalsSplittingMode',
+    'ПересчитатьИтоги', 'RecalcTotals', 'ПересчитатьТекущиеИтоги', 'RecalcPresentTotals',
+    'ПересчитатьИтогиЗаПериод', 'RecalcTotalsForPeriod',
+    'УстановитьПериодРассчитанныхИтогов', 'SetTotalsPeriod',
+    'ПолучитьПериодРассчитанныхИтогов', 'GetTotalsPeriod',
+    'УстановитьМаксимальныйПериодРассчитанныхИтогов', 'SetMaxTotalsPeriod',
+    'ПолучитьМаксимальныйПериодРассчитанныхИтогов', 'GetMaxTotalsPeriod',
+    'УстановитьМинимальныйПериодРассчитанныхИтогов', 'SetMinTotalsPeriod',
+    'ПолучитьМинимальныйПериодРассчитанныхИтогов', 'GetMinTotalsPeriod',
+    'УстановитьМинимальныйИМаксимальныйПериодыРассчитанныхИтогов', 'SetMinAndMaxTotalsPeriods',
+    'ПолучитьРежимРазделенияИтогов', 'УстановитьРежимРазделенияИтогов',
+    'Остатки', 'Balance', 'Обороты', 'Turnovers', 'ОстаткиИОбороты', 'BalanceAndTurnovers',
+    'ОборотыДтКт', 'TurnoversDrCr', 'ДвиженияССубконто', 'RecordsWithExtDimensions',
+    'ВыбратьПоРегистратору', 'SelectByRecorder', 'СрезПоследних', 'SliceLast',
+    'СрезПервых', 'SliceFirst', 'ПолучитьПоследнее', 'GetLast', 'ПолучитьПервое', 'GetFirst',
+    'СоздатьКлючЗаписи', 'CreateRecordKey', 'ПустойКлюч', 'EmptyKey',
+    'СоздатьНаборЗаписей', 'CreateRecordSet', 'СоздатьМенеджерЗаписи', 'CreateRecordManager',
+    'ПолучитьФормуЗаписи', 'GetRecordForm')}
+_KIND_ONLY = _KIND_ONLY | _REGISTER_ONLY
+_REGISTER_METHODS = {'получить', 'get'} | _REGISTER_ONLY
 _PLATFORM_BY_KIND = {
     'отчет': {'создать', 'create'},
     'обработка': {'создать', 'create'},
     'перечисление': {'индекс', 'indexof', 'количество', 'count', 'получить', 'get'},
-    'регистрсведений': {'получить', 'get'},
-    'регистрнакопления': {'получить', 'get'},
-    'регистрбухгалтерии': {'получить', 'get'},
-    'регистррасчета': {'получить', 'get'},
+    'регистрсведений': _REGISTER_METHODS,
+    'регистрнакопления': _REGISTER_METHODS,
+    'регистрбухгалтерии': _REGISTER_METHODS,
+    'регистррасчета': _REGISTER_METHODS,
 }
 
 
