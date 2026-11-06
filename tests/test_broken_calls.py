@@ -47,6 +47,12 @@ def pm():
                           + '\nПроцедура ВнутренняяЗаказа()\nКонецПроцедуры\n'
                           + '\nПроцедура СвояПроверка() Экспорт\n\tЗаказыСервер.ВнутренняяЗаказа();\n'
                             'КонецПроцедуры\n', encoding='utf-8-sig')
+        # Реквизит своего объекта и стандартный реквизит — не модули.
+        warehouses = xml / 'Catalogs' / 'Склады' / 'Ext' / 'ManagerModule.bsl'
+        warehouses.write_text(warehouses.read_text(encoding='utf-8-sig')
+                              + '\nПроцедура РеквизитыКакМодули() Экспорт\n'
+                                '\tТипСклада.Пересчитать();\n\tСсылка.Заблокировать();\n'
+                                '\tЧужойМодуль.Метод();\nКонецПроцедуры\n', encoding='utf-8-sig')
         manager.add_source('p', 'main', 'Основная')
         manager.reindex('p')
         try:
@@ -78,6 +84,8 @@ def test_broken_calls_kinds(pm):
     assert external['ЮТест']['calls'] == 2 and external['ЮТест']['methods'] == 2
     # Переменная = Вычислить("Модуль") — динамический вызов, а не внешняя библиотека.
     assert 'МодульСкидок' not in external and result['dynamic'] >= 1
+    assert 'ТипСклада' not in external and 'Ссылка' not in external
+    assert 'ЧужойМодуль' in external
 
     assert pm.broken_calls('p', module_name='СвояПроверка') == {
         'missing': [], 'not_export': [], 'external': [], 'dynamic': result['dynamic']}
