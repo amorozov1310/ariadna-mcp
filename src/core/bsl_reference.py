@@ -455,24 +455,89 @@ PLATFORM_FUNCTIONS_EXTRA = {s.lower() for s in [
 #
 # Свойства управляемой формы, доступные в её модуле без «ЭтаФорма.».
 # В модулях других видов эти имена — обычные локальные переменные, тоже не
-# модули. Окно/Window сознательно не включено — не подтверждено.
+# модули. Окно/Window — ФормаКлиентскогоПриложения.Окно (справка платформы).
 FORM_CONTEXT_IDENTIFIERS_RU = {s.lower() for s in [
     'Элементы', 'Параметры', 'ВладелецФормы', 'Команды',
-    'КоманднаяПанель', 'КомандныйИнтерфейс',
+    'КоманднаяПанель', 'КомандныйИнтерфейс', 'Окно',
 ]}
 FORM_CONTEXT_IDENTIFIERS_EN = {s.lower() for s in [
     'Items', 'Parameters', 'FormOwner', 'Commands',
-    'CommandBar', 'CommandInterface',
+    'CommandBar', 'CommandInterface', 'Window',
 ]}
 
-# Объекты глобального контекста, у которых вызывают методы через точку.
-# ОбработкаОшибок/ErrorProcessing — с платформы 8.3.17 (найдено в фикстуре
-# xml_en: ErrorProcessing.DetailErrorDescription писалось вызовом модуля).
+# Свойства глобального контекста (все — по справке платформы 8.3.27,
+# «Глобальный контекст»): `ИмяСвойства.Метод(` — метод объекта платформы, а
+# не вызов общего модуля (`СистемаВзаимодействия.ТекущийПользователь()`,
+# `СериализаторXDTO.ЗаписатьXML(…)`). Коллекции менеджеров (Справочники, …)
+# тоже здесь; трёхчастный `Справочники.Имя.Метод(` разбирается отдельно.
 GLOBAL_CONTEXT_OBJECTS_RU = {s.lower() for s in [
-    'ОбработкаОшибок',
+    'WebSocketКлиентСоединения', 'WebSocketКлиенты', 'WSСсылки',
+    'АгентКлиентскогоПриложения', 'БезопасноеХранилище', 'БиблиотекаКартинок',
+    'БиблиотекаМакетовОформленияКомпоновкиДанных', 'БиблиотекаСтилей',
+    'БизнесПроцессы', 'БлокировкаАутентификации', 'ВнешниеИсточникиДанных',
+    'ВнешниеОбработки', 'ВнешниеОтчеты', 'ВнешниеХранилищаДвоичныхДанных',
+    'ВстроенныеПокупки', 'ГлавныйИнтерфейс', 'ГлавныйСтиль', 'ГлобальныйПоиск',
+    'ДанныеЗапросаПоделитьсяЗапуска', 'ДанныеПереходаПоНавигационнойСсылкеЗапуска',
+    'Документы', 'ДополнительнаяПроверкаПользователя',
+    'ДополнительныеНастройкиАутентификации', 'ДоставляемыеУведомления',
+    'ЖурналыДокументов', 'Задачи', 'ИнформацияОбИнтернетСоединении',
+    'ИспользованиеРабочейДаты', 'ИсторияДанных', 'ИсторияРаботыПользователя',
+    'КлиентскоеПриложение', 'Константы', 'КопииБазыДанных', 'КритерииОтбора',
+    'Метаданные', 'НавигационнаяСсылкаЗапуска', 'ОбменДаннымиСОсновнымСервером',
+    'ОбработкаОшибок', 'ОбработкаСтрокиXML', 'Обработки', 'ОкноВнешнегоСайта',
+    'ОсновнойСервер', 'ОтображениеРекламы', 'ОтправкаДоставляемыхУведомлений',
+    'Отчеты', 'ОформлениеОтчетов', 'ПанельЗадачОС', 'ПараметрЗапуска',
+    'ПараметрыСеанса', 'Перечисления', 'ПланыВидовРасчета', 'ПланыВидовХарактеристик',
+    'ПланыОбмена', 'ПланыСчетов', 'ПолитикиПаролейПользователей',
+    'ПолнотекстовыйПоиск', 'ПолучениеЛицензий', 'ПользователиИнформационнойБазы',
+    'Последовательности', 'ПроверкаВстроенныхПокупок', 'ПрогрессивноеВебПриложение',
+    'РаботаСРечью', 'РабочаяДата', 'РасширенияКонфигурации', 'РегистрыБухгалтерии',
+    'РегистрыНакопления', 'РегистрыРасчета', 'РегистрыСведений', 'РегламентныеЗадания',
+    'СервисыИнтеграции', 'СериализаторXDTO', 'СистемаАналитики',
+    'СистемаВзаимодействия', 'Справочники', 'СредстваNFC', 'СредстваБуфераОбмена',
+    'СредстваГеопозиционирования', 'СредстваКриптографии', 'СредстваМультимедиа',
+    'СредстваОтображенияРекламы', 'СредстваПередачиДанныхНаУстройстве',
+    'СредстваПочты', 'СредстваТелефонии', 'СредстваУстройства',
+    'СтатистикаИспользованияПриложения', 'ТабличныеПространстваБазыДанных',
+    'УведомленияКлиента', 'ФабрикаXDTO', 'ФайловыеПотоки', 'ФоновыеЗадания',
+    'ХранилищаНастроек', 'ХранилищеВариантовОтчетов',
+    'ХранилищеВнешнихДанныхНавигационныхСсылок', 'ХранилищеДвоичныхДанных',
+    'ХранилищеНастроекДанныхФорм', 'ХранилищеОбщихНастроек',
+    'ХранилищеПользовательскихНастроекДинамическихСписков',
+    'ХранилищеПользовательскихНастроекОтчетов', 'ХранилищеСистемныхНастроек',
+    'ШаблоныНастроекВторогоФактораАутентификации',
 ]}
 GLOBAL_CONTEXT_OBJECTS_EN = {s.lower() for s in [
-    'ErrorProcessing',
+    'WebSocketClientConnections', 'WebSocketClients', 'WSReferences',
+    'ClientApplicationAgent', 'SecureStorage', 'PictureLib',
+    'DataCompositionAppearanceTemplateLib', 'StyleLib', 'BusinessProcesses',
+    'AuthenticationLock', 'ExternalDataSources', 'ExternalDataProcessors',
+    'ExternalReports', 'BinaryDataExternalStorages', 'InAppPurchases', 'MainInterface',
+    'MainStyle', 'GlobalSearch', 'LaunchShareRequestData', 'LaunchURLNavigationData',
+    'Documents', 'AdditionalUserVerification', 'AdditionalAuthenticationSettings',
+    'DeliverableNotifications', 'DocumentJournals', 'Tasks',
+    'InternetConnectionInformation', 'WorkingDateUse', 'DataHistory',
+    'UserWorkHistory', 'ClientApplication', 'Constants', 'DatabaseCopies',
+    'FilterCriteria', 'Metadata', 'LaunchURL', 'DataExchangeWithMainServer',
+    'ErrorProcessing', 'XMLStringProcessing', 'DataProcessors', 'ExternalSiteWindow',
+    'MainServer', 'AdRepresentation', 'DeliverableNotificationSend', 'Reports',
+    'ReportsAppearance', 'OSTaskbar', 'LaunchParameter', 'SessionParameters', 'Enums',
+    'ChartsOfCalculationTypes', 'ChartsOfCharacteristicTypes', 'ExchangePlans',
+    'ChartsOfAccounts', 'UserPasswordPolicies', 'FullTextSearch', 'LicenseAcquisition',
+    'InfoBaseUsers', 'Sequences', 'InAppPurchasesValidation',
+    'ProgressiveWebApplication', 'SpeechProcessing', 'WorkingDate',
+    'ConfigurationExtensions', 'AccountingRegisters', 'AccumulationRegisters',
+    'CalculationRegisters', 'InformationRegisters', 'ScheduledJobs',
+    'IntegrationServices', 'XDTOSerializer', 'AnalyticsSystem', 'CollaborationSystem',
+    'Catalogs', 'NFCTools', 'ClipboardTools', 'LocationTools', 'CryptoTools',
+    'MultimediaTools', 'AdvertisingPresentationTools', 'DeviceDataSharingTools',
+    'MailTools', 'TelephonyTools', 'DeviceTools', 'ApplicationUsageStatistics',
+    'DatabaseTablespaces', 'ClientNotifications', 'XDTOFactory', 'FileStreams',
+    'BackgroundJobs', 'SettingsStorages', 'ReportsVariantsStorage',
+    'URLExternalDataStorage', 'BinaryDataStorage', 'FormDataSettingsStorage',
+    'CommonSettingsStorage', 'DynamicListsUserSettingsStorage',
+    'ReportsUserSettingsStorage', 'SystemSettingsStorage',
+    'SecondAuthenticationFactorSettingsTemplates',
 ]}
 
 
