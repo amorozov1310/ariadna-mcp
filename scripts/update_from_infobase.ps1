@@ -32,7 +32,7 @@
 .EXAMPLE
     # Серверная база с расширениями, выгрузка в общую папку сервера Ариадны
     .\update_from_infobase.ps1 -InfoBaseServer "srv1c\myconf" -User "Робот" -DumpDir "D:\Dumps\myconf" `
-        -Extensions "Расширение1","Расширение2" -TargetRoot "\\ariadna\data\projects\myconf\sources" `
+        -Extensions "Расширение1,Расширение2" -TargetRoot "\\ariadna\data\projects\myconf\sources" `
         -AriadnaUrl "http://ariadna.lan:19878" -Project myconf
 #>
 [CmdletBinding()]
@@ -53,10 +53,12 @@ param(
     # Многопоточная выгрузка на сервере 1С (только для серверной базы)
     [switch]$ServerDump,
 
-    # Расширения: имена в конфигурации. Источник Ариадны по умолчанию — то же
-    # имя; иначе соответствие в -ExtensionSources @{ "ИмяРасширения" = "id_источника" }
+    # Расширения: имена в конфигурации, через запятую ("Расш1,Расш2"). Источник
+    # Ариадны по умолчанию — то же имя; иначе -ExtensionSources "Расш1=ext1,Расш2=ext2".
+    # Строками, а не массивом и таблицей: так параметры передаются и через
+    # powershell -File (Планировщик заданий), где массивы не разбираются.
     [string[]]$Extensions = @(),
-    [hashtable]$ExtensionSources = @{},
+    [string[]]$ExtensionSources = @(),
 
     # Каталог выгрузки — сохраняется между запусками (для выгрузки только изменений)
     [Parameter(Mandatory = $true)][string]$DumpDir,
@@ -106,9 +108,18 @@ if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { Fail 3 'Нуж�
 $AriadnaUrl = $AriadnaUrl.TrimEnd('/')
 
 # Что выгружаем и куда: основная конфигурация и расширения — свой каталог и свой источник.
+$Extensions = @($Extensions | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$extMap = @{}
+foreach ($pair in ($ExtensionSources | ForEach-Object { $_ -split ',' } | Where-Object { $_.Trim() })) {
+    $kv = $pair -split '=', 2
+    if ($kv.Count -ne 2 -or -not $kv[0].Trim() -or -not $kv[1].Trim()) {
+        Fail 3 "-ExtensionSources: ожидается «Имя=источник», получено «$pair»"
+    }
+    $extMap[$kv[0].Trim()] = $kv[1].Trim()
+}
 $Items = @([pscustomobject]@{ Name = ''; Dir = (Join-Path $DumpDir 'config'); Source = $Source })
 foreach ($ext in $Extensions) {
-    $sid = if ($ExtensionSources.ContainsKey($ext)) { $ExtensionSources[$ext] } else { $ext }
+    $sid = if ($extMap.ContainsKey($ext)) { $extMap[$ext] } else { $ext }
     $Items += [pscustomobject]@{ Name = $ext; Dir = (Join-Path $DumpDir "ext\$ext"); Source = $sid }
 }
 

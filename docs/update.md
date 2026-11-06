@@ -79,8 +79,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\Ariadna\update_from_infob
 | `-Source` | источник основной конфигурации (по умолчанию `main`) |
 | `-InfoBaseFile` / `-InfoBaseServer` | база: каталог файловой базы или `сервер\база` — что-то одно |
 | `-User` | пользователь базы; пароль — `-Password` или переменная `ONEC_PASSWORD` |
-| `-Extensions` | имена расширений через запятую: `-Extensions "Расш1","Расш2"` |
-| `-ExtensionSources` | если источник расширения в Ариадне называется не так, как расширение: `-ExtensionSources @{ "Расш1" = "ext1" }` |
+| `-Extensions` | имена расширений одной строкой через запятую: `-Extensions "Расш1,Расш2"` |
+| `-ExtensionSources` | если источник расширения в Ариадне называется не так, как расширение: `-ExtensionSources "Расш1=ext1,Расш2=ext2"` |
 | `-DumpDir` | постоянный каталог выгрузки (путь латиницей) |
 | `-TargetRoot` | передача в папку вместо архива (см. ниже) |
 | `-ServerDump` | многопоточная выгрузка на сервере 1С (только серверная база) |
