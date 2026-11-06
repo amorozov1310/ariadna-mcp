@@ -7,7 +7,7 @@ Each project gets its own SQLite at /data/projects/{id}/index.db — or at
 
 import json
 import logging
-import shutil
+import shutil     # не используется напрямую — тесты подменяют shutil.rmtree через модуль
 import sqlite3
 import time
 import os
@@ -21,6 +21,7 @@ from typing import BinaryIO
 from . import parser_fingerprint
 from .archives import extract_archive
 from .db import Database, IndexRemovedError
+from .fsretry import replace_with_retry, rmtree_with_retry
 from .search import SearchEngine
 
 logger = logging.getLogger('ariadna')
@@ -92,26 +93,6 @@ class ProjectFilesNotRemovedError(OSError):
                          f"{path}: {cause}. Повторите удаление, чтобы дочистить файлы")
         self.project_id = project_id
         self.path = path
-
-
-# Повторы rmtree при PermissionError (Windows): файл индекса освобождается,
-# как только закончится запрос, начатый до закрытия (Database.close ждёт его),
-# а ещё его может ненадолго открыть антивирус. До ~1 с в сумме.
-_RMTREE_ATTEMPTS = 8
-_RMTREE_DELAY_SEC = 0.03
-
-
-def _rmtree_with_retry(path: Path) -> None:
-    for attempt in range(_RMTREE_ATTEMPTS):
-        try:
-            shutil.rmtree(path)
-            return
-        except PermissionError:
-            if attempt == _RMTREE_ATTEMPTS - 1:
-                raise
-            time.sleep(_RMTREE_DELAY_SEC * (attempt + 1))
-        except FileNotFoundError:
-            return          # удалил кто-то ещё
 
 
 def _copy_sqlite(src: Path, dst: Path) -> None:
@@ -592,7 +573,10 @@ class ProjectManager:
             if not path.exists():
                 continue
             try:
-                _rmtree_with_retry(path)
+                # Повторы при PermissionError: файл индекса освобождается, как
+                # только закончится запрос, начатый до закрытия (Database.close
+                # ждёт его), а ещё его может ненадолго открыть антивирус.
+                rmtree_with_retry(path)
             except OSError as e:
                 logger.error("Проект %s убран из реестра, но каталог %s удалить не удалось: %s. "
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)
@@ -783,7 +767,7 @@ class ProjectManager:
         # Remove source directory — вне блокировки реестра.
         source_dir = self.projects_dir / project_id / 'sources' / source_id
         if source_dir.exists():
-            shutil.rmtree(source_dir)
+            rmtree_with_retry(source_dir)
 
         # Remove from registry
         with self._registry_lock():
@@ -846,7 +830,7 @@ class ProjectManager:
                 started = time.monotonic()
                 _copy_sqlite(old, tmp)
                 self._retire_project_db(project.id)
-                os.replace(tmp, new)
+                replace_with_retry(tmp, new)
             except Exception:
                 logger.exception("Не удалось перенести индекс проекта %s из %s в %s — "
                                  "проект будет переиндексирован", project.id, old, new)

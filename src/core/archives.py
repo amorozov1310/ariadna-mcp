@@ -22,6 +22,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from .fsretry import replace_with_retry, rmtree_with_retry
+
 # Выгрузка крупной типовой конфигурации — порядка 100 тыс. файлов и 10 ГБ;
 # умолчания с большим запасом, но конечные.
 DEFAULT_MAX_FILES = 1_000_000
@@ -127,9 +129,12 @@ def extract_archive(fileobj: BinaryIO, filename: str, dest: Path) -> None:
                     tf.extractall(staging, filter='data')
                 else:  # Python без фильтров: записи уже проверены выше
                     tf.extractall(staging)
+        # Распакованные файлы сразу после записи проверяет антивирус —
+        # переименование каталога и удаление старого на Windows ненадолго
+        # падают с «Отказано в доступе» (см. fsretry).
         if dest.exists():
-            shutil.rmtree(dest)
-        staging.rename(dest)
+            rmtree_with_retry(dest)
+        replace_with_retry(staging, dest)
     except zipfile.BadZipFile as e:
         raise UnsafeArchiveError(f'Архив повреждён: {e}') from e
     finally:

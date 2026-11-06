@@ -14,7 +14,6 @@
 """
 
 import json
-import os
 import re
 import threading
 import uuid
@@ -23,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .cards import QUERY_STOPWORDS, query_stems, word_roots
+from .fsretry import replace_with_retry
 
 FILENAME = 'glossary.json'
 TARGET_OBJECT, TARGET_ATTRIBUTE, TARGET_PROCEDURE = 'object', 'attribute', 'procedure'
@@ -122,7 +122,7 @@ class Glossary:
         tmp = self.path.with_name(self.path.name + '.tmp')
         tmp.write_text(json.dumps({'entries': [asdict(e) for e in entries]},
                                   ensure_ascii=False, indent=2), encoding='utf-8')
-        os.replace(tmp, self.path)
+        replace_with_retry(tmp, self.path)     # Windows: файл занят антивирусом
 
     def entries(self) -> list[GlossaryEntry]:
         return sorted(self._read(), key=lambda e: e.target.casefold())
