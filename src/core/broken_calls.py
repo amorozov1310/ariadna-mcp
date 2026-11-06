@@ -114,6 +114,14 @@ _PLATFORM_GLOBALS = {s.casefold() for s in (
     'DeliverableNotifications', 'НастройкиЖурналаРегистрации', 'EventLogSettings')}
 
 
+# Стандартные реквизиты объектов: `Ссылка.Метод()` в модуле объекта — не
+# общий модуль.
+_STANDARD_ATTRIBUTES = {s.casefold() for s in (
+    'Ссылка', 'Ref', 'Владелец', 'Owner', 'Родитель', 'Parent',
+    'БизнесПроцесс', 'BusinessProcess', 'ТочкаМаршрута', 'RoutePoint',
+    'ВедущаяЗадача', 'HeadTask', 'Регистратор', 'Recorder', 'Движения', 'RegisterRecords',
+    'ОбменДанными', 'DataExchange', 'Отбор', 'Filter', 'Объект', 'Object')}
+
 _IDENT = re.compile(r'[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*')
 
 
@@ -147,6 +155,21 @@ def find_broken_calls(conn, source_id: str = '', module_name: str = '',
             procs[pcf] = procs.get(pcf, False) or bool(r['export'])
         proc_homes.setdefault(pcf, set()).add((r['mname'], r['src'] or ''))
         short_names.add(_short(mcf))
+
+    # Реквизиты объектов (с ТЧ) по полному имени объекта — вызов `Реквизит.Метод()`
+    # из модуля объекта или его формы (реквизит-список, -таблица) — не модуль.
+    object_attrs: dict[str, set[str]] = {}
+    for r in conn.execute(
+            """SELECT o.full_name_cf AS obj, a.name_cf AS attr
+               FROM attributes a JOIN metadata_objects o ON o.id = a.object_id"""):
+        object_attrs.setdefault(r['obj'], set()).add(r['attr'] or '')
+
+    def own_attribute(caller_module: str, name_cf: str) -> bool:
+        if name_cf in _STANDARD_ATTRIBUTES:
+            return True
+        parts = caller_module.split('.')
+        obj = '.'.join(parts[:2]).casefold() if len(parts) >= 2 else ''
+        return name_cf in object_attrs.get(obj, ())
 
     module_filter = module_name.strip().casefold()
 
@@ -191,7 +214,9 @@ def find_broken_calls(conn, source_id: str = '', module_name: str = '',
         procs = module_procs.get(key)
         if procs is None:
             if (r['resolved'] is None and _short(module_cf) not in short_names
-                    and module_cf not in _PLATFORM_GLOBALS):
+                    and module_cf not in _PLATFORM_GLOBALS
+                    and not (r['kind'] == 'common_module'
+                             and own_attribute(r['caller_module'], module_cf))):
                 ext = external.setdefault(r['module'], {'module': r['module'], 'kind': r['kind'],
                                                         'calls': 0, 'methods': set(),
                                                         'sample': None, 'mids': set()})
