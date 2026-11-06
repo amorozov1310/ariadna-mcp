@@ -7,6 +7,7 @@
 управлять токенами — это `admin`.
 """
 
+import os
 import re
 from urllib.parse import quote
 
@@ -32,7 +33,11 @@ _stores: dict[str, TokenStore] = {}
 
 
 def tokens() -> TokenStore:
-    data_dir = str(get_pm().data_dir)
+    # Только путь к data/ — без создания ProjectManager (и каталогов) на
+    # каждый запрос: токены читаются из файла, а ProjectManager нужен роутам.
+    from . import app as app_module
+    pm = app_module._pm
+    data_dir = str(pm.data_dir) if pm is not None else os.environ.get('DATA_DIR', '/data')
     store = _stores.get(data_dir)
     if store is None:
         store = _stores[data_dir] = TokenStore(data_dir)
