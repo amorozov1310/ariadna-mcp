@@ -28,10 +28,8 @@
 
 import re
 
-from .bsl_reference import PLATFORM_MANAGER_METHODS, module_context_methods
+from .bsl_reference import is_platform_manager_method, module_context_methods
 
-# Платформенные методы менеджеров — общий список с парсером (bsl_reference).
-_PLATFORM_MANAGER_EXTRA = PLATFORM_MANAGER_METHODS
 
 
 _KINDS_CF = {k.casefold(): module_context_methods(k, 'МодульМенеджера')
@@ -43,7 +41,7 @@ _KINDS_CF = {k.casefold(): module_context_methods(k, 'МодульМенедже
 
 def _platform_manager_method(module_cf: str, proc_cf: str) -> bool:
     kind = module_cf.split('.', 1)[0]
-    return proc_cf in _PLATFORM_MANAGER_EXTRA or proc_cf in _KINDS_CF.get(kind, set())
+    return is_platform_manager_method(kind, proc_cf) or proc_cf in _KINDS_CF.get(kind, set())
 
 
 def _direct(context: str, module: str, proc: str) -> bool:

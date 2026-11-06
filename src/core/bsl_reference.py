@@ -599,3 +599,26 @@ PLATFORM_MANAGER_METHODS = {s.lower() for s in (
     'УстановитьМинимальныйИМаксимальныйПериодыРассчитанныхИтогов', 'SetMinAndMaxTotalsPeriods',
     'ПолучитьРежимРазделенияИтогов', 'GetTotalsSplittingMode',
     'УстановитьРежимРазделенияИтогов', 'SetTotalsSplittingMode')}
+
+# Методы, платформенные только у части видов: у справочника `Создать` или
+# `Get` — может быть своя процедура модуля менеджера (`Catalogs.Node.Create()`).
+_KIND_ONLY = {s.lower() for s in ('Создать', 'Create', 'Получить', 'Get',
+                                  'Индекс', 'IndexOf', 'Количество', 'Count')}
+_PLATFORM_BY_KIND = {
+    'отчет': {'создать', 'create'},
+    'обработка': {'создать', 'create'},
+    'перечисление': {'индекс', 'indexof', 'количество', 'count', 'получить', 'get'},
+    'регистрсведений': {'получить', 'get'},
+    'регистрнакопления': {'получить', 'get'},
+    'регистрбухгалтерии': {'получить', 'get'},
+    'регистррасчета': {'получить', 'get'},
+}
+
+
+def is_platform_manager_method(kind: str, method: str) -> bool:
+    """Платформенный ли метод менеджера объекта вида kind («Справочник»,
+    «Перечисление», …; регистр не важен)."""
+    m = method.lower()
+    if m in _KIND_ONLY:
+        return m in _PLATFORM_BY_KIND.get(kind.casefold(), ())
+    return m in PLATFORM_MANAGER_METHODS

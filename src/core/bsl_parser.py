@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .bsl_reference import (
     CONSTRUCTOR_TYPES_RU,
-    PLATFORM_MANAGER_METHODS,
+    is_platform_manager_method,
     CONSTRUCTOR_TYPES_EN,
     SYSTEM_ENUMERATIONS_RU,
     SYSTEM_ENUMERATIONS_EN,
@@ -1501,7 +1501,7 @@ class BSLParser:
 
             # Skip standard platform manager methods (not user code)
             if (method_name.lower() in _PLATFORM_MANAGER_METHODS
-                    or method_name.lower() in PLATFORM_MANAGER_METHODS):
+                    or is_platform_manager_method(singular, method_name)):
                 continue
 
             # Validate the object name against Pass 1's fact base, when we
@@ -1543,7 +1543,8 @@ class BSLParser:
                 # Переменная-менеджер: вызов процедуры модуля менеджера,
                 # как трёхчастный `Справочники.Имя.Метод(`.
                 if (method_name.lower() in _PLATFORM_MANAGER_METHODS
-                    or method_name.lower() in PLATFORM_MANAGER_METHODS):
+                    or is_platform_manager_method(
+                        aliased[len(_MANAGER_ALIAS):].split('.', 1)[0], method_name)):
                     continue
                 module_full = f'{aliased[len(_MANAGER_ALIAS):]}.МодульМенеджера'
                 calls.append(CallInfo(
