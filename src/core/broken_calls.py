@@ -28,7 +28,9 @@
 
 import re
 
-from .bsl_reference import is_platform_manager_method, module_context_methods
+from .bsl_reference import (FORM_CONTEXT_IDENTIFIERS_EN, FORM_CONTEXT_IDENTIFIERS_RU,
+                            GLOBAL_CONTEXT_OBJECTS_EN, GLOBAL_CONTEXT_OBJECTS_RU,
+                            is_platform_manager_method, module_context_methods)
 
 
 
@@ -53,24 +55,12 @@ def _direct(context: str, module: str, proc: str) -> bool:
     return re.search(pattern, context, re.IGNORECASE) is not None
 
 
-# Глобальные объекты платформы, которые парсер может принять за общий модуль:
-# в сводку «модулей нет в выгрузке» не попадают.
+# Свойства глобального контекста и формы (bsl_reference — по справке платформы):
+# в сводку «модулей нет в выгрузке» не попадают. Индекс, построенный до
+# пополнения списка, может ещё хранить такие «вызовы».
 _PLATFORM_GLOBALS = {s.casefold() for s in (
-    'ИсторияДанных', 'DataHistory', 'РегламентныеЗадания', 'ScheduledJobs',
-    'ФоновыеЗадания', 'BackgroundJobs', 'ВнешниеОбработки', 'ExternalDataProcessors',
-    'ВнешниеОтчеты', 'ExternalReports', 'РасширенияКонфигурации', 'ConfigurationExtensions',
-    'КлиентскоеПриложение', 'ClientApplication', 'СредстваБуфераОбмена', 'ClipboardTools',
-    'ПользователиИнформационнойБазы', 'InfoBaseUsers', 'ХранилищеОбщихНастроек',
-    'CommonSettingsStorage', 'ХранилищеСистемныхНастроек', 'SystemSettingsStorage',
-    'ХранилищеНастроекДанныхФорм', 'FormDataSettingsStorage', 'ХранилищеВариантовОтчетов',
-    'ReportsVariantsStorage', 'ХранилищеПользовательскихНастроекОтчетов',
-    'ReportsUserSettingsStorage', 'БиблиотекаКартинок', 'PictureLib', 'БиблиотекаСтилей',
-    'StyleLib', 'ОбщиеМакеты', 'CommonTemplates', 'Метаданные', 'Metadata',
-    'ПолнотекстовыйПоиск', 'FullTextSearch', 'ЖурналРегистрации', 'EventLog',
-    'СредстваКриптографии', 'CryptoToolsManager', 'НастройкиКлиентскогоПриложения',
-    'ClientApplicationSettings', 'СредстваГеопозиционирования', 'LocationTools',
-    'СредстваМультимедиа', 'MultimediaTools', 'ДоставляемыеУведомления',
-    'DeliverableNotifications', 'НастройкиЖурналаРегистрации', 'EventLogSettings')}
+    GLOBAL_CONTEXT_OBJECTS_RU | GLOBAL_CONTEXT_OBJECTS_EN
+    | FORM_CONTEXT_IDENTIFIERS_RU | FORM_CONTEXT_IDENTIFIERS_EN)}
 
 
 # Стандартные реквизиты объектов: `Ссылка.Метод()` в модуле объекта — не
