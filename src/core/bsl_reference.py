@@ -554,3 +554,48 @@ MODULE_CONTEXT_METHODS = {
 
 def module_context_methods(object_kind: str, module_type: str) -> set[str]:
     return MODULE_CONTEXT_METHODS.get((object_kind, module_type), set())
+
+
+# Платформенные методы менеджеров объектов (`Справочники.Х.Метод()`,
+# `Перечисления.Х.Индекс()`, итоги регистров и т.п.): вызов с таким именем —
+# платформа, а не процедура модуля менеджера. Парсер такие вызовы не
+# записывает (прямые и через переменную-менеджер), проверка вызовов
+# (broken_calls) — не считает. Правка списка — правка парсера
+# (parser_fingerprint): индексы переразберутся.
+PLATFORM_MANAGER_METHODS = {s.lower() for s in (
+    'ПолучитьДанныеВыбора', 'GetChoiceData', 'ПолучитьФормуВыбора', 'GetChoiceForm',
+    'ПолучитьФормуСписка', 'GetListForm', 'ПолучитьФормуОбъекта', 'GetObjectForm',
+    'ПолучитьФормуНовогоОбъекта', 'GetNewObjectForm', 'ПолучитьИменаПредопределенных',
+    'GetPredefinedItemNames', 'Индекс', 'IndexOf', 'Получить', 'Get',
+    'ПолучитьПредставлениеПоляДанных', 'ПолучитьФормуЗаписи', 'GetRecordForm',
+    'Остатки', 'Balance', 'Обороты', 'Turnovers', 'ОстаткиИОбороты', 'BalanceAndTurnovers',
+    'ОборотыДтКт', 'TurnoversDrCr', 'ДвиженияССубконто', 'RecordsWithExtDimensions',
+    'ВыбратьПоРегистратору', 'SelectByRecorder', 'СрезПоследних', 'SliceLast',
+    'СрезПервых', 'SliceFirst', 'ПолучитьПоследнее', 'GetLast', 'ПолучитьПервое', 'GetFirst',
+    'Создать', 'Create', 'ПолучитьСсылку', 'GetRef', 'ПустаяСсылка', 'EmptyRef',
+    'Выбрать', 'Select', 'ВыбратьИерархически', 'SelectHierarchically',
+    'НайтиПоКоду', 'FindByCode', 'НайтиПоНаименованию', 'FindByDescription',
+    'НайтиПоНомеру', 'FindByNumber', 'НайтиПоРеквизиту', 'FindByAttribute',
+    'ПолучитьМакет', 'GetTemplate', 'ПолучитьФорму', 'GetForm', 'ЭтотУзел', 'ThisNode',
+    'СоздатьКлючЗаписи', 'CreateRecordKey', 'ПустойКлюч', 'EmptyKey',
+    'СоздатьНаборЗаписей', 'CreateRecordSet', 'СоздатьМенеджерЗаписи', 'CreateRecordManager',
+    'Количество', 'Count', 'ПолучитьИмяПредопределенного', 'GetPredefinedItemName',
+    'УстановитьИнициализациюПредопределенныхДанных', 'SetPredefinedDataInitialization',
+    'ПолучитьИнициализациюПредопределенныхДанных', 'GetPredefinedDataInitialization',
+    # Итоги регистров накопления и бухгалтерии
+    'УстановитьИспользованиеИтогов', 'SetTotalsUse', 'ПолучитьИспользованиеИтогов', 'GetTotalsUse',
+    'УстановитьИспользованиеТекущихИтогов', 'SetPresentTotalsUse',
+    'ПолучитьИспользованиеТекущихИтогов', 'GetPresentTotalsUse',
+    'УстановитьИспользованиеРазделенияИтогов', 'SetTotalsSplittingMode',
+    'ПолучитьИспользованиеРазделенияИтогов', 'GetTotalsSplittingMode',
+    'ПересчитатьИтоги', 'RecalcTotals', 'ПересчитатьТекущиеИтоги', 'RecalcPresentTotals',
+    'ПересчитатьИтогиЗаПериод', 'RecalcTotalsForPeriod',
+    'УстановитьПериодРассчитанныхИтогов', 'SetTotalsPeriod',
+    'ПолучитьПериодРассчитанныхИтогов', 'GetTotalsPeriod',
+    'УстановитьМаксимальныйПериодРассчитанныхИтогов', 'SetMaxTotalsPeriod',
+    'ПолучитьМаксимальныйПериодРассчитанныхИтогов', 'GetMaxTotalsPeriod',
+    'УстановитьМинимальныйПериодРассчитанныхИтогов', 'SetMinTotalsPeriod',
+    'ПолучитьМинимальныйПериодРассчитанныхИтогов', 'GetMinTotalsPeriod',
+    'УстановитьМинимальныйИМаксимальныйПериодыРассчитанныхИтогов', 'SetMinAndMaxTotalsPeriods',
+    'ПолучитьРежимРазделенияИтогов', 'GetTotalsSplittingMode',
+    'УстановитьРежимРазделенияИтогов', 'SetTotalsSplittingMode')}
