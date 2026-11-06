@@ -422,6 +422,10 @@ _SINGULAR_KINDS = {v.lower(): v for v in _METADATA_MANAGERS.values()} | {
 # Значение псевдонима-менеджера в module_aliases: префикс отличает его от
 # имени общего модуля (в имени модуля символа \x00 не бывает).
 _MANAGER_ALIAS = '\x00manager:'
+# Переменной в процедуре присваивается не один и тот же менеджер — вызов
+# через неё не считается ни вызовом менеджера, ни вызовом модуля.
+_AMBIGUOUS_ALIAS = '\x00ambiguous'
+_VALUE_TARGET = '\x00value'
 
 
 # Общее правило «присвоено не-модуль» (Этап 7, остаток). В 1С переменная
@@ -893,6 +897,11 @@ class BSLParser:
         # id(proc) -> {lowercased alias var name: lowercased real module
         # name} — see _RE_BARE_ALIAS_ASSIGN / _RE_DYNAMIC_MODULE_LOAD above.
         module_aliases: dict[int, dict[str, str]] = {}
+        # id(proc) -> {var: {что ей присваивается: псевдоним-менеджер или
+        # «значение»}} — переменная-менеджер считается псевдонимом, только если
+        # в процедуре ей присваивается один и тот же менеджер (псевдоним не
+        # знает позиции: `М = Отчеты.А` в одной ветке и `М = Отчеты.Б` в другой).
+        assign_targets: dict[int, dict[str, set[str]]] = {}
 
         # {lowercased name} declared via a module-level "Перем X;" (always
         # before any Процедура/Функция in valid BSL) — a var assigned in
@@ -1147,6 +1156,15 @@ class BSLParser:
                     proc_aliases[var_name] = target
                     if var_name in module_level_var_names:
                         module_level_aliases[var_name] = target
+                proc_targets = assign_targets.setdefault(id(current_proc), {})
+                for assign_m in _RE_VALUE_ASSIGN.finditer(clean_comments_only):
+                    rhs = assign_m.group(2).strip()
+                    if rhs.casefold() in ('неопределено', 'undefined'):
+                        continue
+                    var_name = assign_m.group(1).lower()
+                    found = self._extra_aliases(f'{assign_m.group(1)} = {rhs};')
+                    proc_targets.setdefault(var_name, set()).add(
+                        found[0][1] if found else _VALUE_TARGET)
                 for alias_m in _RE_BARE_ALIAS_ASSIGN.finditer(clean_for_ctor):
                     target = alias_m.group(2)
                     if target.lower() in self.known_modules:
@@ -1261,6 +1279,12 @@ class BSLParser:
         for proc, stripped, line_num in pending:
             proc_vars = constructed_vars.get(id(proc)) or set()
             proc_aliases = module_aliases.get(id(proc)) or {}
+            targets = assign_targets.get(id(proc)) or {}
+            if any(v.startswith(_MANAGER_ALIAS) and len(targets.get(k, ())) > 1
+                   for k, v in proc_aliases.items()):
+                proc_aliases = {k: (_AMBIGUOUS_ALIAS if v.startswith(_MANAGER_ALIAS)
+                                    and len(targets.get(k, ())) > 1 else v)
+                                for k, v in proc_aliases.items()}
             # Module-level Перем vars are visible in every procedure, not
             # just the one that happened to construct/alias them — merge
             # last so a per-procedure shadow (a local of the same name)
@@ -1411,6 +1435,8 @@ class BSLParser:
             # above) — takes priority over every other check below, since
             # it redirects to the real module rather than just suppressing.
             aliased = module_aliases.get(module_name.lower())
+            if aliased == _AMBIGUOUS_ALIAS:
+                continue
             if aliased and aliased.startswith(_MANAGER_ALIAS):
                 # Переменная-менеджер: вызов процедуры модуля менеджера,
                 # как трёхчастный `Справочники.Имя.Метод(`.
