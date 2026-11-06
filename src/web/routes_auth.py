@@ -25,8 +25,10 @@ _COOKIE_MAX_AGE = 30 * 24 * 3600
 
 _PUBLIC = re.compile(r'^/(health$|login$|logout$|static/|favicon)')
 # Действия администратора: проекты, источники, их настройки, токены.
+# Обновление выгрузки существующего источника (…/sources/<id>/refresh — робот
+# выгрузки, docs/update.md) — не админское: проекты и источники не меняются.
 _ADMIN_POST = re.compile(r'^/api/(projects$|projects/[^/]+/(update|delete|comparison|base)$'
-                         r'|projects/[^/]+/sources(/|$)|admin/)')
+                         r'|projects/[^/]+/sources(/[^/]+/(update|delete))?$|admin/)')
 _ADMIN_GET = re.compile(r'^/(projects/new$|admin(/|$))')
 
 _stores: dict[str, TokenStore] = {}
