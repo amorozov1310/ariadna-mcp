@@ -1203,7 +1203,16 @@ class ProjectManager:
         with self._base_diff_lock:
             cached = self._broken_calls.get(project_id)
         if not cached or cached[0] != key:
-            cached = (key, find_broken_calls(db.read_conn()))
+            engine = self.get_search(project_id)
+            conn = db.read_conn()
+
+            def read_module(module_id: int) -> str | None:
+                from .bsl_parser import read_bsl_text
+                row = conn.execute("SELECT * FROM modules WHERE id = ?", (module_id,)).fetchone()
+                path = engine.module_file_path(row) if row else None
+                return read_bsl_text(path) if path else None
+
+            cached = (key, find_broken_calls(conn, read_module=read_module))
             with self._base_diff_lock:
                 self._broken_calls[project_id] = cached
         result = cached[1]

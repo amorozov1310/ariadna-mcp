@@ -25,6 +25,8 @@ CHECKS = '''
 	ЮТест.ОжидаетЧто(1).Равно(1);
 	ЮТест.Контекст();
 	Модуль = ЗаказыСервер;
+	МодульСкидок = Вычислить("СкидкиСервер");
+	МодульСкидок.ЧтоУгодно();
 	Склады = Справочники.Склады.ПолучитьДанныеВыбора(Новый Структура);
 	Склад = Справочники.Склады.НетВМенеджере();
 КонецПроцедуры
@@ -74,6 +76,8 @@ def test_broken_calls_kinds(pm):
 
     external = {e['module']: e for e in result['external']}
     assert external['ЮТест']['calls'] == 2 and external['ЮТест']['methods'] == 2
+    # Переменная = Вычислить("Модуль") — динамический вызов, а не внешняя библиотека.
+    assert 'МодульСкидок' not in external and result['dynamic'] >= 1
 
     assert pm.broken_calls('p', module_name='СвояПроверка') == {
         'missing': [], 'not_export': [], 'external': [], 'dynamic': result['dynamic']}
