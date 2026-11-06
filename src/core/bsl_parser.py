@@ -1399,8 +1399,11 @@ class BSLParser:
             rhs = m.group(2).strip()
             if not rhs or rhs.casefold() in ('неопределено', 'undefined'):
                 continue
+            # Оператор на строке не закончен (`Т = РегистрыСведений.Х` и
+            # `.Метод()` на следующей) — не менеджер, а начало цепочки.
+            terminated = text[m.end():].lstrip().startswith(';')
             found = [t for _, t in self._extra_aliases(f'{m.group(1)} = {rhs};')
-                     if t.startswith(_MANAGER_ALIAS)]
+                     if t.startswith(_MANAGER_ALIAS)] if terminated else []
             events.append((line_num, path, m.group(1).lower(),
                            found[0] if found else _VALUE_TARGET))
 
