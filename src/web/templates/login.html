@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Вход — Ариадна{% endblock %}
+{% block active_nav %}login{% endblock %}
+
+{% block content %}
+<div class="card login-card">
+    <h3 class="section-title">Вход</h3>
+    {% if not enabled %}
+    <p class="text-muted">Авторизация не включена — токенов нет, Ариадна открыта без входа.
+        <a href="/">К проектам</a></p>
+    {% else %}
+    <p class="text-muted" style="font-size:var(--fs-sm)">
+        Введите личный токен — его выдаёт администратор Ариадны. Тот же токен агент передаёт
+        в заголовке <span class="mono">Authorization: Bearer …</span>.
+    </p>
+    {% if error %}
+    <div class="notice notice-warning" style="margin-bottom:var(--space-3)">
+        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+        <div>Токен не подошёл — проверьте его или попросите новый у администратора.</div>
+    </div>
+    {% endif %}
+    <form method="post" action="/login">
+        <input type="hidden" name="next" value="{{ next }}">
+        <input type="password" name="token" class="form-input" placeholder="ar_…" autofocus required
+               style="width:100%;margin-bottom:var(--space-3)">
+        <button type="submit" class="btn btn-primary">Войти</button>
+    </form>
+    {% endif %}
+</div>
+{% endblock %}

@@ -153,9 +153,18 @@ def _start_mcp_streamable_http(pm, port: int):
         import uvicorn
         mcp = create_mcp_server(pm)
 
+        from .auth import MCPAuthMiddleware, TokenStore
         from .security import mcp_transport_security
         app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
-        uvicorn.run(app, host=_listen_addr(), port=port, log_level="warning")
+        tokens = TokenStore(pm.data_dir)
+        if tokens.enabled():
+            logger.info("Авторизация по токенам включена (%d токенов)", len(tokens.list()))
+        elif os.environ.get('MCP_ALLOWED_HOSTS'):
+            logger.warning("Ариадна открыта для других машин (MCP_ALLOWED_HOSTS), но токенов нет — "
+                           "доступ без авторизации. Создайте токен администратора: "
+                           "python -m src.auth create --name <имя> --role admin")
+        uvicorn.run(MCPAuthMiddleware(app, tokens), host=_listen_addr(), port=port,
+                    log_level="warning")
 
     except ImportError as e:
         logger.warning(f"MCP dependencies missing ({e}) — running Web UI only")
