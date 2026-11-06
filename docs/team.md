@@ -24,11 +24,14 @@ BIND_ADDR=0.0.0.0 MCP_ALLOWED_HOSTS=192.168.1.10,ariadna.lan docker compose up -
 всегда получает роль администратора, и вы сразу входите с ним; с этого момента
 вход обязателен.
 
-Или из командной строки (на сервере):
+Или из командной строки на сервере, в каталоге с `docker-compose.yml`:
 
 ```bash
 docker compose exec ariadna python -m src.auth create --name "Иван Петров" --role admin
 ```
+
+Там же: `python -m src.auth list` — список токенов, `python -m src.auth revoke <id>` —
+отозвать. Запущенный сервер подхватывает изменения сам, перезапуск не нужен.
 
 Токен показывается **один раз** — сохраните его. На диске (`data/tokens.json`)
 хранится только его хеш.
@@ -56,7 +59,9 @@ claude mcp add --transport http --scope user ariadna http://ariadna.lan:19879/mc
 ```
 
 или в `.mcp.json` проекта — так токен не попадёт в репозиторий, он берётся из
-переменной окружения:
+переменной окружения `ARIADNA_TOKEN` (задайте её у себя в системе). Имя
+переменной — любое, кроме служебных вроде `ANTHROPIC_API_KEY` или `NPM_TOKEN`:
+такие Claude Code в заголовках подставляет пустыми.
 
 ```json
 {
@@ -70,18 +75,23 @@ claude mcp add --transport http --scope user ariadna http://ariadna.lan:19879/mc
 }
 ```
 
-**Cursor** — `.cursor/mcp.json`:
+**Cursor** — `.cursor/mcp.json`, токен из той же переменной окружения
+(у Cursor подстановка пишется `${env:ИМЯ}`):
 
 ```json
 {
   "mcpServers": {
     "ariadna": {
       "url": "http://ariadna.lan:19879/mcp",
-      "headers": { "Authorization": "Bearer ar_..." }
+      "headers": { "Authorization": "Bearer ${env:ARIADNA_TOKEN}" }
     }
   }
 }
 ```
+
+Переменную окружения задайте до запуска редактора (в Windows — «Переменные
+среды» или `setx ARIADNA_TOKEN ar_...` и перезапуск Cursor): `.env`-файлы для
+удалённых серверов Cursor не читает.
 
 Другие клиенты MCP — так же: заголовок `Authorization` в настройках
 HTTP-сервера. Скрипты и API Web UI — тот же заголовок:
