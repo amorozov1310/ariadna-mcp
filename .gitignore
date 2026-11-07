@@ -32,3 +32,8 @@ dist/
 # ОС
 Thumbs.db
 .DS_Store
+
+# Ключи лицензий: закрытый ключ владельца и выданные ключи — никогда в git
+# (они живут в ~/.ariadna-license, docs/license.md).
+*.pem
+*.key

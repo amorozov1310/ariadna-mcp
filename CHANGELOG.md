@@ -19,6 +19,8 @@
   Установка — страница «Лицензия» в Web UI или `python -m src.license install`.
   Если токенов больше, чем разрешает ключ, работают администраторы и самые
   ранние токены, остальные получают 403 с объяснением.
+  Выдача ключей — локальная утилита `python -m tools.license_desk`: реестр
+  клиентов, выпуск и продление ключа, файл и текст письма (в образ не входит).
 - Регулярное обновление индекса из информационной базы
   ([docs/update.md](docs/update.md)): скрипты `scripts/update_from_infobase.ps1`
   (Windows) и `scripts/update_from_infobase.sh` (Linux, cron или systemd)
