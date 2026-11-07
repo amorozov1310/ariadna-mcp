@@ -158,7 +158,8 @@ def _start_mcp_streamable_http(pm, port: int):
         app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
         tokens = TokenStore(pm.data_dir)
         if tokens.enabled():
-            logger.info("Авторизация по токенам включена (%d токенов)", len(tokens.list()))
+            logger.info("Авторизация по токенам включена (%d токенов, лицензия: %s)",
+                        len(tokens.list()), tokens.license.state().message)
         elif os.environ.get('MCP_ALLOWED_HOSTS'):
             logger.warning("Ариадна открыта для других машин (MCP_ALLOWED_HOSTS), но токенов нет — "
                            "доступ без авторизации. Создайте токен администратора: "

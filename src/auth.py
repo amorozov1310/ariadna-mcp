@@ -17,6 +17,11 @@
 Первый токен администратора — из командной строки (в контейнере —
 `docker compose exec ariadna python -m src.auth create --name Имя --role admin`),
 дальше — в Web UI («Токены»).
+
+Без лицензии (src/license.py) — один токен: свой сервер можно закрыть
+бесплатно. Второй и следующие токены — командный режим, их число задаёт ключ.
+Если ключ пропал или не подходит к этой версии, работают первые разрешённые
+токены (администраторы — в первую очередь), остальные получают 403.
 """
 
 from __future__ import annotations
@@ -27,12 +32,14 @@ import json
 import logging
 import os
 import secrets
+import sys
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 from .core.fsretry import replace_with_retry
+from .license import LicenseStore
 
 logger = logging.getLogger('ariadna')
 
@@ -68,6 +75,7 @@ class TokenStore:
         self._tokens: dict[str, TokenInfo] = {}       # id -> info
         self._by_hash: dict[str, TokenInfo] = {}
         self._last_persist: dict[str, float] = {}
+        self.license = LicenseStore(data_dir)
 
     # ------------------------------------------------------------ чтение
     def _reload(self) -> None:
@@ -110,6 +118,28 @@ class TokenStore:
             self._reload()
             return sorted(self._tokens.values(), key=lambda t: (t.created_at, t.name))
 
+    def limit(self) -> int:
+        """Сколько токенов разрешает лицензия (без неё — один)."""
+        return self.license.state().users
+
+    def _allowed_ids(self) -> set[str]:
+        ordered = sorted(self._tokens.values(),
+                         key=lambda t: (t.role != 'admin', t.created_at, t.id))
+        return {t.id for t in ordered[:self.limit()]}
+
+    def denied(self, info: TokenInfo) -> str | None:
+        """Причина отказа токену сверх лицензии или None — токен работает."""
+        with self._lock:
+            self._reload()
+            if info.id in self._allowed_ids():
+                return None
+            state = self.license.state()
+        reason = (state.message if state.status != 'none'
+                  else 'лицензии командного режима нет')
+        return (f'Токен «{info.name}» не действует: {reason}. Без лицензии работает один '
+                f'токен (администратора), с ключом — столько, сколько в нём указано. '
+                f'Ключ устанавливает администратор на странице «Лицензия».')
+
     def verify(self, token: str | None) -> TokenInfo | None:
         if not token:
             return None
@@ -150,6 +180,15 @@ class TokenStore:
             self._reload()
             if getattr(self, '_broken', False):
                 raise ValueError(f'Файл токенов {self.path} повреждён — исправьте или удалите его')
+            limit = self.limit()
+            if len(self._tokens) >= limit:
+                state = self.license.state()
+                raise ValueError(
+                    'Без лицензии командного режима — один токен (закрыть свой сервер). '
+                    'Чтобы выдать токены команде, установите ключ на странице «Лицензия».'
+                    if not state.valid else
+                    f'Лицензия «{state.info.owner}» — на {limit} токенов, все заняты: '
+                    f'отзовите ненужный или расширьте лицензию.')
             info = TokenInfo(id=secrets.token_hex(4), name=name, role=role, hash=_hash(token),
                              created_at=datetime.now().isoformat(timespec='seconds'))
             self._tokens[info.id] = info
@@ -201,6 +240,13 @@ class MCPAuthMiddleware:
                                     (b'www-authenticate', b'Bearer realm="ariadna"')]})
             await send({'type': 'http.response.body', 'body': body})
             return
+        reason = self.store.denied(user)
+        if reason:
+            body = json.dumps({'error': 'license', 'detail': reason}, ensure_ascii=False).encode('utf-8')
+            await send({'type': 'http.response.start', 'status': 403,
+                        'headers': [(b'content-type', b'application/json; charset=utf-8')]})
+            await send({'type': 'http.response.body', 'body': body})
+            return
         scope['ariadna_user'] = user
         return await self.app(scope, receive, send)
 
@@ -221,7 +267,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     store = TokenStore(args.data_dir)
     if args.cmd == 'create':
-        info, token = store.create(args.name, args.role)
+        try:
+            info, token = store.create(args.name, args.role)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
         print(f'Токен для «{info.name}» ({info.role}), id {info.id}:')
         print(token)
         print('Сохраните его сейчас — повторно он не показывается.')

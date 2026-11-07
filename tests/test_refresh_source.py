@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.auth import TokenStore
 from src.core.project_manager import ProjectManager
+from tests.license_helper import install_team_license
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 HOST = {'Host': '127.0.0.1:19878'}
@@ -86,8 +87,9 @@ def test_refresh_no_wait_and_unknown_source(web):
     assert client.post('/api/projects/нет/sources/main/refresh').status_code == 404
 
 
-def test_refresh_is_allowed_for_user_role(web):
+def test_refresh_is_allowed_for_user_role(web, monkeypatch):
     pm, client, _ = web
+    install_team_license(monkeypatch, pm.data_dir)
     store = TokenStore(pm.data_dir)
     store.create('Админ', 'admin')
     _, robot = store.create('Робот выгрузки', 'user')

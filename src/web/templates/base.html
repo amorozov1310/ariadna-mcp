@@ -58,7 +58,8 @@
 {% if auth_user %}
 <span class="appbar-user" title="Роль: {{ auth_user.role }}">
     {% if auth_user.role == 'admin' %}<a href="/admin/tokens" class="navlink">
-        <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#key"/></svg> Токены</a>{% endif %}
+        <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#key"/></svg> Токены</a>
+    <a href="/admin/license" class="navlink">Лицензия</a>{% endif %}
     <span class="text-muted">{{ auth_user.name }}</span>
     <a href="/logout" class="navlink">Выйти</a>
 </span>
