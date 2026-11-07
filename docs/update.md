@@ -2,7 +2,9 @@
 
 Индекс Ариадны отражает выгрузку конфигурации в файлы. Чтобы он не отставал
 от рабочей базы, выгрузку можно обновлять по расписанию — например, каждую
-ночь — готовым скриптом `scripts/update_from_infobase.ps1`:
+ночь — готовым скриптом: `scripts/update_from_infobase.ps1` для Windows или
+`scripts/update_from_infobase.sh` для Linux (те же шаги и параметры, см.
+[«Linux»](#linux)):
 
 ```
 Информационная база 1С
@@ -118,6 +120,101 @@ Register-ScheduledTask -TaskName 'Ариадна — обновление myconf
 
 Проверить сразу, не дожидаясь ночи: `Start-ScheduledTask -TaskName 'Ариадна — обновление myconf'`.
 
+## Linux
+
+`scripts/update_from_infobase.sh` — те же шаги, что у Windows-скрипта, и те же
+параметры в виде `--ключ`: `--ariadna-url`, `--project`, `--source`,
+`--file` / `--server`, `--user`, `--extensions`, `--extension-sources`,
+`--dump-dir`, `--target-root`, `--server-dump`, `--platform`,
+`--timeout-minutes`, `--skip-dump`; справка — `--help`. Пароль базы и токен
+Ариадны — в переменных `ONEC_PASSWORD` и `ARIADNA_TOKEN`.
+
+Что нужно на машине робота:
+
+- **клиент платформы 1С для Linux** (Конфигуратор `1cv8`) 8.3.25 или новее —
+  скрипт сам находит самый новый в `/opt/1cv8`, другой — `--platform`;
+- **графический экран** — Конфигуратору он нужен и в пакетном режиме. На
+  сервере без него скрипт запускает Конфигуратор через `xvfb-run`: установите
+  пакет `xvfb` (`sudo apt install xvfb`);
+- `curl`, `tar`; для передачи в папку — `rsync`; `python3` — для красивой
+  строки результата в журнале (без него в журнал попадёт ответ как есть).
+
+Архив передаётся в формате `tar.gz`, в папку — `rsync --delete` (зеркало,
+без макетов). Серверная база указывается так же, как в Windows: `сервер\база`
+или `сервер:порт\база`.
+
+### Первый запуск
+
+```bash
+export ARIADNA_TOKEN=ar_... ONEC_PASSWORD=...
+./update_from_infobase.sh --ariadna-url http://ariadna.lan:19878 --project myconf \
+    --server 'srv1c\myconf' --user Робот --dump-dir /var/lib/ariadna-dump/myconf \
+    --extensions 'Расширение1,Расширение2'
+```
+
+### Расписание
+
+Параметры удобнее держать в маленьком сценарии-обёртке, а секреты — в
+отдельном файле, доступном только пользователю робота. Тогда ни cron, ни
+systemd не нужно экранировать обратный слэш в имени базы.
+
+`/etc/ariadna/update.env` (`chmod 600`, владелец — пользователь робота):
+
+```bash
+ARIADNA_TOKEN=ar_...
+ONEC_PASSWORD=...
+```
+
+`/opt/ariadna/update-myconf.sh` (`chmod +x`):
+
+```bash
+#!/usr/bin/env bash
+set -a; . /etc/ariadna/update.env; set +a
+exec /opt/ariadna/update_from_infobase.sh --ariadna-url http://ariadna.lan:19878 \
+    --project myconf --server 'srv1c\myconf' --user Робот \
+    --dump-dir /var/lib/ariadna-dump/myconf --extensions 'Расширение1,Расширение2'
+```
+
+**cron** — `/etc/cron.d/ariadna-myconf`, каждую ночь в 02:00 от пользователя
+`robot`:
+
+```
+0 2 * * * robot /opt/ariadna/update-myconf.sh >> /var/log/ariadna-update.log 2>&1
+```
+
+**или systemd** — `/etc/systemd/system/ariadna-update-myconf.service`:
+
+```ini
+[Unit]
+Description=Ариадна: обновление индекса myconf
+
+[Service]
+Type=oneshot
+User=robot
+ExecStart=/opt/ariadna/update-myconf.sh
+```
+
+и `/etc/systemd/system/ariadna-update-myconf.timer`:
+
+```ini
+[Unit]
+Description=Ариадна: обновление индекса myconf каждую ночь
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ariadna-update-myconf.timer
+sudo systemctl start ariadna-update-myconf.service     # проверить сразу
+journalctl -u ariadna-update-myconf.service             # результат
+```
+
 ## 5. Результат и журналы
 
 - Журнал каждого запуска — `<DumpDir>\logs\update_<дата>.log`; журнал
@@ -127,6 +224,7 @@ Register-ScheduledTask -TaskName 'Ариадна — обновление myconf
   журнале Конфигуратора); `2` — ошибка передачи или индексации (нет доступа,
   неверный токен, ошибка индексации); `3` — неверные параметры.
 - В Web UI: статус и время индексации — на странице проекта.
+- На Linux — те же файлы в `<dump-dir>/logs/` и те же коды возврата.
 
 ## Без скрипта: API
 
@@ -151,10 +249,6 @@ curl -X POST -H "Authorization: Bearer ar_..." -F "xml_archive=@dump.zip" \
 вызовов). HTTP: 200 — готово, 202 — запущено или ещё идёт, 409 — проект
 занят другой индексацией дольше `timeout`, 500 — индексация завершилась с
 ошибкой. Роль токена — `user`.
-
-На Linux выгрузка — тем же Конфигуратором (`1cv8 DESIGNER /F … /DumpConfigToFiles …`,
-см. справку платформы «Запуск Конфигуратора в пакетном режиме»), передача —
-`curl`, как выше.
 
 Агент может обновить индекс сам: MCP-инструмент `reindex`, затем
 `get_index_status` — дождаться готовности.
