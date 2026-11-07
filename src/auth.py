@@ -32,6 +32,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .core.fsretry import replace_with_retry
+
 logger = logging.getLogger('ariadna')
 
 ROLES = ('admin', 'user')
@@ -130,7 +132,7 @@ class TokenStore:
         tmp = self.path.with_suffix('.json.tmp')
         tmp.write_text(json.dumps([asdict(t) for t in self._tokens.values()],
                                   ensure_ascii=False, indent=2), encoding='utf-8')
-        os.replace(tmp, self.path)
+        replace_with_retry(tmp, self.path)     # Windows: файл занят антивирусом
         try:
             self._mtime = self.path.stat().st_mtime_ns
         except FileNotFoundError:
