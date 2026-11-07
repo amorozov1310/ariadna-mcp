@@ -23,6 +23,8 @@ dependencies = [
     "jinja2",
     "aiosqlite",
     "python-multipart",
+    # Лицензия командного режима: проверка подписи Ed25519 (src/license.py).
+    "cryptography",
 ]
 
 [project.optional-dependencies]
@@ -57,5 +59,5 @@ include = ["src", "src.*"]
 # Не-.py файлы, которые код читает во время работы (поиск: read_text, open,
 # Path(__file__), Jinja2Templates, StaticFiles, FileResponse).
 [tool.setuptools.package-data]
-"src" = ["VERSION"]                                   # src/__init__.py
+"src" = ["VERSION", "RELEASE_DATE"]                   # src/__init__.py, src/license.py
 "src.web" = ["templates/*.html", "static/*", "static/fonts/*"]   # web/app.py

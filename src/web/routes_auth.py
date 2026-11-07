@@ -11,10 +11,12 @@ import os
 import re
 from urllib.parse import quote
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ..auth import ROLES, TokenStore, bearer
+from .. import __version__
+from ..license import LicenseError, release_date
 from .app import app, get_pm, templates
 
 router = APIRouter()
@@ -77,6 +79,12 @@ async def auth_middleware(request: Request, call_next):
         target = path + (f'?{request.url.query}' if request.url.query else '')
         return RedirectResponse(f'/login?next={quote(target)}', status_code=303)
     request.state.user = user
+    reason = store.denied(user)
+    if reason:
+        if _wants_json(request):
+            return JSONResponse({'detail': reason}, status_code=403)
+        from .app import http_exception_handler
+        return await http_exception_handler(request, HTTPException(403, reason))
     admin_only = (_ADMIN_POST.match(path) if request.method == 'POST' else _ADMIN_GET.match(path))
     if admin_only and user.role != 'admin':
         if _wants_json(request):
@@ -123,6 +131,7 @@ def tokens_page(request: Request, created: str = '', first: str = '', error: str
     new_info = next((t for t in store.list() if t.id == created), None) if new_token else None
     resp = templates.TemplateResponse(name='tokens.html', request=request, context={
         'tokens': store.list(), 'roles': ROLES, 'error': error,
+        'limit': store.limit(), 'license': store.license.state(),
         'enabled': store.enabled(), 'me': current_user(request),
         'new_token': new_token if new_info else '', 'new_info': new_info, 'first': bool(first)})
     if new_token:
@@ -168,3 +177,32 @@ def revoke_token(request: Request, token_id: str):
     if me is not None and me.id == token_id:
         return RedirectResponse('/logout', status_code=303)
     return RedirectResponse('/admin/tokens', status_code=303)
+
+
+# ---------------------------------------------------------------- лицензия
+
+@router.get('/admin/license', response_class=HTMLResponse)
+def license_page(request: Request, error: str = '', installed: str = ''):
+    store = tokens()
+    return templates.TemplateResponse(name='license.html', request=request, context={
+        'state': store.license.state(), 'used': len(store.list()), 'limit': store.limit(),
+        'released': release_date(), 'version': __version__, 'error': error, 'installed': bool(installed)})
+
+
+@router.post('/api/admin/license')
+async def install_license(request: Request, key: str = Form(''),
+                          key_file: UploadFile | None = File(None)):
+    # Форма страницы — редирект, скрипт (Accept: application/json) — JSON.
+    json_reply = 'application/json' in request.headers.get('accept', '')
+    text = key
+    if key_file is not None and key_file.filename:
+        text = (await key_file.read(64 * 1024)).decode('utf-8', errors='replace')
+    try:
+        state = tokens().license.install(text)
+    except LicenseError as e:
+        if json_reply:
+            return JSONResponse({'detail': f'Ключ не принят: {e}'}, status_code=400)
+        return RedirectResponse(f'/admin/license?error={quote(str(e))}', status_code=303)
+    if json_reply:
+        return JSONResponse({'status': state.status, 'detail': state.message})
+    return RedirectResponse('/admin/license?installed=1', status_code=303)

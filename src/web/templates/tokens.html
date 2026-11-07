@@ -12,6 +12,18 @@
         странице «Вход». Роль <b>admin</b> — проекты, источники, их удаление и токены;
         <b>user</b> — поиск, все инструменты чтения, переиндексация, словарь.
     </p>
+    <p class="text-muted" style="font-size:var(--fs-sm)">
+        Токенов: <b>{{ tokens|length }}</b> из <b>{{ limit }}</b> —
+        {% if license.valid %}{{ license.message }}{% else %}без лицензии один токен (закрыть свой
+        сервер бесплатно), токены для команды — по ключу{% endif %}.
+        <a href="/admin/license">Лицензия</a>
+    </p>
+    {% if license.status in ('outdated', 'invalid') %}
+    <div class="notice notice-warning" style="margin-bottom:var(--space-3)">
+        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+        <div>Лицензия: {{ license.message }}. Сверх одного токена доступ закрыт.</div>
+    </div>
+    {% endif %}
     {% if not enabled %}
     <div class="notice notice-info" style="margin-bottom:var(--space-3)">
         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.auth import TokenStore, main as auth_cli
 from src.core.project_manager import ProjectManager
+from tests.license_helper import install_team_license
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 HOST = {'Host': '127.0.0.1:19878'}
@@ -88,8 +89,9 @@ def test_first_token_from_web_is_admin_and_logs_in(web):
     assert anon.get('/health').status_code == 200                  # healthcheck без токена
 
 
-def test_roles_and_bearer(web):
+def test_roles_and_bearer(web, monkeypatch):
     pm, client = web
+    install_team_license(monkeypatch, pm.data_dir)
     store = TokenStore(pm.data_dir)
     _, admin = store.create('Админ', 'admin')
     _, user = store.create('Разработчик', 'user')
@@ -155,6 +157,7 @@ def test_mcp_requires_token_and_admin_for_remove_source(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = ProjectManager(tmpdir)
         pm.create_project('p1', 'p1')
+        install_team_license(monkeypatch, tmpdir)
         store = TokenStore(tmpdir)
         _, admin = store.create('Админ', 'admin')
         _, user = store.create('Разработчик', 'user')
