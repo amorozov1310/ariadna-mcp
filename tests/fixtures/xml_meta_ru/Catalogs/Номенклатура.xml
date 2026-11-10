@@ -10,6 +10,11 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<Hierarchical>true</Hierarchical>
+			<HierarchyType>HierarchyFoldersAndItems</HierarchyType>
+			<CodeLength>11</CodeLength>
+			<CodeType>String</CodeType>
+			<DescriptionLength>150</DescriptionLength>
 		</Properties>
 		<ChildObjects>
 			<Attribute uuid="5c2cb4b6-e01e-5b08-ae52-5166401d31dd">

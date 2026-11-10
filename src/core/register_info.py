@@ -12,6 +12,7 @@ RegisterRecords); object_properties приводит их к русским кл
 """
 
 from .metadata_model import MetadataObject
+from .standard_attributes import standard_rows
 
 REGISTER_TYPE = 'ВидРегистра'
 PERIODICITY = 'Периодичность'
@@ -47,11 +48,12 @@ def _value(raw: str) -> str:
 
 
 def object_properties(obj: MetadataObject) -> list[tuple[str, str]]:
-    """(ключ, значение) для таблицы object_properties: свойства регистра и
-    движения документа (по строке на регистр)."""
+    """(ключ, значение) для таблицы object_properties: свойства регистра,
+    движения документа (по строке на регистр) и стандартные реквизиты
+    (standard_attributes)."""
     rows = [(_KEYS[k], _value(v)) for k, v in obj.properties.items() if k in _KEYS and v and v.strip()]
     rows += [(RECORDS, r) for r in obj.register_records]
-    return rows
+    return rows + standard_rows(obj)
 
 
 def _resource_fields(resources: list[str], suffixes: tuple[str, ...]) -> str:

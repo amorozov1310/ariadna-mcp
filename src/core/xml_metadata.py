@@ -24,6 +24,7 @@ from .metadata_model import (
     OBJECT_TYPE_MAP, AttributeInfo, CommonModuleInfo, ConfigInfo, EnumValueInfo,
     FormInfo, MetadataObject, SubsystemInfo,
 )
+from .standard_attributes import OWNERS, RAW_PROPERTIES as STANDARD_PROPERTIES
 from .xml_walker import IO_THREADS
 
 logger = logging.getLogger('ariadna')
@@ -302,6 +303,22 @@ def _build_object(el, kind_en: str, kind_ru: str, full_name: str, lang: _Lang) -
             head, dot, tail = ref.partition('.')
             # Полное имя — с русским видом, как у объектов в индексе.
             obj.register_records.append(_KIND_RU.get(head, head) + dot + tail)
+
+    # Стандартные реквизиты (standard_attributes): длина кода и
+    # наименования, иерархия, владельцы, номер, проведение.
+    for prop in STANDARD_PROPERTIES.get(kind_en, ()):
+        value = _text(props, prop)
+        if value:
+            obj.properties[prop] = value
+    if kind_en == 'Catalog':
+        owners = []
+        for item in _children(_child(props, 'Owners'), 'Item'):
+            ref = (item.text or '').strip()
+            if ref and not _UUID.match(ref):
+                head, dot, tail = ref.partition('.')
+                owners.append(_KIND_RU.get(head, head) + dot + tail)
+        if owners:
+            obj.properties[OWNERS] = ', '.join(owners)
 
     for child in _children_of(el, 'ChildObjects'):
         tag = _local(child.tag)

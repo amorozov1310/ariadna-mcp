@@ -10,6 +10,12 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<Hierarchical>false</Hierarchical>
+			<CodeLength>9</CodeLength>
+			<DescriptionLength>50</DescriptionLength>
+			<Owners>
+				<xr:Item xsi:type="xr:MDObjectRef">Catalog.Products</xr:Item>
+			</Owners>
 		</Properties>
 		<ChildObjects/>
 	</Catalog>
