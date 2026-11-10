@@ -10,6 +10,9 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<Hierarchical>false</Hierarchical>
+			<CodeLength>9</CodeLength>
+			<DescriptionLength>50</DescriptionLength>
 		</Properties>
 		<ChildObjects/>
 	</Catalog>

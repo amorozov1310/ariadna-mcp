@@ -315,7 +315,9 @@ END;
 -- Свойства объекта для запроса к данным (src/core/register_info.py): вид
 -- регистра, периодичность, режим записи, план счетов; у документа —
 -- регистры, по которым он делает движения (ключ «Движения», строка на
--- регистр). Новая таблица (IF NOT EXISTS) — заполнится при следующем reindex.
+-- регистр); стандартные реквизиты — длина кода и наименования, иерархия,
+-- владельцы, номер, проведение (src/core/standard_attributes.py).
+-- Новая таблица (IF NOT EXISTS) — заполнится при следующем reindex.
 CREATE TABLE IF NOT EXISTS object_properties (
     object_id  INTEGER NOT NULL REFERENCES metadata_objects(id) ON DELETE CASCADE,
     key        TEXT NOT NULL,

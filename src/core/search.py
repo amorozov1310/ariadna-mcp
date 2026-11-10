@@ -19,6 +19,7 @@ from typing import NamedTuple
 
 from .db import Database
 from .register_info import RECORDS, query_hints
+from .standard_attributes import standard_attributes_line
 from .metadata_model import canonicalize_kind
 
 logger = logging.getLogger('ariadna')
@@ -1243,6 +1244,9 @@ def format_object_details(details: dict, detail: str = 'brief') -> str:
         if m.get('server_call'): flags.append('ВызовСервера')
         if flags:
             lines.append(f"Флаги: {', '.join(flags)}")
+    standard = standard_attributes_line(obj.get('kind', ''), details.get('properties') or {})
+    if standard:
+        lines.append(f"\n{standard}")
     attrs = details.get('attributes', [])
     if attrs:
         shown_attrs = attrs[:30] if detail == 'brief' else attrs

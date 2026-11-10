@@ -292,8 +292,14 @@ def build_ru() -> Report:
     for name, syn, attrs, forms, tss in catalogs:
         path = f'{K["Catalog"]}.{name}'
         r.head(2, path, name, syn)
-        r.prop(3, 'Иерархический', 'Ложь')
-        r.line(3, 'Владельцы:')
+        # Стандартные реквизиты: без кода, иерархические, подчинённый (_CATALOG_STD_RU, _OWNERS).
+        hierarchy, code_length = _CATALOG_STD_RU.get(name, ('', '9'))
+        r.prop(3, 'Иерархический', 'Истина' if hierarchy else 'Ложь')
+        if hierarchy:
+            r.prop(3, 'ВидИерархии', hierarchy)
+        r.array(3, 'Владельцы', _OWNERS.get(f'Справочник.{name}', []))
+        r.prop(3, 'ДлинаКода', code_length)
+        r.prop(3, 'ТипКода', 'Строка')
         r.prop(3, 'ДлинаНаименования', '150')
         r.line(3, 'СтандартныеРеквизиты')
         r.line(3, 'Характеристики')
@@ -352,6 +358,8 @@ def build_ru() -> Report:
     for name, syn, attrs, ts in documents:
         path = f'{K["Document"]}.{name}'
         r.head(2, path, name, syn)
+        r.prop(3, 'ДлинаНомера', '11')
+        r.prop(3, 'ТипНомера', 'Строка')
         r.prop(3, 'Проведение', 'Разрешить')
         r.line(3, 'СтандартныеРеквизиты')
         r.line(3, 'Характеристики')
@@ -538,7 +546,9 @@ def build_en() -> Report:
         path = f'{K["Catalog"]}.{name}'
         r.head(2, path, name, syn)
         r.prop(3, 'Hierarchical', F)
-        r.line(3, 'Owners:')
+        r.array(3, 'Owners', _OWNERS.get(f'Справочник.{name}', []))
+        r.prop(3, 'CodeLength', '9')
+        r.prop(3, 'DescriptionLength', '50')
         r.line(3, 'StandardAttributes')
         r.line(3, 'Characteristics')
         # Многострочное значение элемента массива — как в настоящем отчёте.
@@ -631,6 +641,31 @@ _REGISTER_PROPS = {
                                       {'День': 'Day', 'Непериодический': 'Nonperiodical'}),
     'InformationRegisterPeriodicity': ('InformationRegisterPeriodicity', {}),
 }
+# Стандартные реквизиты: ключ отчёта (RU/EN) → (тег выгрузки, значения → XML).
+_STD_BOOL = {'Истина': 'true', 'Ложь': 'false', 'True': 'true', 'False': 'false'}
+_STD_TYPE = {'Строка': 'String', 'Число': 'Number'}
+_STANDARD_PROPS = {
+    'ДлинаКода': ('CodeLength', {}), 'CodeLength': ('CodeLength', {}),
+    'ТипКода': ('CodeType', _STD_TYPE), 'CodeType': ('CodeType', {}),
+    'ДлинаНаименования': ('DescriptionLength', {}), 'DescriptionLength': ('DescriptionLength', {}),
+    'Иерархический': ('Hierarchical', _STD_BOOL), 'Hierarchical': ('Hierarchical', _STD_BOOL),
+    'ВидИерархии': ('HierarchyType', {'ИерархияГруппИЭлементов': 'HierarchyFoldersAndItems',
+                                      'ИерархияЭлементов': 'HierarchyOfItems'}),
+    'ДлинаНомера': ('NumberLength', {}), 'ТипНомера': ('NumberType', _STD_TYPE),
+    'Проведение': ('Posting', {'Разрешить': 'Allow', 'Запретить': 'Deny'}),
+}
+# Справочники демо-склада со стандартными реквизитами не по умолчанию:
+# имя → (вид иерархии или '' — не иерархический, длина кода; '0' — кода нет).
+_CATALOG_STD_RU = {
+    'Номенклатура': ('ИерархияГруппИЭлементов', '11'),
+    'ВидыНоменклатуры': ('ИерархияЭлементов', '9'),
+    'Сотрудники': ('', '0'),
+}
+# Владельцы подчинённых справочников (отчёт: «Владельцы», выгрузка: Owners).
+_OWNERS = {
+    'Справочник.ЕдиницыИзмерения': ['Справочник.Номенклатура'],
+    'Справочник.Units': ['Справочник.Products'],
+}
 _VALUE_EN = {'ВыдаватьОшибку': 'ShowError', 'НеПроверять': 'DontCheck', 'ДляЭлемента': 'ForItem',
              'НеИспользовать': 'DontUse'}
 _MODULE_FLAGS = ('Global', 'ClientManagedApplication', 'Server', 'ExternalConnection',
@@ -704,9 +739,14 @@ def _object_xml(obj, kind_en, lang, nested_subsystems, english):
     if obj.type_desc:
         props += _type_xml(obj.type_desc, t)
     for key, value in obj.properties.items():
-        if key in _REGISTER_PROPS:
-            tag, values = _REGISTER_PROPS[key]
+        if key in _REGISTER_PROPS or key in _STANDARD_PROPS:
+            tag, values = _REGISTER_PROPS.get(key) or _STANDARD_PROPS[key]
             props += f'{t}<{tag}>{values.get(value, value)}</{tag}>\n'
+    owners = [f'{_KIND_EN[o.split(".", 1)[0]]}.{o.split(".", 1)[1]}'
+              for o in _OWNERS.get(obj.full_name, [])]
+    if owners:
+        props += f'{t}<Owners>\n' + ''.join(
+            f'{t}\t<xr:Item xsi:type="xr:MDObjectRef">{o}</xr:Item>\n' for o in owners) + f'{t}</Owners>\n'
     if kind_en == 'InformationRegister':
         props += f'{t}<WriteMode>Independent</WriteMode>\n'
     records = _RECORDS_RU.get(obj.full_name, [])

@@ -10,6 +10,9 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<NumberLength>11</NumberLength>
+			<NumberType>String</NumberType>
+			<Posting>Allow</Posting>
 			<RegisterRecords>
 				<xr:Item xsi:type="xr:MDObjectRef">AccumulationRegister.ТоварыНаСкладах</xr:Item>
 				<xr:Item xsi:type="xr:MDObjectRef">AccumulationRegister.Продажи</xr:Item>

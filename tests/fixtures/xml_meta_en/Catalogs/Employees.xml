@@ -10,6 +10,9 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<Hierarchical>false</Hierarchical>
+			<CodeLength>9</CodeLength>
+			<DescriptionLength>50</DescriptionLength>
 		</Properties>
 		<ChildObjects>
 			<Attribute uuid="052e0c42-7a3d-5725-82b0-469ae89c5860">

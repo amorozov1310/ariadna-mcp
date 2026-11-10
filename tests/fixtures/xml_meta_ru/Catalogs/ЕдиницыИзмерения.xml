@@ -10,6 +10,13 @@
 				</v8:item>
 			</Synonym>
 			<Comment/>
+			<Hierarchical>false</Hierarchical>
+			<CodeLength>9</CodeLength>
+			<CodeType>String</CodeType>
+			<DescriptionLength>150</DescriptionLength>
+			<Owners>
+				<xr:Item xsi:type="xr:MDObjectRef">Catalog.Номенклатура</xr:Item>
+			</Owners>
 		</Properties>
 		<ChildObjects>
 			<Attribute uuid="151eb61b-50c3-5258-bde8-504618eb420d">
