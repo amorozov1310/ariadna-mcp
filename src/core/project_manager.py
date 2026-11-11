@@ -1036,6 +1036,12 @@ class ProjectManager:
         missing = tuple(p for p in pairs if self._cached_diff(*p) is None)
         if not missing:
             return True
+        # Кто-то из пары индексируется — считать нечего: результат устарел бы
+        # сразу. Сравнение пересчитает _warm_related, когда индексация кончится.
+        busy = sorted({pid for pair in missing for pid in pair
+                       if self.get_project(pid).status == 'indexing'})
+        if busy:
+            raise ValueError(f"Проект «{busy[0]}» сейчас индексируется — сравнение после окончания")
         with self._base_diff_lock:
             if self._warm_failed.get(project_id) == missing:
                 # Фоновый расчёт этих пар упал — пусть вызывающий посчитает
