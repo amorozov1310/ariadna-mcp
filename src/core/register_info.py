@@ -20,6 +20,8 @@ WRITE_MODE = 'РежимЗаписи'
 CHART_OF_ACCOUNTS = 'ПланСчетов'
 CORRESPONDENCE = 'Корреспонденция'
 RECORDS = 'Движения'
+# Тип значения определяемого типа, константы, параметра сеанса.
+VALUE_TYPE = 'Тип'
 
 # Свойство в выгрузке → ключ в индексе.
 _KEYS = {
@@ -49,10 +51,13 @@ def _value(raw: str) -> str:
 
 def object_properties(obj: MetadataObject) -> list[tuple[str, str]]:
     """(ключ, значение) для таблицы object_properties: свойства регистра,
-    движения документа (по строке на регистр) и стандартные реквизиты
+    движения документа (по строке на регистр), тип значения (определяемый
+    тип, константа, параметр сеанса) и стандартные реквизиты
     (standard_attributes)."""
     rows = [(_KEYS[k], _value(v)) for k, v in obj.properties.items() if k in _KEYS and v and v.strip()]
     rows += [(RECORDS, r) for r in obj.register_records]
+    if obj.type_desc:
+        rows.append((VALUE_TYPE, obj.type_desc))
     return rows + standard_rows(obj)
 
 
