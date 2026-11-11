@@ -512,3 +512,22 @@ def test_main_source_with_any_id(release_pm):
                                                  'module_name': 'ЦеныСервер',
                                                  'procedure_name': 'РассчитатьЦену'})
     assert '+\tВозврат 120; // наценка' in text and '+\tВозврат 110;' in text
+
+
+def test_no_diff_while_a_project_is_indexing(pm):
+    """Проект или его база индексируется — сравнение не запускается (оно
+    устарело бы сразу); после индексации его пересчитает _warm_related."""
+    pm.reindex('custom')
+    pm.close_all()                                  # дождаться прогрева после reindex
+    pm._base_diffs.clear()
+    pm._warming.clear()
+    for busy in ('custom', 'typical'):
+        pm.get_project(busy).status = 'indexing'
+        with pytest.raises(ValueError, match=f'«{busy}»'):
+            pm.warm_diffs('custom')
+        pm._warm_related('typical')                 # окончание индексации базы
+        assert 'custom' not in pm._warming
+        pm.get_project(busy).status = 'ready'
+    pm._warm_related('custom')
+    pm._warming['custom'].join(10)
+    assert pm.warm_diffs('custom') is True
