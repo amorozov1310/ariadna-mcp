@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .db import Database
-from .register_info import RECORDS, query_hints
+from .register_info import RECORDS, VALUE_TYPE, query_hints
 from .standard_attributes import standard_attributes_line
 from .metadata_model import canonicalize_kind
 
@@ -33,6 +33,7 @@ SEARCH_CODE_FTS_MODULES = 50         # модулей-кандидатов из 
 SEARCH_CODE_FALLBACK_MODULES = 300   # модулей в резервном просмотре без FTS
 SEARCH_CODE_MAX_PER_MODULE = 5       # вхождений из одного модуля
 RECORDED_BY_BRIEF = 15               # документов-регистраторов в detail="brief"
+SUBSYSTEM_CONTENT_BRIEF = 50         # объектов состава подсистемы в detail="brief"
 
 # Ранжированный поиск объектов метаданных (search_metadata): вопрос своими
 # словами — «сколько должны пайщикам», «где сейчас техника» — по основам слов
@@ -466,6 +467,20 @@ class SearchEngine:
                GROUP BY m.full_name ORDER BY registers, m.full_name""",
             (RECORDS, obj['full_name']))]
 
+        # Подсистема: состав и дочерние подсистемы (прямые, на один уровень:
+        # «Подсистема.X.Подсистемы.Y» / «….Subsystems.Y»).
+        content = [r['content_name'] for r in conn.execute(
+            "SELECT content_name FROM subsystem_content WHERE subsystem_id = ? ORDER BY id", (obj_id,))]
+        children = []
+        if obj['kind'] == 'Подсистема':
+            prefix = obj['full_name_cf'] + '.'
+            for r in conn.execute(
+                    """SELECT full_name, full_name_cf, synonym FROM metadata_objects
+                       WHERE source_id = ? AND kind = 'Подсистема' AND full_name_cf LIKE ? || '%'
+                       ORDER BY full_name""", (obj['source_id'], prefix)):
+                if r['full_name_cf'][len(prefix):].count('.') == 1:
+                    children.append({'full_name': r['full_name'], 'synonym': r['synonym']})
+
         obj_dict = dict(obj)
         # Ambiguity info (multiple sources have this full_name)
         other_matches = [
@@ -483,6 +498,8 @@ class SearchEngine:
             'module': dict(module) if module else None,
             'properties': properties,
             'recorded_by': recorded_by,
+            'subsystem_content': content,
+            'child_subsystems': children,
             'source_id': obj['source_id'],
             'source_label': obj['source_label'] or obj['source_id'],
             'matches': other_matches,       # all sources that have this full_name
@@ -1208,6 +1225,10 @@ def format_object_details(details: dict, detail: str = 'brief') -> str:
         if other:
             lines.append(f"⚠ Этот объект есть также в источниках: {', '.join(other)}")
 
+    value_type = (details.get('properties') or {}).get(VALUE_TYPE) or []
+    if value_type:
+        lines.append(f"Тип: {value_type[0]}")
+
     resources = [a['name'] for a in details.get('attributes', []) if a['kind'] == 'Ресурс']
     hints = query_hints(obj['full_name'], obj.get('kind', ''), details.get('properties') or {},
                         resources)
@@ -1274,6 +1295,19 @@ def format_object_details(details: dict, detail: str = 'brief') -> str:
         lines.append(f"\nФормы ({len(forms)}):")
         for f in forms:
             lines.append(f"  {f['name']}")
+    content = details.get('subsystem_content') or []
+    if content:
+        shown = content if detail == 'full' else content[:SUBSYSTEM_CONTENT_BRIEF]
+        lines.append(f"\nСостав ({len(content)}):")
+        lines.extend(f"  {c}" for c in shown)
+        if len(shown) < len(content):
+            lines.append(f"  ... and {len(content) - len(shown)} more (detail=\"full\" for all)")
+    children = details.get('child_subsystems') or []
+    if children:
+        lines.append(f"\nДочерние подсистемы ({len(children)}):")
+        for c in children:
+            syn = f" ({c['synonym']})" if c.get('synonym') else ''
+            lines.append(f"  {c['full_name']}{syn}")
     evs = details.get('enum_values', [])
     if evs:
         lines.append(f"\nЗначения ({len(evs)}):")
