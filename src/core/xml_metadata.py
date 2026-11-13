@@ -14,8 +14,10 @@
 Команды, макеты, шаблоны URL и прочие дочерние элементы пропускаются.
 """
 
+import html
 import logging
 import re
+from html.parser import HTMLParser
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -358,6 +360,55 @@ def is_russian_dump(xml_root: str | Path) -> bool:
     return True
 
 
+HELP_MAX_CHARS = 20000   # справка длиннее — обрезается: назначение объекта в начале
+
+
+class _HelpText(HTMLParser):
+    """HTML справки → текст: без разметки, стилей и скриптов; абзацы — переводом строки."""
+    BLOCKS = {'p', 'div', 'br', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'ul', 'ol'}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.skip = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('script', 'style', 'head'): self.skip += 1
+        elif tag in self.BLOCKS: self.parts.append('\n')
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style', 'head') and self.skip: self.skip -= 1
+        elif tag in self.BLOCKS: self.parts.append('\n')
+
+    def handle_data(self, data):
+        if not self.skip: self.parts.append(data)
+
+
+def help_to_text(markup: str) -> str:
+    parser = _HelpText()
+    try:
+        parser.feed(markup)
+        parser.close()
+    except Exception:          # битая разметка — не повод терять справку
+        return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', markup))).strip()[:HELP_MAX_CHARS]
+    lines = (re.sub(r'[ \t\xa0﻿]+', ' ', ln).strip() for ln in ''.join(parser.parts).split('\n'))
+    return '\n'.join(ln for ln in lines if ln)[:HELP_MAX_CHARS]
+
+
+def read_help(obj_dir: Path) -> str:
+    """Справка объекта из выгрузки: Ext/Help/ru.html (иначе первый .html каталога). Нет — пусто."""
+    help_dir = obj_dir / 'Ext' / 'Help'
+    try:
+        pages = sorted(help_dir.glob('*.html'), key=lambda p: (p.stem != 'ru', p.name))
+    except OSError:
+        return ''
+    for page in pages:
+        try:
+            return help_to_text(page.read_text(encoding='utf-8-sig', errors='replace'))
+        except OSError as e:
+            logger.warning('Справка: не прочитан %s (%s)', page, e)
+    return ''
+
+
 def parse_xml_dump(xml_root: str | Path) -> tuple[ConfigInfo, list[MetadataObject]]:
     """ConfigInfo и объекты метаданных из корня XML-выгрузки.
 
@@ -393,13 +444,17 @@ def parse_xml_dump(xml_root: str | Path) -> tuple[ConfigInfo, list[MetadataObjec
         el = load(dir_path / f'{name}.xml')
         if el is None:
             return []
-        found = [_build_object(el, 'Subsystem', 'Подсистема', full_name, lang)]
+        found = [with_help(_build_object(el, 'Subsystem', 'Подсистема', full_name, lang), dir_path / name)]
         for nested in _children(_child(el, 'ChildObjects'), 'Subsystem'):
             nested_name = (nested.text or '').strip()
             if nested_name:
                 found += subsystem(dir_path / name / 'Subsystems', nested_name,
                                    f'{full_name}.{sub_word}.{nested_name}')
         return found
+
+    def with_help(obj: MetadataObject, obj_dir: Path) -> MetadataObject:
+        obj.help_text = read_help(obj_dir)
+        return obj
 
     def child_objects(child) -> list[MetadataObject]:
         kind_en = _local(child.tag)
@@ -410,7 +465,9 @@ def parse_xml_dump(xml_root: str | Path) -> tuple[ConfigInfo, list[MetadataObjec
         if kind_en == 'Subsystem':
             return subsystem(root / plural, name, f'Подсистема.{name}')
         el = load(root / plural / f'{name}.xml')
-        return [_build_object(el, kind_en, kind_ru, f'{kind_ru}.{name}', lang)] if el is not None else []
+        if el is None:
+            return []
+        return [with_help(_build_object(el, kind_en, kind_ru, f'{kind_ru}.{name}', lang), root / plural / name)]
 
     # Файлы объектов читаются параллельно: через 9p (Docker Desktop на
     # Windows) чтение десятков тысяч файлов упирается в задержку каждого

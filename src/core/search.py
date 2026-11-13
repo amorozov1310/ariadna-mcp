@@ -43,6 +43,10 @@ SUBSYSTEM_CONTENT_BRIEF = 50         # объектов состава подс�
 METADATA_FTS_WEIGHTS = (1.0, 3.0, 6.0, 1.0)      # full_name, name, synonym, comment
 ATTRIBUTE_FTS_WEIGHTS = (2.0, 4.0, 0.5, 1.0)     # name, synonym, type_desc, comment
 METADATA_ATTRIBUTE_WEIGHT = 0.5                  # доля лучшего реквизита в ранге объекта
+METADATA_HELP_WEIGHT = 0.15                      # доля встроенной справки объекта в его ранге
+METADATA_HELP_POOL = 100                         # кандидатов из справки (object_help_fts)
+HELP_BRIEF_CHARS = 600                           # справка в карточке detail=brief
+HELP_FULL_CHARS = 6000                           # и в detail=full
 METADATA_DATA_KIND_BOOST = 1.3                   # объекты, в которых лежат данные
 METADATA_DATA_KINDS = ('РегистрНакопления', 'РегистрСведений', 'РегистрБухгалтерии',
                        'РегистрРасчета', 'Документ', 'Справочник', 'ПланВидовХарактеристик',
@@ -325,7 +329,17 @@ class SearchEngine:
                 WHERE attributes_fts MATCH ?{extra}
                 ORDER BY score LIMIT ?""", [match] + filter_params + [METADATA_ATTRIBUTE_POOL]):
             best[r['object_id']] = min(best.get(r['object_id'], 0.0), r['score'])
-        missing = [oid for oid in best if oid not in scored]
+        # Встроенная справка (Ext/Help): вопрос словами пользователя находит объект по описанию
+        # его назначения — «розничная выручка» → Документ.ОтчетОРозничныхПродажах.
+        helped: dict[int, tuple[float, str]] = {}
+        for r in _fts_rows(conn, f"""
+                SELECT h.rowid AS object_id, bm25(object_help_fts) AS score,
+                       snippet(object_help_fts, 0, '', '', '…', 14) AS snip
+                FROM object_help_fts h JOIN metadata_objects m ON m.id = h.rowid
+                WHERE object_help_fts MATCH ?{extra}
+                ORDER BY score LIMIT ?""", [match] + filter_params + [METADATA_HELP_POOL]):
+            helped[r['object_id']] = (r['score'], r['snip'])
+        missing = [oid for oid in list(best) + list(helped) if oid not in scored]
         if missing:
             marks = ','.join('?' * len(missing))
             for r in conn.execute(
@@ -348,11 +362,15 @@ class SearchEngine:
             oid, (score, row) = item
             # BM25 в SQLite отрицательный: меньше — лучше.
             score += METADATA_ATTRIBUTE_WEIGHT * best.get(oid, 0.0)
+            score += METADATA_HELP_WEIGHT * helped.get(oid, (0.0, ''))[0]
             if oid in named:
                 score += METADATA_NAME_WORDS_SCORE
             if row['kind'] in METADATA_DATA_KINDS:
                 score *= METADATA_DATA_KIND_BOOST
             return score
+        for oid, (_, row) in scored.items():
+            if oid in helped and helped[oid][1]:
+                row['help'] = helped[oid][1]
         return [row for _, (_, row) in sorted(scored.items(), key=rank)]
 
     def _objects_named_by(self, query: str, extra: str, filter_params: list) -> set[int]:
@@ -504,7 +522,13 @@ class SearchEngine:
             'source_label': obj['source_label'] or obj['source_id'],
             'matches': other_matches,       # all sources that have this full_name
             'glossary': self._glossary_for_object(obj['full_name']),
+            'help': self._object_help(obj['id']),
         }
+
+    def _object_help(self, object_id: int) -> str:
+        row = self.db.read_conn().execute(
+            "SELECT text FROM object_help_fts WHERE rowid = ?", (object_id,)).fetchone()
+        return row[0] if row else ''
 
     def search_attributes(self, query: str, type_filter: str | None = None,
                           source_id: str | None = None, limit: int = 30,
@@ -1188,13 +1212,15 @@ def format_search_results(results: list[dict], max_items: int = 20, start_index:
         comment = r.get('comment', '')
         if r.get('glossary'):
             comment = f"словарь: «{r['glossary']}»" + (f"; {comment}" if comment else '')
+        elif r.get('help'):
+            comment = f"справка: «{' '.join(r['help'].split())}»"
         parts = [f"{i}. {full_name}"]
         if synonym and synonym != name:
             parts.append(f"({synonym})")
         if type_desc:
             parts.append(f"[{type_desc}]")
         if comment:
-            parts.append(f"— {comment[:80]}")
+            parts.append(f"— {comment[:200] if r.get('help') and not r.get('glossary') else comment[:80]}")
         parts.append(_src_suffix(r))
         lines.append(' '.join(p for p in parts if p))
     if len(results) > max_items:
@@ -1217,6 +1243,13 @@ def format_object_details(details: dict, detail: str = 'brief') -> str:
              f"Синоним: {obj.get('synonym', '')}"]
     if obj.get('comment'):
         lines.append(f"Комментарий: {obj['comment']}")
+    help_text = details.get('help') or ''
+    if help_text:
+        cap = HELP_FULL_CHARS if detail == 'full' else HELP_BRIEF_CHARS
+        shown = help_text[:cap].rstrip()
+        more = '' if len(help_text) <= cap else (
+            ' … (detail="full" — подробнее)' if detail != 'full' else f' … (справка длиннее: {len(help_text)} символов)')
+        lines.append(f"Справка: {shown}{more}")
 
     # Ambiguity warning
     matches = details.get('matches', [])

@@ -318,6 +318,10 @@ END;
 -- регистр); стандартные реквизиты — длина кода и наименования, иерархия,
 -- владельцы, номер, проведение (src/core/standard_attributes.py).
 -- Новая таблица (IF NOT EXISTS) — заполнится при следующем reindex.
+-- Встроенная справка объектов (Ext/Help/ru.html) текстом: rowid = metadata_objects.id.
+-- Ищет search_metadata (вопрос своими словами → «Отчёт о розничных продажах»),
+-- начало показывает get_object_details. Новая таблица — заполнится при reindex.
+CREATE VIRTUAL TABLE IF NOT EXISTS object_help_fts USING fts5(text, tokenize='unicode61');
 CREATE TABLE IF NOT EXISTS object_properties (
     object_id  INTEGER NOT NULL REFERENCES metadata_objects(id) ON DELETE CASCADE,
     key        TEXT NOT NULL,
@@ -626,6 +630,7 @@ class Database:
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:
             self.conn.execute(f"DELETE FROM {table}")
+        self.conn.execute("DELETE FROM object_help_fts")
         for fts in ('metadata_fts', 'attributes_fts', 'procedures_fts'):
             try:
                 self.conn.execute(f"INSERT INTO {fts}({fts}) VALUES('rebuild')")

@@ -64,7 +64,7 @@ class Indexer:
 
     # Меняется вместе с тем, как index_metadata записывает объект: старые
     # отпечатки перестают совпадать, и объекты перезаписываются.
-    METADATA_WRITE_VERSION = 1
+    METADATA_WRITE_VERSION = 2      # 2: встроенная справка объекта (object_help_fts)
 
     @staticmethod
     @functools.cache
@@ -169,6 +169,9 @@ class Indexer:
             conn.execute("DELETE FROM forms WHERE object_id=?", (obj_id,))
             conn.execute("DELETE FROM subsystem_content WHERE subsystem_id=?", (obj_id,))
             conn.execute("DELETE FROM object_properties WHERE object_id=?", (obj_id,))
+            conn.execute("DELETE FROM object_help_fts WHERE rowid=?", (obj_id,))
+            if obj.help_text:
+                conn.execute("INSERT INTO object_help_fts (rowid, text) VALUES (?, ?)", (obj_id, obj.help_text))
             conn.executemany(
                 "INSERT INTO object_properties (object_id, key, value) VALUES (?, ?, ?)",
                 [(obj_id, k, v) for k, v in object_properties(obj)])
