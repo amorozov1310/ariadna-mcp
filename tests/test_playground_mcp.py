@@ -26,7 +26,7 @@ from src.mcp_server.tools import MAX_LIMIT, execute_tool
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
-# Аргументы для каждого из 24 инструментов (без project_id) — так, чтобы
+# Аргументы для каждого из 25 инструментов (без project_id) — так, чтобы
 # ответ был содержательным на фикстуре. Дополняются умолчаниями схемы.
 CASES = {
     'list_projects': {},
