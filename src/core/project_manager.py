@@ -1782,6 +1782,7 @@ class ProjectManager:
             conn.execute(f"DELETE FROM attributes WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM subsystem_content WHERE subsystem_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM object_properties WHERE object_id IN ({placeholders})", obj_ids)
+            conn.execute(f"DELETE FROM object_help_fts WHERE rowid IN ({placeholders})", obj_ids)
 
         conn.execute("DELETE FROM parser_state WHERE source_id=?", (source_id,))
 
