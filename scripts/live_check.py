@@ -49,7 +49,7 @@ from mcp import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
-EXPECTED_TOOLS = 24
+EXPECTED_TOOLS = 25
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
 

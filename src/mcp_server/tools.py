@@ -257,7 +257,7 @@ def format_procedure_context(ctx: dict) -> str:
 MAX_LIMIT = 500
 _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
                 'search_procedures', 'search_code', 'diff_from_base', 'update_conflicts',
-                'find_broken_calls')
+                'find_broken_calls', 'knowledge_sources')
 
 # Сколько процедур «Missing from index» показывает diagnose_index: на большой
 # конфигурации их тысячи, а для диагностики хватает первых.
@@ -514,6 +514,20 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     limit=limit, offset=offset),
                 limit, offset)
             return _format_page(page, offset, limit, has_more)
+
+        case 'knowledge_sources':
+            from ..core.knowledge_sources import format_sources
+            full_name = args.get('full_name') or None
+            include_query = bool(args.get('include_query'))
+            limit = int(limit_arg or (1 if full_name else 50))
+            page, has_more = _paginate(
+                lambda limit, offset: engine.knowledge_sources(
+                    kind=args.get('kind') or None, full_name=full_name, source_id=source_id,
+                    include_query=include_query, limit=limit, offset=offset),
+                limit, offset)
+            if not page:
+                return "No results found." if offset == 0 else f"No further results at offset={offset}."
+            return f"{format_sources(page, start_index=offset + 1)}\n{_page_trailer(len(page), offset, limit, has_more)}"
 
         case 'list_sources':
             sources = engine.list_sources()

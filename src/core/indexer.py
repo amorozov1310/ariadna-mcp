@@ -14,6 +14,7 @@ from datetime import datetime
 
 from .db import Database
 from .register_info import object_properties
+from .knowledge_sources import query_refs
 from .metadata_model import ConfigInfo, MetadataObject
 
 
@@ -64,7 +65,7 @@ class Indexer:
 
     # Меняется вместе с тем, как index_metadata записывает объект: старые
     # отпечатки перестают совпадать, и объекты перезаписываются.
-    METADATA_WRITE_VERSION = 2      # 2: встроенная справка объекта (object_help_fts)
+    METADATA_WRITE_VERSION = 3      # 2: справка (object_help_fts); 3: запросы схем отчётов (object_queries)
 
     @staticmethod
     @functools.cache
@@ -172,6 +173,14 @@ class Indexer:
             conn.execute("DELETE FROM object_help_fts WHERE rowid=?", (obj_id,))
             if obj.help_text:
                 conn.execute("INSERT INTO object_help_fts (rowid, text) VALUES (?, ?)", (obj_id, obj.help_text))
+            conn.execute("DELETE FROM object_queries WHERE object_id=?", (obj_id,))
+            conn.execute("DELETE FROM object_query_refs WHERE object_id=?", (obj_id,))
+            if obj.dcs_queries:
+                conn.executemany("INSERT INTO object_queries (object_id, template, dataset, query) VALUES (?, ?, ?, ?)",
+                                 [(obj_id, t, d, q) for t, d, q in obj.dcs_queries])
+                refs = sorted({r.casefold() for _, _, q in obj.dcs_queries for r in query_refs(q)})
+                conn.executemany("INSERT INTO object_query_refs (object_id, ref_cf) VALUES (?, ?)",
+                                 [(obj_id, r) for r in refs])
             conn.executemany(
                 "INSERT INTO object_properties (object_id, key, value) VALUES (?, ?, ?)",
                 [(obj_id, k, v) for k, v in object_properties(obj)])

@@ -530,6 +530,14 @@ class SearchEngine:
             "SELECT text FROM object_help_fts WHERE rowid = ?", (object_id,)).fetchone()
         return row[0] if row else ''
 
+    def knowledge_sources(self, kind: str | None = 'Отчет', full_name: str | None = None,
+                          source_id: str | None = None, include_query: bool = False,
+                          limit: int = 50, offset: int = 0) -> list[dict]:
+        """Сырьё для знаний о базе: отчёты с запросами схем или регистры с отчётами,
+        которые ими пользуются (src/core/knowledge_sources.py)."""
+        from .knowledge_sources import sources
+        return sources(self.db.read_conn(), kind, full_name, source_id, include_query, limit, offset)
+
     def search_attributes(self, query: str, type_filter: str | None = None,
                           source_id: str | None = None, limit: int = 30,
                           offset: int = 0) -> list[dict]:

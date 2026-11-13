@@ -189,7 +189,7 @@ claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp
 читает** — конфигурация, положенная туда, молча игнорируется.
 
 Проверка: в Claude Code команда `/mcp` показывает `ariadna` со статусом
-connected и 24 инструментами.
+connected и 25 инструментами.
 
 **Cursor** — `.cursor/mcp.json` в проекте или `~/.cursor/mcp.json`:
 
@@ -342,7 +342,7 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 
 ## MCP Tools
 
-24 инструмента. Все, кроме `reindex`, `remove_source`, `add_glossary_term` и
+25 инструментов. Все, кроме `reindex`, `remove_source`, `add_glossary_term` и
 `remove_glossary_term`, только читают
 (помечены `readOnlyHint`), `remove_source` помечен `destructiveHint`. На
 сервере с токенами удалить источник (`remove_source` с `confirm=true`) может
@@ -357,6 +357,7 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 | `search_attributes` | Найти реквизит (объекта или формы) по имени, синониму или типу |
 | `find_references`   | Где объект используется как тип реквизита других объектов |
 | `list_objects`      | Перечень объектов вида (`kind`)                   |
+| `knowledge_sources` | Сырьё для знаний о базе: отчёты с запросами схем компоновки (источники, справка, отпечаток; `include_query` — тексты), регистры и отчёты, которые ими пользуются |
 | `search_procedures` | Найти процедуру/функцию по имени; точные совпадения первыми |
 | `get_procedure_context` | Всё о процедуре без кода: объявление, описание, кто вызывает и что вызывает |
 | `diff_from_base`    | Что доработано относительно типовой (база проекта): сводка, объект, diff процедуры |
@@ -507,9 +508,9 @@ python scripts/live_check.py --project demo
 запущенного сервера. `live_check.py` проверяет сервер по сети — так, как его
 видят агент (MCP, streamable HTTP) и браузер (Web UI):
 
-- регрессия: версия, 24 инструмента, ошибки, проверка `Host`/`Origin`;
+- регрессия: версия, 25 инструментов, ошибки, проверка `Host`/`Origin`;
 - индексация: сразу после `reindex` статус `indexing`, затем `ready`;
-- playground против MCP: для всех 24 инструментов ответы совпадают;
+- playground против MCP: для всех 25 инструментов ответы совпадают;
 - пересоздание и удаление проекта под нагрузкой MCP и Web UI (ни одного 500,
   только «not found»/«проект удалён»);
 - стресс: создание и удаление проектов рядом с чтением реестра;

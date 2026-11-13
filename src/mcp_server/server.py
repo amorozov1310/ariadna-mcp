@@ -346,6 +346,29 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
                     source_id=source_id, limit=limit, offset=offset)
 
     @mcp.tool(
+        description="Сырьё для знаний о базе. kind=Отчет (по умолчанию) — отчёты, у которых есть "
+                     "запросы схем компоновки данных: синоним, справка, источники (регистры и документы "
+                     "из запросов), отпечаток; include_query=true с full_name — тексты запросов отчёта "
+                     "(готовый ответ разработчиков на бизнес-вопрос: регистры, поля, отборы). "
+                     "kind=РегистрНакопления / РегистрСведений / РегистрБухгалтерии — регистры и отчёты, "
+                     "которые ими пользуются. Отпечаток меняется вместе с объектом — по нему видно, "
+                     "что пересобрать после переиндексации.",
+        annotations=_READ_ONLY,
+    )
+    def knowledge_sources(
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        kind: Annotated[str | None, Field(description="Отчет (по умолчанию) или вид регистра (RU или EN)")] = None,
+        full_name: Annotated[str | None, Field(description="Один объект: Отчет.ВыручкаПоКлиентам")] = None,
+        include_query: Annotated[bool, Field(description="Тексты запросов схем (только вместе с full_name — они большие)")] = False,
+        source_id: Annotated[str | None, Field(description=_SID)] = None,
+        limit: Annotated[int, Field(description=_LIMIT)] = 50,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+    ) -> str:
+        return run('knowledge_sources', project_id=project_id, kind=kind, full_name=full_name,
+                    include_query=include_query and bool(full_name), source_id=source_id,
+                    limit=limit, offset=offset)
+
+    @mcp.tool(
         description="Список всех объектов конфигурации, с опциональным фильтром по типу и "
                      "источнику. Для поиска по имени/тексту используй search_metadata — оно точнее.",
         annotations=_READ_ONLY,
