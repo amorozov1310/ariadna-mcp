@@ -322,6 +322,22 @@ END;
 -- Ищет search_metadata (вопрос своими словами → «Отчёт о розничных продажах»),
 -- начало показывает get_object_details. Новая таблица — заполнится при reindex.
 CREATE VIRTUAL TABLE IF NOT EXISTS object_help_fts USING fts5(text, tokenize='unicode61');
+-- Запросы схем компоновки данных отчётов (src/core/knowledge_sources.py) и объекты,
+-- к которым они обращаются (ref — «РегистрНакопления.Х»; ложные отсеиваются при выдаче
+-- по наличию объекта). Сырьё для знаний о базе. Новые таблицы — заполнятся при reindex.
+CREATE TABLE IF NOT EXISTS object_queries (
+    object_id  INTEGER NOT NULL REFERENCES metadata_objects(id) ON DELETE CASCADE,
+    template   TEXT NOT NULL,
+    dataset    TEXT DEFAULT '',
+    query      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_queries_object ON object_queries(object_id);
+CREATE TABLE IF NOT EXISTS object_query_refs (
+    object_id  INTEGER NOT NULL REFERENCES metadata_objects(id) ON DELETE CASCADE,
+    ref_cf     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_query_refs_object ON object_query_refs(object_id);
+CREATE INDEX IF NOT EXISTS idx_object_query_refs_ref ON object_query_refs(ref_cf);
 CREATE TABLE IF NOT EXISTS object_properties (
     object_id  INTEGER NOT NULL REFERENCES metadata_objects(id) ON DELETE CASCADE,
     key        TEXT NOT NULL,
@@ -626,6 +642,7 @@ class Database:
         if not self.conn:
             self.connect()
         for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes', 'object_properties',
+                      'object_queries', 'object_query_refs',
                       'module_stat', 'object_stat', 'graph_state', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:

@@ -394,6 +394,39 @@ def help_to_text(markup: str) -> str:
     return '\n'.join(ln for ln in lines if ln)[:HELP_MAX_CHARS]
 
 
+DCS_QUERY_MAX_CHARS = 60000   # запрос схемы длиннее — обрезается (у крупных отчётов ~50 тыс.)
+
+
+def read_dcs_queries(obj_el, obj_dir: Path) -> list[tuple[str, str, str]]:
+    """Запросы схем компоновки данных объекта: макеты вида DataCompositionSchema
+    (Templates/<Имя>.xml → Templates/<Имя>/Ext/Template.xml), наборы данных-запросы,
+    в том числе внутри объединений. → [(макет, набор, текст)]."""
+    found = []
+    for t in _children_of(obj_el, 'ChildObjects'):
+        if _local(t.tag) != 'Template' or not (t.text or '').strip():
+            continue
+        name = t.text.strip()
+        try:
+            meta = _object_element(obj_dir / 'Templates' / f'{name}.xml')
+        except (OSError, ET.ParseError):
+            continue
+        if _text(_child(meta, 'Properties'), 'TemplateType') != 'DataCompositionSchema':
+            continue
+        try:
+            schema = ET.parse(obj_dir / 'Templates' / name / 'Ext' / 'Template.xml').getroot()
+        except (OSError, ET.ParseError) as e:
+            logger.warning('Схема компоновки: не прочитан макет %s %s (%s)', obj_dir.name, name, e)
+            continue
+        for ds in schema.iter():
+            if _local(ds.tag) not in ('dataSet', 'item'):
+                continue
+            query = _child(ds, 'query')
+            if query is None or not (query.text or '').strip():
+                continue
+            found.append((name, _text(ds, 'name'), query.text.strip()[:DCS_QUERY_MAX_CHARS]))
+    return found
+
+
 def read_help(obj_dir: Path) -> str:
     """Справка объекта из выгрузки: Ext/Help/ru.html (иначе первый .html каталога). Нет — пусто."""
     help_dir = obj_dir / 'Ext' / 'Help'
@@ -467,7 +500,10 @@ def parse_xml_dump(xml_root: str | Path) -> tuple[ConfigInfo, list[MetadataObjec
         el = load(root / plural / f'{name}.xml')
         if el is None:
             return []
-        return [with_help(_build_object(el, kind_en, kind_ru, f'{kind_ru}.{name}', lang), root / plural / name)]
+        obj = with_help(_build_object(el, kind_en, kind_ru, f'{kind_ru}.{name}', lang), root / plural / name)
+        if kind_en == 'Report':
+            obj.dcs_queries = read_dcs_queries(el, root / plural / name)
+        return [obj]
 
     # Файлы объектов читаются параллельно: через 9p (Docker Desktop на
     # Windows) чтение десятков тысяч файлов упирается в задержку каждого

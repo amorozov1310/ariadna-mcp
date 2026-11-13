@@ -337,6 +337,50 @@
       "result": "string"
     }
   },
+  "knowledge_sources": {
+    "params": {
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "kind": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "full_name": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "include_query": {
+        "type": "boolean",
+        "required": false,
+        "default": false
+      },
+      "source_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 50
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
   "list_glossary": {
     "params": {
       "project_id": {
