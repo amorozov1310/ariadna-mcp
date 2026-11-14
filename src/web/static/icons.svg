@@ -66,6 +66,9 @@
 <symbol id="more" viewBox="0 0 24 24" fill="currentColor" stroke="none">
   <circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>
 </symbol>
+<symbol id="menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+  <path d="M4 6h16M4 12h16M4 18h16"/>
+</symbol>
 <symbol id="clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="12" r="9"/><path d="M12 6.8v5.4l3.4 2"/>
 </symbol>

@@ -54,24 +54,64 @@
     'playground': '/playground', 'glossary': '/glossary', 'diff': '/diff', 'checks': '/checks',
     'settings': '/settings'} %}
 {% set auth_user = request.state.user if request is defined and request.state.user is defined else none %}
-{% macro user_menu() %}
-{% if auth_user %}
-<span class="appbar-user" title="Роль: {{ auth_user.role }}">
-    {% if auth_user.role == 'admin' %}<a href="/admin/tokens" class="navlink">
-        <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#key"/></svg> Токены</a>
-    <a href="/admin/license" class="navlink">Лицензия</a>{% endif %}
-    <span class="text-muted">{{ auth_user.name }}</span>
-    <a href="/logout" class="navlink">Выйти</a>
-</span>
-{% endif %}
+{# Права для шаблонов: локально (входа нет) — всё; на сервере с токенами —
+   по роли. Сервер проверяет права сам, это только что показывать. #}
+{% set can_admin = not auth_user or auth_user.role == 'admin' %}
+{# Разделы за «Ещё»: подсвечиваем «Ещё», когда открыт один из них. #}
+{% set more_sections = ('glossary', 'playground', 'settings') %}
+{% macro icon(name, cls='icon') %}<svg class="{{ cls }}" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#{{ name }}"/></svg>{% endmacro %}
+{% macro section_link(section, path, label, icon_name) %}
+<a class="navlink" href="/projects/{{ project.id }}{{ path }}"
+   {% if nav_section == section %}aria-current="page"{% endif %}>{{ icon(icon_name) }} {{ label }}</a>
 {% endmacro %}
-{% macro theme_toggle() %}
-<button type="button" class="theme-toggle" onclick="toggleTheme()"
-        title="Переключить тему" aria-label="Переключить светлую и тёмную тему">
-    <svg class="icon icon-to-dark"><use href="/static/icons.svg?v={{ asset_v }}#moon"/></svg>
-    <svg class="icon icon-to-light"><use href="/static/icons.svg?v={{ asset_v }}#sun"/></svg>
+{% macro main_sections() %}
+{{ section_link('overview', '', 'Обзор', 'layers') }}
+{{ section_link('search', '/search', 'Поиск', 'search') }}
+{{ section_link('graph', '/graph', 'Граф', 'graph') }}
+{{ section_link('diff', '/diff', 'Отличия', 'blocks') }}
+{{ section_link('checks', '/checks', 'Проверка', 'check') }}
+{% endmacro %}
+{% macro more_links() %}
+{{ section_link('glossary', '/glossary', 'Словарь', 'file-text') }}
+{{ section_link('playground', '/playground', 'Playground', 'flask') }}
+{{ section_link('settings', '/settings', 'Настройки проекта', 'settings') }}
+{% endmacro %}
+{% macro theme_item() %}
+<button type="button" class="menu-item" onclick="toggleTheme()">
+    {{ icon('moon', 'icon icon-to-dark') }}{{ icon('sun', 'icon icon-to-light') }} Сменить тему
 </button>
 {% endmacro %}
+{# Меню сервера / пользователя: локально — значок, на сервере — имя и роль. #}
+{% macro account_items() %}
+{% if auth_user %}
+<div class="menu-note">{{ auth_user.name }} · {{ 'администратор' if auth_user.role == 'admin' else 'участник' }}</div>
+<hr>
+{% endif %}
+{% if can_admin %}
+<a class="menu-item" href="/admin/tokens">{{ icon('key') }} Доступ и токены</a>
+<a class="menu-item" href="/admin/license">{{ icon('file-text') }} Лицензия</a>
+{% endif %}
+{{ theme_item() }}
+{% if auth_user %}
+<hr>
+<a class="menu-item" href="/logout">Выйти</a>
+{% endif %}
+{% endmacro %}
+{% macro account_menu() %}
+<details class="menu account-menu">
+    {% if auth_user %}
+    <summary class="menu-button" title="{{ auth_user.name }}">
+        <span class="account-name">{{ auth_user.name }}</span> {{ icon('chevron-down', 'icon icon-sm') }}
+    </summary>
+    {% else %}
+    <summary class="menu-button menu-button-icon" title="Сервер: доступ, лицензия, тема" aria-label="Сервер: доступ, лицензия, тема">
+        {{ icon('settings') }}
+    </summary>
+    {% endif %}
+    <div class="menu-list menu-list-right">{{ account_items() }}</div>
+</details>
+{% endmacro %}
+<a class="skip-link" href="#main">Перейти к содержимому</a>
 <header class="appbar">
     <a href="/" class="brand" title="Ариадна — все проекты">
         {#
@@ -92,10 +132,10 @@
 
     {% if project is defined and project %}
     {% set projects_all = all_projects() %}
-    <details class="switcher">
+    <details class="switcher menu">
         <summary title="Сменить проект">
             <span style="overflow:hidden;text-overflow:ellipsis">{{ project.name }}</span>
-            <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#chevron-down"/></svg>
+            {{ icon('chevron-down', 'icon icon-sm') }}
         </summary>
         <div class="switcher-menu">
             {% for p in projects_all %}
@@ -103,66 +143,59 @@
             <a href="/projects/{{ p.id }}{{ section_paths.get(nav_section, '') }}"
                {% if p.id == project.id %}aria-current="true"{% endif %}>{{ p.name }}</a>
             {% endfor %}
+            {% if can_admin %}
             <hr>
             <a href="/projects/new">+ Создать проект</a>
+            {% endif %}
         </div>
     </details>
 
-    <nav class="mainnav" aria-label="Разделы проекта">
-        <a class="navlink" href="/projects/{{ project.id }}"
-           {% if nav_section == 'overview' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#layers"/></svg> Обзор</a>
-        <a class="navlink" href="/projects/{{ project.id }}/search"
-           {% if nav_section == 'search' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#search"/></svg> Поиск</a>
-        <a class="navlink" href="/projects/{{ project.id }}/graph"
-           {% if nav_section == 'graph' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg> Граф</a>
-        <a class="navlink" href="/projects/{{ project.id }}/playground"
-           {% if nav_section == 'playground' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg> Playground</a>
-        <a class="navlink" href="/projects/{{ project.id }}/glossary"
-           {% if nav_section == 'glossary' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#file-text"/></svg> Словарь</a>
-        <a class="navlink" href="/projects/{{ project.id }}/diff"
-           {% if nav_section == 'diff' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg> Отличия</a>
-        <a class="navlink" href="/projects/{{ project.id }}/checks"
-           {% if nav_section == 'checks' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg> Проверка</a>
-        <a class="navlink" href="/projects/{{ project.id }}/settings"
-           {% if nav_section == 'settings' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#settings"/></svg> Настройки</a>
+    {# Пять основных разделов и «Ещё»; на узком экране — всё в меню «☰». #}
+    <nav class="mainnav project-nav" aria-label="Разделы проекта">
+        {{ main_sections() }}
+        <details class="menu">
+            <summary class="navlink" {% if nav_section in more_sections %}aria-current="page"{% endif %}>
+                Ещё {{ icon('chevron-down', 'icon icon-sm') }}
+            </summary>
+            <div class="menu-list">{{ more_links() }}</div>
+        </details>
     </nav>
 
     <div class="appbar-right">
+        {# На странице поиска своё поле — второе в шапке не нужно. #}
+        {% if nav_section != 'search' %}
         <form class="appsearch" method="get" action="/projects/{{ project.id }}/search" role="search">
             <label class="appsearch-field">
-                <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#search"/></svg>
+                {{ icon('search') }}
                 <input type="search" name="q" placeholder="Поиск по конфигурации"
                        aria-label="Поиск по конфигурации" value="{{ query|default('', true) }}">
             </label>
         </form>
-        {{ user_menu() }}
-        {{ theme_toggle() }}
+        {% endif %}
+        <span class="desktop-only">{{ account_menu() }}</span>
+        <details class="menu mobile-menu">
+            <summary class="menu-button menu-button-icon" title="Меню" aria-label="Меню">{{ icon('menu') }}</summary>
+            <div class="menu-list menu-list-right">
+                {{ main_sections() }}
+                <hr>
+                {{ more_links() }}
+                <hr>
+                {{ account_items() }}
+            </div>
+        </details>
     </div>
     {% else %}
     <nav class="mainnav" aria-label="Разделы">
         <a class="navlink" href="/" {% if nav_section == 'projects' %}aria-current="page"{% endif %}>
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#folder"/></svg> Проекты</a>
+            {{ icon('folder') }} Проекты</a>
     </nav>
     <div class="appbar-right">
-        {% if not auth_user or auth_user.role == 'admin' %}
-        <a href="/projects/new" class="btn btn-primary btn-sm">
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg> Создать проект</a>
-        {% endif %}
-        {{ user_menu() }}
-        {{ theme_toggle() }}
+        {{ account_menu() }}
     </div>
     {% endif %}
 </header>
 
-<main class="{% block container_class %}container{% endblock %}">
+<main id="main" tabindex="-1" class="{% block container_class %}container{% endblock %}">
     {% block content %}{% endblock %}
 </main>
 
@@ -185,6 +218,29 @@ function toggleTheme() {
     root.setAttribute('data-theme', next);
     try { localStorage.setItem('theme', next); } catch (e) { /* хранилище недоступно */ }
 }
+
+// Меню (<details class="menu">): одно открытое за раз, закрываются по Esc
+// и щелчку мимо; Esc возвращает фокус на кнопку меню.
+document.addEventListener('click', function (e) {
+    document.querySelectorAll('details.menu[open]').forEach(function (d) {
+        if (!d.contains(e.target)) d.removeAttribute('open');
+    });
+});
+document.addEventListener('toggle', function (e) {
+    var d = e.target;
+    if (!d.matches || !d.matches('details.menu') || !d.open) return;
+    document.querySelectorAll('details.menu[open]').forEach(function (other) {
+        if (other !== d && !other.contains(d)) other.removeAttribute('open');
+    });
+}, true);
+document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    document.querySelectorAll('details.menu[open]').forEach(function (d) {
+        d.removeAttribute('open');
+        var summary = d.querySelector('summary');
+        if (summary && d.contains(document.activeElement)) summary.focus();
+    });
+});
 </script>
 
 <!-- раздел: {% block active_nav %}{% endblock %} -->
