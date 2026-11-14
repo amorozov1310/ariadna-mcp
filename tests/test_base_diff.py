@@ -267,7 +267,7 @@ def test_web_scheme_and_comparison_form(release_pm):
         assert r.status_code == 303 and r.headers['location'] == '/projects/custom/diff/update'
         release_pm.get_update_conflicts('custom')
         page = client.get('/projects/custom/diff').text
-        for text in ('База — типовая текущего релиза', 'ДемоКонфигурация 1.2.3.4', '1. Что доработано',
+        for text in ('Типовая — текущий релиз', 'ДемоКонфигурация 1.2.3.4', '1. Что доработано',
                      '2. Обновление на новый релиз', 'Как пользоваться'):
             assert text in page
         # Выбор базы и релиза — у схемы, один раз на странице; и в настройках проекта.

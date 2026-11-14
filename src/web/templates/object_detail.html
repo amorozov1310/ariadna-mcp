@@ -23,13 +23,13 @@
 
     {% if details.matches and details.matches|length > 1 %}
     <div class="source-switcher mt-16">
-        <div class="text-muted" style="font-size:12px;margin-bottom:6px">Тот же объект в других источниках:</div>
+        <div class="text-muted" style="font-size:12px;margin-bottom:6px">Тот же объект в других частях проекта:</div>
         {% for m in details.matches %}
             {% if m.source_id == current_source_id %}
             <span class="source-pill active">{{ m.source_label }}</span>
             {% else %}
             <a href="/projects/{{ project.id }}/object/{{ obj.full_name }}?source_id={{ m.source_id }}"
-               class="source-pill">{{ m.source_label }}{% if m.source_type == 'extension' %} (ext){% endif %}</a>
+               class="source-pill">{{ m.source_label }}{% if m.source_type == 'extension' %} — расширение{% endif %}</a>
             {% endif %}
         {% endfor %}
     </div>

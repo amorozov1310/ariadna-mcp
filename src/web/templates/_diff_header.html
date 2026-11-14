@@ -16,12 +16,12 @@
 {% macro diff_header(scheme, active, candidates, next_url) %}
 <h1 class="page-title">
     <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg>
-    Отличия от типовой
+    Доработки
 </h1>
 
 <div class="card">
     <div class="diff-scheme">
-        {{ chip('База — типовая текущего релиза', scheme.base, 'diff-chip-base') }}
+        {{ chip('Типовая — текущий релиз', scheme.base, 'diff-chip-base') }}
         <span class="diff-scheme-arrow" aria-hidden="true">→</span>
         {{ chip('Этот проект — ваша конфигурация', scheme.project, 'diff-chip-project') }}
         <span class="diff-scheme-arrow" aria-hidden="true">→</span>
@@ -32,7 +32,7 @@
     <details class="disclosure diff-edit" id="comparison" {% if not scheme.base %}open{% endif %}>
         <summary>
             <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
-            {{ 'Изменить сравнение' if scheme.base else 'Выбрать базу и новый релиз' }}
+            {{ 'Изменить сравнение' if scheme.base else 'Выбрать типовую и новый релиз' }}
         </summary>
         <div class="disclosure-body">{{ comparison_fields(candidates, next_url) }}</div>
     </details>

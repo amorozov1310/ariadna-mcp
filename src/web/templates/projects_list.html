@@ -24,14 +24,14 @@
     </div>
     <div class="text-muted">
         {{ p.id }}
-        · {{ p.sources|length }} источник(ов)
+        · {{ p.sources|length|plural('часть', 'части', 'частей') }}
         {% if p.index_stats.total_objects %}
         · {{ p.index_stats.total_objects|num }} объектов
         {% endif %}
         {% if p.description %}· {{ p.description }}{% endif %}
     </div>
     {% if p.index_stats.last_indexed %}
-    <div class="text-muted" style="margin-top:var(--space-1)">Обновлён: {{ p.index_stats.last_indexed[:19].replace('T', ' ') }}</div>
+    <div class="text-muted" style="margin-top:var(--space-1)">Обновлён: {{ p.index_stats.last_indexed|dt }}</div>
     {% endif %}
 </div>
 </a>

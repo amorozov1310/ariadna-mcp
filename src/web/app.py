@@ -101,6 +101,41 @@ templates.env.globals['asset_v'] = _asset_version()
 templates.env.filters['num'] = _fmt_int
 
 
+def _plural(n, one: str, few: str, many: str) -> str:
+    """«1 часть», «2 части», «5 частей» — число со словом в нужной форме."""
+    n = int(n or 0)
+    tail = n % 100
+    if 11 <= tail <= 14:
+        word = many
+    else:
+        word = {1: one, 2: few, 3: few, 4: few}.get(n % 10, many)
+    return f'{_fmt_int(n)} {word}'
+
+
+def _dt(value) -> str:
+    """Дата и время из ISO: «сегодня 10:12», «вчера 23:00», «13.11.2026 22:50»."""
+    from datetime import date, datetime, timedelta
+    if not value:
+        return ''
+    try:
+        moment = datetime.fromisoformat(str(value)[:19])
+    except ValueError:
+        return str(value)
+    day = moment.date()
+    if day == date.today():
+        return f'сегодня {moment:%H:%M}'
+    if day == date.today() - timedelta(days=1):
+        return f'вчера {moment:%H:%M}'
+    return f'{moment:%d.%m.%Y %H:%M}'
+
+
+ROLE_NAMES = {'admin': 'администратор', 'user': 'участник'}
+
+templates.env.filters['plural'] = _plural
+templates.env.filters['dt'] = _dt
+templates.env.filters['role'] = lambda r: ROLE_NAMES.get(r, r)
+
+
 # ============================================
 # Error pages (Этап U0/U13)
 # ============================================

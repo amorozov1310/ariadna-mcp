@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Playground — {{ project.name }}{% endblock %}
+{% block title %}Консоль MCP — {{ project.name }}{% endblock %}
 {% block container_class %}container-wide{% endblock %}
 {% block active_nav %}playground{% endblock %}
 {% block content %}
 <h1 class="page-title">
     <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg>
-    MCP Tools Playground
+    Консоль MCP
 </h1>
 <p class="muted">Проект: <strong>{{ project.id }}</strong> — {{ project.name }}.
     Инструменты, параметры и ответы — те же, что видит агент через MCP
@@ -13,7 +13,7 @@
 
 <div class="playground-layout">
     <div class="playground-form">
-        <label for="tool-select">Tool:</label>
+        <label for="tool-select">Инструмент</label>
         <select id="tool-select" onchange="onToolChange()">
             {% for tool in tools_meta %}
             <option value="{{ tool.name }}">{{ tool.name }}</option>
@@ -31,7 +31,7 @@
     <div class="playground-result">
         <h3>Результат</h3>
         <div id="result-box" class="result-box">
-            <p class="muted">Выберите tool и нажмите "Выполнить"</p>
+            <p class="muted">Выберите инструмент и нажмите «Выполнить»</p>
         </div>
         <div id="result-meta" class="muted" style="margin-top:8px"></div>
     </div>

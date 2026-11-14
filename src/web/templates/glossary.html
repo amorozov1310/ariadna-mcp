@@ -65,7 +65,7 @@
                 <span class="result-kind">{{ kind_label.get(e.target_kind, e.target_kind) }}</span></td>
             <td>{{ e.terms|join(', ') }}</td>
             <td class="text-muted">{{ e.note }}</td>
-            <td class="text-muted">{{ e.author }}{% if e.updated_at %}, {{ e.updated_at.replace('T', ' ') }}{% endif %}</td>
+            <td class="text-muted">{{ e.author }}{% if e.updated_at %}, {{ e.updated_at|dt }}{% endif %}</td>
             <td style="white-space:nowrap">
                 <button type="button" class="btn btn-secondary btn-sm btn-icon glossary-edit" title="Изменить"
                         data-id="{{ e.id }}" data-target="{{ e.target }}"

@@ -302,16 +302,23 @@ main:focus { outline: none; }
     border: 0; background: none; outline: none; width: 100%;
     font-family: var(--font); font-size: var(--fs-base); color: var(--text);
 }
-@media (max-width: 1100px) { .appsearch-field { width: 170px; } }
-/* Узкий экран: разделы и меню сервера — в «☰», шапка в одну строку. */
-@media (max-width: 820px) {
+/* Средняя ширина: разделы без значков, поле поиска уже — шапка в одну строку. */
+@media (max-width: 1240px) {
+    .project-nav > .navlink > .icon { display: none; }
+    .appsearch-field { width: 170px; }
+}
+
+/* Узкий экран: разделы и меню сервера — в «☰», шапка в одну строку.
+   Порог по ширине пяти разделов с названиями 1С («Проверка вызовов»). */
+@media (max-width: 1024px) {
     .appbar { gap: var(--space-2); padding: 0 var(--space-3); }
     .project-nav, .desktop-only { display: none; }
     .mobile-menu { display: block; }
     .brand-text { display: none; }
     .switcher > summary { max-width: 46vw; }
-    .appsearch-field { width: 130px; }
+    .appsearch-field { width: 200px; }
 }
+@media (max-width: 560px) { .appsearch-field { width: 130px; } }
 @media (max-width: 480px) { .appsearch { display: none; } }
 
 .container { max-width: 1040px; margin: 0 auto; padding: var(--space-5); }
