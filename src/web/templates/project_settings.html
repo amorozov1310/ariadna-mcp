@@ -1,59 +1,252 @@
 {% extends "base.html" %}
+{% from "_diff_header.html" import comparison_fields with context %}
+{% from "_index_status.html" import status_panel, status_script, first_upload with context %}
 {% block title %}Настройки — {{ project.name }}{% endblock %}
 {% block active_nav %}settings{% endblock %}
-{% from "_diff_header.html" import comparison_fields with context %}
 
 {% block content %}
-<h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#settings"/></svg>
-    Настройки проекта
-</h1>
+{% set auth_user = request.state.user if request.state.user is defined else none %}
+{% set can_admin = not auth_user or auth_user.role == 'admin' %}
+{% set base = '/projects/' ~ project.id ~ '/settings' %}
+
+<h1 class="page-title">Настройки проекта</h1>
+<nav class="tabs" aria-label="Разделы настроек">
+    <a href="{{ base }}?tab=data" {% if tab == 'data' %}aria-current="page"{% endif %}>Данные</a>
+    <a href="{{ base }}?tab=general" {% if tab == 'general' %}aria-current="page"{% endif %}>Общее</a>
+    {% if can_admin %}
+    <a href="{{ base }}?tab=danger" {% if tab == 'danger' %}aria-current="page"{% endif %}>Опасная зона</a>
+    {% endif %}
+</nav>
+
+{% if tab == 'data' %}
+{{ status_panel(project, index_error, True) }}
 
 <div class="card">
-    <h3 class="section-title">Проект</h3>
-    <form action="/api/projects/{{ project.id }}/update" method="post" style="margin-top:var(--space-3)">
-        <div class="form-row">
-            <div class="form-group">
-                <label>Название</label>
-                <input name="name" value="{{ project.name }}" required>
+    <div class="card-header">
+        <h2 class="section-title">Состав проекта</h2>
+        {% if project.sources %}
+        <button type="button" class="btn btn-secondary btn-sm js-reindex" onclick="startReindex()"
+                {% if project.status == 'indexing' %}disabled{% endif %}>
+            <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#refresh"/></svg>
+            Обновить индекс
+        </button>
+        {% endif %}
+    </div>
+
+    {% if not project.sources %}
+        {% if can_admin %}{{ first_upload(project, base ~ '?tab=data') }}
+        {% else %}<p class="text-muted">Выгрузки ещё нет — её загружает администратор.</p>{% endif %}
+    {% else %}
+    {# Без обёртки с прокруткой: она обрезала бы меню «⋯». На узком экране
+       колонка «Код» скрывается, таблица помещается и так. #}
+    <table class="detail-table parts-table">
+        <thead><tr>
+            <th scope="col">Название</th><th scope="col">Тип</th><th scope="col" class="col-code">Код</th>
+            <th scope="col">Индекс</th><th scope="col"><span class="visually-hidden">Действия</span></th>
+        </tr></thead>
+        <tbody>
+        {% for src in project.sources %}
+        <tr>
+            <td><b>{{ src.label }}</b></td>
+            <td>{{ 'расширение' if src.source_type == 'extension' else 'конфигурация' }}</td>
+            <td class="col-code"><span class="mono">{{ src.id }}</span></td>
+            <td>
+                {% if not src.xml_path %}<span class="badge badge-error" title="Выгрузки нет — индексировать нечего">нет выгрузки</span>
+                {% elif src.indexed_at %}<span class="text-muted">{{ src.indexed_at|dt }}</span>
+                {% else %}<span class="badge badge-indexing">не проиндексирована</span>{% endif %}
+            </td>
+            <td class="row-actions">
+                <details class="menu">
+                    <summary class="menu-button menu-button-icon" title="Действия" aria-label="Действия: {{ src.label }}">
+                        <svg class="icon" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#more"/></svg>
+                    </summary>
+                    <div class="menu-list menu-list-right">
+                        {% if can_admin %}
+                        <a class="menu-item" href="{{ base }}?tab=data&edit={{ src.id }}">Загрузить новую выгрузку, переименовать</a>
+                        {% endif %}
+                        <button type="button" class="menu-item js-reindex" onclick="startReindex({{ src.id|tojson|forceescape }})">Обновить индекс этой части</button>
+                        {% if can_admin %}
+                        <hr>
+                        <form action="/api/projects/{{ project.id }}/sources/{{ src.id }}/delete" method="post"
+                              data-confirm="Удалить «{{ src.label }}» из проекта вместе с выгрузкой и индексом? Это нельзя отменить."
+                              data-confirm-action="Удалить">
+                            <input type="hidden" name="next" value="{{ base }}?tab=data">
+                            <button type="submit" class="menu-item menu-item-danger">Удалить из проекта…</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </details>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    {% if can_admin and edit_source %}
+    <div class="card-inset" id="edit-part">
+        <h3>«{{ edit_source.label }}»: новая выгрузка или название</h3>
+        <form action="/api/projects/{{ project.id }}/sources/{{ edit_source.id }}/update"
+              method="post" enctype="multipart/form-data" class="js-upload">
+            <input type="hidden" name="next" value="{{ base }}?tab=data">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Название</label>
+                    <input name="label" value="{{ edit_source.label }}">
+                </div>
+                <div class="form-group">
+                    <label>Тип</label>
+                    <select name="source_type">
+                        <option value="main" {% if edit_source.source_type == 'main' %}selected{% endif %}>Конфигурация</option>
+                        <option value="extension" {% if edit_source.source_type == 'extension' %}selected{% endif %}>Расширение</option>
+                    </select>
+                </div>
             </div>
             <div class="form-group">
-                <label>ID (не меняется)</label>
-                <input value="{{ project.id }}" disabled>
+                <label>Новая выгрузка (.zip или .tar.gz) — необязательно</label>
+                <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
+                <div class="form-hint">Заменит прежнюю выгрузку этой части целиком.</div>
+            </div>
+            <label style="display:block;margin:var(--space-2) 0">
+                <input type="checkbox" name="auto_reindex" checked> Сразу обновить индекс
+            </label>
+            <div class="btn-row">
+                <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+                <a href="{{ base }}?tab=data" class="btn btn-secondary btn-sm">Отмена</a>
+            </div>
+        </form>
+    </div>
+    {% endif %}
+
+    {% if can_admin %}
+    <details class="disclosure" style="margin-top:var(--space-3)">
+        <summary>
+            <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg>
+            Добавить расширение или конфигурацию
+        </summary>
+        <form action="/api/projects/{{ project.id }}/sources" method="post"
+              enctype="multipart/form-data" class="disclosure-body js-upload">
+            <input type="hidden" name="next" value="{{ base }}?tab=data">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Название</label>
+                    <input name="label" required placeholder="напр. Обмен с сайтом">
+                </div>
+                <div class="form-group">
+                    <label>Тип</label>
+                    <select name="source_type">
+                        <option value="extension">Расширение</option>
+                        <option value="main">Конфигурация</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Код части</label>
+                    <input name="source_id" required pattern="[a-zA-Z0-9_-]+" placeholder="напр. exchange" class="mono">
+                    <div class="form-hint">Латиницей; так часть называется в запросах агента и в каталоге на диске.</div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Архив выгрузки (.zip или .tar.gz)</label>
+                <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
+                <div class="form-hint form-warning">Нужна выгрузка Конфигуратора в файлы (XML). Проект EDT не подойдёт.</div>
+                <div class="form-hint">Без файла — если выгрузка уже лежит на сервере в
+                    <span class="mono">data/projects/{{ project.id }}/sources/&lt;код&gt;/xml/</span>.</div>
+            </div>
+            <label style="display:block;margin:var(--space-2) 0">
+                <input type="checkbox" name="auto_reindex" checked> Сразу обновить индекс
+            </label>
+            <button type="submit" class="btn btn-primary btn-sm">Добавить</button>
+        </form>
+    </details>
+    {% endif %}
+    {% endif %}
+</div>
+
+<details class="card disclosure">
+    <summary>Как выгрузить конфигурацию и обновлять индекс</summary>
+    <div class="disclosure-body text-muted">
+        <p>Конфигуратор → «Конфигурация» → «Выгрузить конфигурацию в файлы», папку упакуйте в .zip и
+            загрузите через меню «⋯» у части проекта. Расширения выгружаются так же, из меню
+            «Конфигурация → Расширения конфигурации».</p>
+        <p>Регулярно, по расписанию, — скриптом обновления из информационной базы (docs/update.md в
+            репозитории Ариадны).</p>
+    </div>
+</details>
+{{ status_script(project) }}
+
+{% elif tab == 'general' %}
+<div class="card">
+    <h2 class="section-title">Проект</h2>
+    {% if can_admin %}
+    <form action="/api/projects/{{ project.id }}/update" method="post">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="p-name">Название</label>
+                <input id="p-name" name="name" value="{{ project.name }}" required>
+            </div>
+            <div class="form-group">
+                <label>Код проекта</label>
+                <div class="code-copy">
+                    <span class="mono" id="p-code">{{ project.id }}</span>
+                    <button type="button" class="btn btn-secondary btn-sm"
+                            onclick="navigator.clipboard.writeText(document.getElementById('p-code').textContent); this.textContent='Скопировано'">Копировать</button>
+                </div>
+                <div class="form-hint">Этим кодом проект называют в запросах агента; не меняется.</div>
             </div>
         </div>
         <div class="form-group">
-            <label>Описание</label>
-            <input name="description" value="{{ project.description }}">
+            <label for="p-desc">Описание</label>
+            <input id="p-desc" name="description" value="{{ project.description }}">
         </div>
         <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
     </form>
+    {% else %}
+    <dl class="kv">
+        <dt>Название</dt><dd>{{ project.name }}</dd>
+        <dt>Код проекта</dt><dd><span class="mono">{{ project.id }}</span></dd>
+        {% if project.description %}<dt>Описание</dt><dd>{{ project.description }}</dd>{% endif %}
+    </dl>
+    {% endif %}
 </div>
 
 <div class="card">
-    <h3 class="section-title">
-        <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg>
-        Сравнение с типовой
-    </h3>
-    <p class="text-muted" style="margin-top:var(--space-2)">
-        Необязательно: без них проект работает как обычно. Типовая того же релиза, что и
-        этот проект, нужна, чтобы видеть доработки; новый релиз — типовая, на которую
-        обновляетесь, — чтобы готовиться к обновлению (вместе с базой). Результат — в разделе
+    <h2 class="section-title">Сравнение с типовой</h2>
+    <p class="text-muted">
+        Необязательно: без него проект работает как обычно. Типовая того же релиза, что и этот проект,
+        нужна, чтобы видеть доработки; новый релиз — типовая, на которую обновляетесь, — чтобы
+        готовиться к обновлению. Результат — в разделе
         <a href="/projects/{{ project.id }}/diff">«Доработки»</a>.
     </p>
-    {{ comparison_fields(candidates, '/projects/' ~ project.id ~ '/settings') }}
+    {% if can_admin %}
+    {{ comparison_fields(candidates, base ~ '?tab=general') }}
+    {% else %}
+    <dl class="kv">
+        <dt>Типовая</dt><dd>{{ project.base_project or 'не задана' }}</dd>
+        <dt>Новый релиз</dt><dd>{{ project.release_project or 'не задан' }}</dd>
+    </dl>
+    {% endif %}
 </div>
 
-<div class="card">
-    <h3 class="section-title">
-        <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#package"/></svg>
-        Как обновлять данные
-    </h3>
-    <p class="text-muted" style="margin-top:var(--space-2)">
-        Выгрузите конфигурацию из Конфигуратора («Конфигурация → Выгрузить конфигурацию
-        в файлы») и загрузите XML на <a href="/projects/{{ project.id }}">странице обзора</a> —
-        через «Изменить» у части проекта или «Добавить расширение или конфигурацию».
-        После загрузки нажмите «Обновить индекс».
-    </p>
+{% elif tab == 'danger' and can_admin %}
+<div class="card danger-zone">
+    <h2 class="section-title">Удалить проект</h2>
+    <p>Будут удалены выгрузки всех частей проекта, индекс и словарь проекта
+        «{{ project.name }}»{% if project.index_stats.total_objects %} ({{ project.index_stats.total_objects|plural('объект', 'объекта', 'объектов') }}){% endif %}.
+        <b>Это нельзя отменить.</b></p>
+    <form action="/api/projects/{{ project.id }}/delete" method="post" class="js-danger">
+        <div class="form-group">
+            <label for="confirm-code">Для подтверждения введите код проекта <span class="mono">{{ project.id }}</span></label>
+            <input id="confirm-code" autocomplete="off" class="mono" data-expect="{{ project.id }}">
+        </div>
+        <button type="submit" class="btn btn-danger" disabled>Удалить проект навсегда</button>
+    </form>
 </div>
+<script>
+(function () {
+    const input = document.getElementById('confirm-code');
+    const button = input.form.querySelector('button[type="submit"]');
+    input.addEventListener('input', function () { button.disabled = input.value.trim() !== input.dataset.expect; });
+    input.form.addEventListener('submit', function (e) { if (button.disabled) e.preventDefault(); });
+})();
+</script>
+{% endif %}
 {% endblock %}

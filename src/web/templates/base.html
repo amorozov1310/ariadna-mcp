@@ -245,6 +245,35 @@ document.addEventListener('keydown', function (e) {
 });
 </script>
 
+{# Подтверждение опасных действий: форма с data-confirm="вопрос" открывает
+   этот диалог вместо confirm() браузера; текст — из атрибута (не из JS-строки,
+   поэтому кавычки в названиях ничего не ломают). Без JS форма отправляется
+   как есть — сервер всё равно проверяет права. #}
+<dialog id="confirm-dialog" class="confirm" aria-labelledby="confirm-text">
+    <form method="dialog">
+        <p id="confirm-text"></p>
+        <div class="btn-row">
+            <button value="cancel" class="btn btn-secondary" autofocus>Отмена</button>
+            <button value="ok" class="btn btn-danger" id="confirm-ok">Удалить</button>
+        </div>
+    </form>
+</dialog>
+<script>
+document.addEventListener('submit', function (e) {
+    const form = e.target;
+    if (!form.matches || !form.matches('form[data-confirm]') || form.dataset.confirmed) return;
+    const dialog = document.getElementById('confirm-dialog');
+    if (!dialog || typeof dialog.showModal !== 'function') return;
+    e.preventDefault();
+    document.getElementById('confirm-text').textContent = form.dataset.confirm;
+    document.getElementById('confirm-ok').textContent = form.dataset.confirmAction || 'Подтвердить';
+    dialog.onclose = function () {
+        if (dialog.returnValue === 'ok') { form.dataset.confirmed = '1'; form.submit(); }
+    };
+    dialog.showModal();
+}, true);
+</script>
+
 <!-- раздел: {% block active_nav %}{% endblock %} -->
 </body>
 </html>

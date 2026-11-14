@@ -1,0 +1,269 @@
+{# Состояние индекса проекта: ход индексации, ошибка с причиной и «Повторить»,
+   загрузка архивов выгрузки с процентами. Общее для «Обзора» и «Настройки
+   проекта → Данные». Индексацию могли запустить откуда угодно (другая
+   вкладка, агент по MCP, робот выгрузки) — страница подхватывает её сама. #}
+
+{% macro status_panel(project, index_error, can_retry) %}
+<div id="reindex-status" class="progress-panel" role="status" style="margin-bottom:var(--space-3);display:none">
+    <div id="reindex-progress" class="progress-line">
+        <div class="spinner"></div>
+        <span id="reindex-text">Индексация…</span>
+        <span id="reindex-eta" class="progress-eta"></span>
+    </div>
+    <div class="progress-bar" id="reindex-bar" hidden><span id="reindex-fill"></span></div>
+    <div class="text-muted" style="font-size:var(--fs-sm)">Страницу можно закрыть — индексация продолжится.</div>
+</div>
+<div id="reindex-error" class="notice notice-danger" role="alert" {% if project.status != 'error' %}hidden{% endif %}
+     style="margin-bottom:var(--space-3)">
+    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>
+        <b>Индекс не построен.</b>
+        <span id="reindex-error-text">{% if index_error %}{{ index_error }}{% else %}Причина — в журнале сервера (<span class="mono">docker compose logs ariadna</span>).{% endif %}</span>
+        {% if can_retry and project.sources %}
+        <div style="margin-top:var(--space-2)">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="startReindex()">Повторить</button>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endmacro %}
+
+{% macro status_script(project) %}
+<script>
+const PROJECT_ID = {{ project.id|tojson }};
+
+// Человекочитаемые имена фаз индексации — вместо служебных 'bsl' и
+// 'factory_functions', которые ничего не говорят тому, кто смотрит.
+const PHASE_NAMES = {
+    scanning: 'сканирование выгрузки',
+    factory_functions: 'анализ общих модулей',
+    metadata: 'метаданные из выгрузки',
+    bsl: 'разбор кода BSL',
+    bsl_full: 'полный разбор кода: изменилась версия парсера',
+    resolving: 'разрешение графа вызовов',
+    cards: 'карточки процедур для поиска',
+    base: 'копия индекса типовой',
+};
+
+// Первая замеренная точка прогресса — по ней считается скорость и оценка
+// оставшегося времени (страницу могли открыть в середине прогона).
+let rateAnchor = null;
+
+function formatLeft(seconds) {
+    if (!isFinite(seconds) || seconds <= 0) return '';
+    if (seconds < 60) return `≈ ${Math.round(seconds)} с`;
+    const m = Math.floor(seconds / 60), s = Math.round(seconds % 60);
+    if (m < 60) return s ? `≈ ${m} мин ${s} с` : `≈ ${m} мин`;
+    return `≈ ${Math.floor(m / 60)} ч ${m % 60} мин`;
+}
+
+function renderProgress(s) {
+    const text = document.getElementById('reindex-text');
+    const eta = document.getElementById('reindex-eta');
+    const bar = document.getElementById('reindex-bar');
+    const fill = document.getElementById('reindex-fill');
+    const phase = PHASE_NAMES[s.progress_phase] || s.progress_phase || '';
+
+    if (s.progress_total > 0) {
+        const pct = Math.min(100, s.progress_current / s.progress_total * 100);
+        bar.hidden = false;
+        fill.style.width = pct.toFixed(1) + '%';
+        text.textContent = `Индексация — ${pct.toFixed(0)}%`
+            + (phase ? `, ${phase}` : '')
+            + ` (${s.progress_current.toLocaleString('ru')} из ${s.progress_total.toLocaleString('ru')} файлов)`;
+        const now = Date.now();
+        if (!rateAnchor || s.progress_current < rateAnchor.done) {
+            rateAnchor = {t: now, done: s.progress_current};      // новый этап
+        }
+        const dDone = s.progress_current - rateAnchor.done;
+        const dT = (now - rateAnchor.t) / 1000;
+        eta.textContent = (dDone > 0 && dT > 5)
+            ? formatLeft((s.progress_total - s.progress_current) / (dDone / dT)) : '';
+    } else {
+        bar.hidden = true;
+        eta.textContent = '';
+        text.textContent = 'Индексация' + (phase ? ` — ${phase}…` : '…');
+    }
+}
+
+function reindexButtons(disabled) {
+    document.querySelectorAll('.js-reindex').forEach(function (b) { b.disabled = disabled; });
+}
+
+function showIndexing(message) {
+    reindexButtons(true);
+    document.getElementById('reindex-error').hidden = true;
+    document.getElementById('reindex-status').style.display = 'grid';
+    document.getElementById('reindex-progress').className = 'progress-line loading';
+    document.getElementById('reindex-text').textContent = message;
+}
+
+// Запуск индексации всего проекта или одной части (sourceId).
+async function startReindex(sourceId) {
+    showIndexing('Индексация запущена…');
+    const body = new URLSearchParams();
+    if (sourceId) body.append('source_id', sourceId);
+    try {
+        const resp = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/reindex`, {
+            method: 'POST', body,
+            headers: {'Accept': 'application/json'},
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            document.getElementById('reindex-progress').className = 'progress-line error';
+            document.getElementById('reindex-text').textContent = 'Ошибка: ' + (data.detail || resp.statusText);
+            reindexButtons(false);
+            return;
+        }
+        if (data.status === 'already_running') {
+            document.getElementById('reindex-text').textContent = 'Индексация уже идёт (запущена ранее)…';
+        }
+        pollReindexStatus();
+    } catch (e) {
+        document.getElementById('reindex-progress').className = 'progress-line error';
+        document.getElementById('reindex-text').textContent = 'Ошибка: ' + e;
+        reindexButtons(false);
+    }
+}
+
+async function pollReindexStatus() {
+    try {
+        const resp = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/status`);
+        const s = await resp.json();
+        if (s.status === 'indexing') {
+            renderProgress(s);
+            setTimeout(pollReindexStatus, 1500);
+        } else if (s.status === 'error') {
+            document.getElementById('reindex-status').style.display = 'none';
+            if (s.error) document.getElementById('reindex-error-text').textContent = s.error;
+            document.getElementById('reindex-error').hidden = false;
+            reindexButtons(false);
+        } else {
+            document.getElementById('reindex-bar').hidden = true;
+            document.getElementById('reindex-eta').textContent = '';
+            document.getElementById('reindex-progress').className = 'progress-line success';
+            document.getElementById('reindex-text').textContent = 'Индексация завершена. Обновляю страницу…';
+            setTimeout(() => location.reload(), 1000);
+        }
+    } catch (e) {
+        setTimeout(pollReindexStatus, 2000);         // сбой сети при опросе — пробуем дальше
+    }
+}
+
+{% if project.status == 'indexing' %}
+window.addEventListener('DOMContentLoaded', function () {
+    showIndexing('Индексация идёт…');
+    pollReindexStatus();
+});
+{% endif %}
+
+// Загрузка выгрузки: архив в сотни мегабайт грузится и распаковывается
+// минутами — показываем проценты загрузки, затем распаковку на сервере.
+document.querySelectorAll('form.js-upload').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        const button = form.querySelector('button[type="submit"]');
+        let line = form.querySelector('.progress-line');
+        if (!line) {
+            line = document.createElement('div');
+            line.className = 'progress-line loading';
+            line.style.marginTop = 'var(--space-2)';
+            line.innerHTML = '<div class="spinner"></div><span></span>';
+            form.appendChild(line);
+        }
+        const text = line.querySelector('span');
+        const file = form.querySelector('input[type="file"]');
+        const hasFile = file && file.files.length > 0;
+        line.className = 'progress-line loading';
+        text.textContent = hasFile ? 'Загрузка архива…' : 'Сохранение…';
+        button.disabled = true;
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', form.action);
+        xhr.setRequestHeader('Accept', 'application/json');   // ошибка — JSON с detail
+        xhr.upload.onprogress = function (e) {
+            if (!hasFile || !e.lengthComputable) return;
+            const pct = Math.round(e.loaded / e.total * 100);
+            text.textContent = pct < 100
+                ? `Загрузка архива — ${pct}% (${(e.loaded / 1048576).toFixed(0)} из ${(e.total / 1048576).toFixed(0)} МБ)`
+                : 'Архив загружен, распаковка на сервере… (на крупной выгрузке — минуты, не закрывайте страницу)';
+        };
+        xhr.onload = function () {
+            if (xhr.status < 400) {
+                text.textContent = 'Готово. Обновляю страницу…';
+                location.href = xhr.responseURL || location.href;
+                return;
+            }
+            let detail = xhr.statusText;
+            try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
+            line.className = 'progress-line error';
+            text.textContent = 'Ошибка: ' + detail;
+            button.disabled = false;
+        };
+        xhr.onerror = function () {
+            line.className = 'progress-line error';
+            text.textContent = 'Ошибка сети — запрос не дошёл до сервера';
+            button.disabled = false;
+        };
+        xhr.send(new FormData(form));
+    });
+});
+</script>
+{% endmacro %}
+
+{# Первая выгрузка нового проекта — одно обязательное поле, индекс сам. #}
+{% macro first_upload(project, next_url) %}
+<div class="first-upload">
+    <h3>Добавьте выгрузку конфигурации</h3>
+    <p class="text-muted">Конфигуратор → «Конфигурация» → «Выгрузить конфигурацию в файлы», папку
+        упакуйте в архив. Индекс построится сам — крупная конфигурация за несколько минут.</p>
+    <form action="/api/projects/{{ project.id }}/sources" method="post"
+          enctype="multipart/form-data" class="js-upload">
+        <input type="hidden" name="auto_reindex" value="on">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        <div class="form-group">
+            <label for="first-archive">Архив выгрузки (.zip или .tar.gz)</label>
+            <input id="first-archive" type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz" required>
+            <div class="form-hint form-warning">Нужна выгрузка Конфигуратора в файлы (XML). Проект EDT не подойдёт.</div>
+        </div>
+        <details class="disclosure">
+            <summary>Дополнительно: тип, название, код</summary>
+            <div class="disclosure-body form-row">
+                <div class="form-group">
+                    <label>Тип</label>
+                    <select name="source_type">
+                        <option value="main">Конфигурация</option>
+                        <option value="extension">Расширение</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Название</label>
+                    <input name="label" required value="{{ project.name }}">
+                </div>
+                <div class="form-group">
+                    <label>Код части</label>
+                    <input name="source_id" required pattern="[a-zA-Z0-9_-]+" value="main" class="mono">
+                    <div class="form-hint">Латиницей; имя каталога на диске.</div>
+                </div>
+            </div>
+        </details>
+        <div class="btn-row" style="margin-top:var(--space-3)">
+            <button type="submit" class="btn btn-primary">Загрузить и проиндексировать</button>
+        </div>
+    </form>
+    <details class="disclosure" style="margin-top:var(--space-3)">
+        <summary>Файлы уже лежат на сервере</summary>
+        <form action="/api/projects/{{ project.id }}/sources" method="post" class="disclosure-body">
+            <input type="hidden" name="auto_reindex" value="on">
+            <input type="hidden" name="next" value="{{ next_url }}">
+            <input type="hidden" name="source_type" value="main">
+            <input type="hidden" name="label" value="{{ project.name }}">
+            <input type="hidden" name="source_id" value="main">
+            <p class="text-muted" style="font-size:var(--fs-sm)">Положите выгрузку в каталог
+                <span class="mono">data/projects/{{ project.id }}/sources/main/xml/</span>
+                (в контейнере — <span class="mono">/data/…</span>) и нажмите кнопку.</p>
+            <button type="submit" class="btn btn-secondary btn-sm">Подключить и проиндексировать</button>
+        </form>
+    </details>
+</div>
+{% endmacro %}

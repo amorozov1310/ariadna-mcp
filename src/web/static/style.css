@@ -700,3 +700,48 @@ main:focus { outline: none; }
 .first-upload { margin-top: var(--space-2); }
 .first-upload h3 { margin-bottom: var(--space-2); }
 .form-warning { color: var(--warning); }
+
+/* ============================================================
+   Обзор, настройки проекта, диалог подтверждения (шаг 5 плана UI)
+   ============================================================ */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.overview-state { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); }
+.overview-summary { color: var(--text2); margin: 0 0 var(--space-4); }
+.overview-search { padding: var(--space-4); }
+.overview-search-field { width: 100%; height: 42px; }
+.overview-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4); }
+.overview-card { display: block; color: var(--text); margin: 0; }
+.overview-card:hover { text-decoration: none; border-color: var(--accent); }
+.overview-card h3 { margin-bottom: var(--space-1); }
+.overview-card p { margin: 0; font-size: var(--fs-sm); }
+.overview-kinds > summary { cursor: pointer; }
+
+/* Вкладки — ссылки, состояние в адресе. */
+.tabs { display: flex; gap: var(--space-1); border-bottom: 1px solid var(--border); margin-bottom: var(--space-4); flex-wrap: wrap; }
+.tabs a { padding: var(--space-2) var(--space-3); color: var(--text2); border-bottom: 2px solid transparent; margin-bottom: -1px; font-weight: 500; }
+.tabs a:hover { color: var(--text); text-decoration: none; }
+.tabs a[aria-current="page"] { color: var(--accent-strong); border-bottom-color: var(--accent); }
+
+.parts-table td { vertical-align: middle; }
+.row-actions { width: 1%; text-align: right; }
+.row-actions .menu-list { min-width: 260px; }
+.menu-list form { margin: 0; }
+.menu-item-danger { color: var(--danger); }
+.card-inset { margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.card-inset h3 { margin-bottom: var(--space-3); }
+.code-copy { display: flex; align-items: center; gap: var(--space-2); min-height: 36px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-4); margin: var(--space-2) 0 0; }
+.kv dt { color: var(--text2); }
+.kv dd { margin: 0; }
+.danger-zone { border-color: var(--danger); }
+.danger-zone input { max-width: 320px; }
+
+dialog.confirm {
+    border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-5);
+    background: var(--bg2); color: var(--text); max-width: 440px; width: calc(100% - 32px);
+    box-shadow: var(--shadow-2);
+}
+dialog.confirm::backdrop { background: rgba(0, 0, 0, .45); }
+dialog.confirm p { margin: 0 0 var(--space-4); }
+dialog.confirm .btn-row { justify-content: flex-end; }
+@media (max-width: 560px) { .parts-table .col-code { display: none; } .parts-table td, .parts-table th { padding: 6px 4px; } }
