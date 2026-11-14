@@ -463,6 +463,9 @@ a:hover { text-decoration: underline; }
 /* ============================================================
    Служебное
    ============================================================ */
+/* Атрибут hidden сильнее display у компонентов (.notice — flex и т. п.). */
+[hidden] { display: none !important; }
+
 .empty-state { text-align: center; padding: var(--space-6) var(--space-5); color: var(--text2); }
 .empty-state p { margin-bottom: var(--space-4); }
 

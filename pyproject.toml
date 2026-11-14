@@ -60,4 +60,4 @@ include = ["src", "src.*"]
 # Path(__file__), Jinja2Templates, StaticFiles, FileResponse).
 [tool.setuptools.package-data]
 "src" = ["VERSION", "RELEASE_DATE"]                   # src/__init__.py, src/license.py
-"src.web" = ["templates/*.html", "static/*", "static/fonts/*"]   # web/app.py
+"src.web" = ["templates/*.html", "static/*", "static/fonts/*", "static/vendor/*/*"]   # web/app.py

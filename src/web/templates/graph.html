@@ -4,8 +4,9 @@
 {% block active_nav %}graph{% endblock %}
 
 {% block content %}
-<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.6/dist/vis-network.min.js"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.6/dist/dist/vis-network.min.css">
+{# Библиотека графа — локальная копия (static/vendor), Web UI работает без интернета. #}
+<script src="/static/vendor/vis-network/vis-network.min.js?v={{ asset_v }}"></script>
+<link rel="stylesheet" href="/static/vendor/vis-network/vis-network.min.css?v={{ asset_v }}">
 
 {# Этап U0/U6: один раздел «Граф», переключатель текст/визуал внутри. #}
 <h1 class="page-title">
@@ -110,13 +111,18 @@
             <button class="btn btn-secondary btn-sm" onclick="fitGraph()">По размеру</button>
             <button class="btn btn-secondary btn-sm" onclick="togglePhysics()">Физика: <span id="physics-state">вкл</span></button>
             <label class="text-muted" style="font-size:12px;margin-left:8px">
-                Layout:
+                Раскладка:
                 <select id="layout-select" onchange="setLayout(this.value)" style="padding:4px 6px">
                     <option value="hierarchical">Иерархия</option>
                     <option value="physics">Сила</option>
                 </select>
             </label>
         </div>
+    </div>
+
+    <div id="graph-error" class="notice notice-warning" role="alert" hidden style="margin-bottom:var(--space-2)">
+        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+        <div id="graph-error-text"></div>
     </div>
 
     <div id="legend" style="display:none;margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:4px;font-size:12px"></div>
@@ -180,6 +186,13 @@ function switchTab(tab) {
     document.getElementById('form-references').style.display = tab === 'references' ? 'block' : 'none';
 }
 
+// Ошибка — сообщением над графом, а не окном браузера.
+function showGraphError(text) {
+    const box = document.getElementById('graph-error');
+    document.getElementById('graph-error-text').textContent = text || '';
+    box.hidden = !text;
+}
+
 function showLoader(show) {
     document.getElementById('graph-empty').style.display = 'none';
     document.getElementById('graph-loader').style.display = show ? 'block' : 'none';
@@ -197,19 +210,20 @@ async function loadCalltreeGraph() {
     if (src && src.value) params.append('source_id', src.value);
 
     if (!params.get('procedure')) {
-        alert('Укажите имя процедуры');
+        showGraphError('Укажите имя процедуры');
         return;
     }
 
+    showGraphError('');
     showLoader(true);
     try {
         const resp = await fetch(`/api/projects/${PROJECT_ID}/graph/calltree?${params}`,
                                  { cache: 'no-store' });
         const data = await resp.json();
-        if (data.error) { alert(data.error); showLoader(false); return; }
+        if (data.error) { showGraphError(data.error); showLoader(false); return; }
         renderGraph(data, `Дерево: ${data.root_procedure} (${data.direction === 'up' ? 'вверх' : 'вниз'})`);
     } catch (e) {
-        alert('Ошибка: ' + e);
+        showGraphError('Не удалось построить граф: ' + e);
     }
     showLoader(false);
 }
@@ -224,19 +238,20 @@ async function loadReferencesGraph() {
     if (src && src.value) params.append('source_id', src.value);
 
     if (!params.get('object_name')) {
-        alert('Укажите имя объекта');
+        showGraphError('Укажите имя объекта');
         return;
     }
 
+    showGraphError('');
     showLoader(true);
     try {
         const resp = await fetch(`/api/projects/${PROJECT_ID}/graph/references?${params}`,
                                  { cache: 'no-store' });
         const data = await resp.json();
-        if (data.error) { alert(data.error); showLoader(false); return; }
+        if (data.error) { showGraphError(data.error); showLoader(false); return; }
         renderGraph(data, `Ссылки на ${data.root_object}`);
     } catch (e) {
-        alert('Ошибка: ' + e);
+        showGraphError('Не удалось построить граф: ' + e);
     }
     showLoader(false);
 }
