@@ -272,7 +272,7 @@ def test_web_scheme_and_comparison_form(release_pm):
             assert text in page
         # Выбор базы и релиза — у схемы, один раз на странице; и в настройках проекта.
         assert 'Изменить сравнение' in page and page.count('name="release_project"') == 1
-        settings = client.get('/projects/custom/settings').text
+        settings = client.get('/projects/custom/settings?tab=general').text
         assert 'Сравнение с типовой' in settings and 'name="base_project"' in settings
         update = client.get('/projects/custom/diff/update').text
         assert 'ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену' in update

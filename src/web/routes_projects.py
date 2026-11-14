@@ -29,6 +29,15 @@ def project_create_form(request: Request):
     return templates.TemplateResponse(name="project_create.html", request=request, context={})
 
 
+def _back(project_id: str, next_url: str = '') -> str:
+    """Адрес возврата после действия: next — только страница этого же
+    проекта (не открытый редирект), иначе «Обзор»."""
+    base = f"/projects/{project_id}"
+    if next_url and (next_url == base or next_url.startswith(base + '/') or next_url.startswith(base + '?')):
+        return next_url
+    return base
+
+
 @router.post("/api/projects")
 async def project_create(
     project_id: str = Form(...),
@@ -117,9 +126,13 @@ def _kinds_breakdown(kinds: dict[str, int]) -> list[dict]:
     return rows
 
 
+SETTINGS_TABS = ('data', 'general', 'danger')
+
+
 @router.get("/projects/{project_id}/settings", response_class=HTMLResponse)
-def project_settings(request: Request, project_id: str):
-    """Настройки проекта: имя и описание, база и новый релиз для «Отличий»."""
+def project_settings(request: Request, project_id: str, tab: str = 'data', edit: str = ''):
+    """Настройки проекта: «Данные» (состав проекта и индекс), «Общее»
+    (название, описание, сравнение с типовой), «Опасная зона» (удаление)."""
     pm = get_pm()
     try:
         project = pm.get_project(project_id)
@@ -128,6 +141,9 @@ def project_settings(request: Request, project_id: str):
 
     return templates.TemplateResponse(name="project_settings.html", request=request, context={
         "project": project,
+        "tab": tab if tab in SETTINGS_TABS else 'data',
+        "edit_source": next((s for s in project.sources if s.id == edit), None),
+        "index_error": pm.index_error(project_id) if project.status == 'error' else '',
         "candidates": [p for p in pm.list_projects() if p.id != project_id],
     })
 
@@ -143,7 +159,7 @@ async def update_project_meta(
         pm.update_project(project_id, name=name, description=description)
     except KeyError:
         raise HTTPException(404, f"Проект «{project_id}» не найден")
-    return RedirectResponse(f"/projects/{project_id}/settings", status_code=303)
+    return RedirectResponse(f"/projects/{project_id}/settings?tab=general", status_code=303)
 
 
 @router.post("/api/projects/{project_id}/sources")
@@ -154,6 +170,7 @@ async def add_source(
     source_type: str = Form('main'),
     xml_archive: UploadFile | None = File(None),
     auto_reindex: str | None = Form(None),
+    next: str = Form(''),
 ):
     """Добавить часть проекта (конфигурацию или расширение). auto_reindex=on —
     сразу обновить индекс: первый запуск «проект → выгрузка → индекс» без
@@ -174,11 +191,12 @@ async def add_source(
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
-    return RedirectResponse(f"/projects/{project_id}", status_code=303)
+    return RedirectResponse(_back(project_id, next), status_code=303)
 
 
 @router.post("/api/projects/{project_id}/reindex")
-async def reindex_project(request: Request, project_id: str, source_id: str | None = Form(None)):
+async def reindex_project(request: Request, project_id: str, source_id: str | None = Form(None),
+                         next: str = Form('')):
     """Kicks off reindexing in the background and returns immediately
     (Этап 4/D7) — a large corpus takes minutes, too long to hold this HTTP
     request open. The project dashboard shows status='indexing' (and, once
@@ -198,7 +216,7 @@ async def reindex_project(request: Request, project_id: str, source_id: str | No
     accept = request.headers.get('accept', '')
     if 'application/json' in accept or request.headers.get('x-requested-with'):
         return JSONResponse(result)
-    return RedirectResponse(f"/projects/{project_id}", status_code=303)
+    return RedirectResponse(_back(project_id, next), status_code=303)
 
 
 @router.get("/api/projects/{project_id}/status")
@@ -241,6 +259,7 @@ async def update_source(
     source_type: str | None = Form(None),
     xml_archive: UploadFile | None = File(None),
     auto_reindex: str | None = Form(None),
+    next: str = Form(''),
 ):
     """Replace files (or just metadata) of an existing source.
     If auto_reindex=on, runs reindex for that source immediately after."""
@@ -262,20 +281,20 @@ async def update_source(
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
-    return RedirectResponse(f"/projects/{project_id}", status_code=303)
+    return RedirectResponse(_back(project_id, next), status_code=303)
 
 
 @router.post("/api/projects/{project_id}/sources/{source_id}/delete")
-async def remove_source(project_id: str, source_id: str):
+async def remove_source(project_id: str, source_id: str, next: str = Form('')):
     """Remove a source from the project (deletes files + indexed DB rows)."""
     pm = get_pm()
     try:
         await run_in_threadpool(pm.remove_source, project_id, source_id)
     except ReindexInProgressError as e:
-        raise HTTPException(409, f"Нельзя удалить источник: {e}")
+        raise HTTPException(409, f"Нельзя удалить часть проекта: {e}")
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
-    return RedirectResponse(f"/projects/{project_id}", status_code=303)
+    return RedirectResponse(_back(project_id, next), status_code=303)
 
 
 @router.delete("/api/projects/{project_id}")
