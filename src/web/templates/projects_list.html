@@ -3,6 +3,15 @@
 {% block active_nav %}projects{% endblock %}
 
 {% block content %}
+{% set auth_user = request.state.user if request.state.user is defined else none %}
+{% set can_admin = not auth_user or auth_user.role == 'admin' %}
+<div class="page-header">
+    <h1 class="page-title">Проекты</h1>
+    {% if can_admin and projects %}
+    <a href="/projects/new" class="btn btn-primary btn-sm">
+        <svg class="icon" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg> Создать проект</a>
+    {% endif %}
+</div>
 {% if projects %}
 {% for p in projects %}
 <a href="/projects/{{ p.id }}" style="text-decoration:none;color:inherit">
@@ -29,8 +38,12 @@
 {% endfor %}
 {% else %}
 <div class="empty-state">
+    {% if can_admin %}
     <p>Нет проектов</p>
     <a href="/projects/new" class="btn btn-primary">Создать первый проект</a>
+    {% else %}
+    <p>Проектов пока нет — их создаёт администратор.</p>
+    {% endif %}
 </div>
 {% endif %}
 {% endblock %}
