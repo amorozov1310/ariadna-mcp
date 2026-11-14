@@ -94,7 +94,7 @@
     <div class="card-header">
         <h3 class="section-title">
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#package"/></svg>
-            Источники данных
+            Состав проекта
         </h3>
     </div>
 
@@ -129,7 +129,7 @@
                         XML-выгрузка
                     </span>
                     {% else %}
-                    <span class="meta-item" style="color:var(--warning)" title="У источника нет данных для индексации">
+                    <span class="meta-item" style="color:var(--warning)" title="Нет выгрузки — индексировать нечего">
                         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
                         нет данных
                     </span>
@@ -137,7 +137,7 @@
                     {% if src.indexed_at %}
                     <span class="meta-item" title="Последняя индексация">
                         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#clock"/></svg>
-                        {{ src.indexed_at[:19].replace('T', ' ') }}
+                        {{ src.indexed_at|dt }}
                     </span>
                     {% else %}
                     <span class="meta-item" style="color:var(--warning)">
@@ -152,16 +152,16 @@
                 <form action="/api/projects/{{ project.id }}/reindex" method="post" style="display:inline">
                     <input type="hidden" name="source_id" value="{{ src.id }}">
                     <button type="submit" class="btn btn-secondary btn-sm btn-icon"
-                            aria-label="Переиндексировать источник «{{ src.label }}»"
-                            title="Переиндексировать только этот источник">
+                            aria-label="Обновить индекс части «{{ src.label }}»"
+                            title="Обновить индекс только этой части">
                         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#refresh"/></svg>
                     </button>
                 </form>
                 <form action="/api/projects/{{ project.id }}/sources/{{ src.id }}/delete" method="post" style="display:inline"
-                      onsubmit="return confirm('Удалить источник «{{ src.label }}» и все его данные?')">
+                      onsubmit="return confirm('Удалить «{{ src.label }}» из проекта вместе с его данными?')">
                     <button type="submit" class="btn btn-danger btn-sm btn-icon"
-                            aria-label="Удалить источник «{{ src.label }}»"
-                            title="Удалить источник">
+                            aria-label="Удалить «{{ src.label }}» из проекта"
+                            title="Удалить из проекта">
                         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#trash"/></svg>
                     </button>
                 </form>
@@ -194,7 +194,7 @@
                         </div>
                         <label style="display:block;margin:var(--space-2) 0">
                             <input type="checkbox" name="auto_reindex" checked>
-                            Сразу переиндексировать этот источник
+                            Сразу обновить индекс
                         </label>
                         <div class="btn-row">
                             <button type="submit" class="btn btn-primary btn-sm">Сохранить изменения</button>
@@ -208,26 +208,26 @@
         {% endfor %}
     </div>
     {% else %}
-    <p class="text-muted" style="margin-top:var(--space-2)">Нет источников. Добавьте XML-выгрузку конфигурации.</p>
+    <p class="text-muted" style="margin-top:var(--space-2)">Проект пуст — добавьте XML-выгрузку конфигурации.</p>
     {% endif %}
 
     <details class="disclosure" style="margin-top:var(--space-3)">
         <summary>
             <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg>
-            Добавить источник
+            Добавить расширение или конфигурацию
         </summary>
         <form action="/api/projects/{{ project.id }}/sources" method="post"
               enctype="multipart/form-data" class="disclosure-body js-upload">
             <div class="form-row">
                 <div class="form-group">
-                    <label>ID источника</label>
+                    <label>Код части</label>
                     <input name="source_id" required placeholder="напр. main" value="{% if not project.sources %}main{% endif %}">
-                    <div class="form-hint">Латиница без пробелов — это имя каталога источника на диске.</div>
+                    <div class="form-hint">Латиницей, без пробелов: так часть называется в запросах агента и в каталоге на диске.</div>
                 </div>
                 <div class="form-group">
                     <label>Название</label>
                     <input name="label" required placeholder="напр. Основная конфигурация">
-                    <div class="form-hint">Как источник будет называться в интерфейсе.</div>
+                    <div class="form-hint">Как часть будет называться в интерфейсе.</div>
                 </div>
                 <div class="form-group">
                     <label>Тип</label>
@@ -257,7 +257,7 @@
         <button onclick="startReindex()" class="btn btn-primary" id="reindex-btn"
                 {% if not project.sources or project.status == 'indexing' %}disabled{% endif %}>
             <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#refresh"/></svg>
-            Переиндексировать
+            Обновить индекс
         </button>
         <form action="/api/projects/{{ project.id }}/delete" method="post"
               onsubmit="return confirm('Удалить проект «{{ project.name }}» и все данные?')">

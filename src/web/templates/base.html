@@ -67,13 +67,13 @@
 {% macro main_sections() %}
 {{ section_link('overview', '', 'Обзор', 'layers') }}
 {{ section_link('search', '/search', 'Поиск', 'search') }}
-{{ section_link('graph', '/graph', 'Граф', 'graph') }}
-{{ section_link('diff', '/diff', 'Отличия', 'blocks') }}
-{{ section_link('checks', '/checks', 'Проверка', 'check') }}
+{{ section_link('graph', '/graph', 'Вызовы', 'graph') }}
+{{ section_link('diff', '/diff', 'Доработки', 'blocks') }}
+{{ section_link('checks', '/checks', 'Проверка вызовов', 'check') }}
 {% endmacro %}
 {% macro more_links() %}
 {{ section_link('glossary', '/glossary', 'Словарь', 'file-text') }}
-{{ section_link('playground', '/playground', 'Playground', 'flask') }}
+{{ section_link('playground', '/playground', 'Консоль MCP', 'flask') }}
 {{ section_link('settings', '/settings', 'Настройки проекта', 'settings') }}
 {% endmacro %}
 {% macro theme_item() %}
@@ -84,7 +84,7 @@
 {# Меню сервера / пользователя: локально — значок, на сервере — имя и роль. #}
 {% macro account_items() %}
 {% if auth_user %}
-<div class="menu-note">{{ auth_user.name }} · {{ 'администратор' if auth_user.role == 'admin' else 'участник' }}</div>
+<div class="menu-note">{{ auth_user.name }} · {{ auth_user.role|role }}</div>
 <hr>
 {% endif %}
 {% if can_admin %}

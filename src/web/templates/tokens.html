@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Токены — Ариадна{% endblock %}
+{% block title %}Доступ и токены — Ариадна{% endblock %}
 {% block active_nav %}tokens{% endblock %}
 
 {% block content %}
 <div class="card">
-    <h3 class="section-title">Токены доступа</h3>
+    <h3 class="section-title">Доступ и токены</h3>
     <p class="text-muted" style="font-size:var(--fs-sm)">
         Личный токен — у каждого человека и робота свой: его можно отозвать, не трогая остальных.
         Агент передаёт токен в заголовке <span class="mono">Authorization: Bearer …</span>
         (в настройке MCP-сервера — <span class="mono">"headers"</span>), в Web UI с ним входят на
-        странице «Вход». Роль <b>admin</b> — проекты, источники, их удаление и токены;
-        <b>user</b> — поиск, все инструменты чтения, переиндексация, словарь.
+        странице «Вход». <b>Администратор</b> — проекты, их состав и удаление, токены;
+        <b>участник</b> — поиск, все инструменты чтения, обновление индекса, словарь.
     </p>
     <p class="text-muted" style="font-size:var(--fs-sm)">
         Токенов: <b>{{ tokens|length }}</b> из <b>{{ limit }}</b> —
@@ -41,7 +41,7 @@
     <div class="notice notice-info" style="margin-bottom:var(--space-3)">
         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#key"/></svg>
         <div>
-            Токен для «{{ new_info.name }}» ({{ new_info.role }}). Скопируйте сейчас — повторно он не
+            Токен для «{{ new_info.name }}» ({{ new_info.role|role }}). Скопируйте сейчас — повторно он не
             показывается:
             <div class="token-once" style="margin-top:var(--space-2)">{{ new_token }}</div>
             {% if first %}<p style="margin-top:var(--space-2)">Авторизация включена, вы вошли с этим токеном.</p>{% endif %}
@@ -54,7 +54,7 @@
         </label>
         <label>Роль
             <select name="role">
-                {% for r in roles %}<option value="{{ r }}" {% if r == 'user' %}selected{% endif %}>{{ r }}</option>{% endfor %}
+                {% for r in roles %}<option value="{{ r }}" {% if r == 'user' %}selected{% endif %}>{{ r|role }}</option>{% endfor %}
             </select>
         </label>
         <button type="submit" class="btn btn-primary btn-sm">Создать токен</button>
@@ -68,9 +68,9 @@
         {% for t in tokens %}
         <tr>
             <td>{{ t.name }}{% if me and me.id == t.id %} <span class="badge badge-ready">вы</span>{% endif %}</td>
-            <td>{{ t.role }}</td>
-            <td class="text-muted">{{ t.created_at|replace('T', ' ') }}</td>
-            <td class="text-muted">{{ (t.last_used or '—')|replace('T', ' ') }}</td>
+            <td>{{ t.role|role }}</td>
+            <td class="text-muted">{{ t.created_at|dt }}</td>
+            <td class="text-muted">{{ t.last_used|dt if t.last_used else '—' }}</td>
             <td>
                 <form method="post" action="/api/admin/tokens/{{ t.id }}/revoke"
                       onsubmit="return confirm('Отозвать токен «{{ t.name }}»?')">

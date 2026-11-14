@@ -46,7 +46,7 @@ def _main_sections(header: str) -> list[str]:
 def test_project_header_local_mode(web):
     _, client = web
     header = _header(client.get('/projects/p1').text)
-    assert _main_sections(header) == ['Обзор', 'Поиск', 'Граф', 'Отличия', 'Проверка']
+    assert _main_sections(header) == ['Обзор', 'Поиск', 'Вызовы', 'Доработки', 'Проверка вызовов']
     for path in ('/projects/p1/glossary', '/projects/p1/playground', '/projects/p1/settings'):
         assert f'href="{path}"' in header                 # в «Ещё» и в «☰»
     # Локально — меню сервера: доступ, лицензия, тема; выхода нет.
@@ -89,3 +89,15 @@ def test_admin_and_member_menus(web, monkeypatch):
     assert 'Создать проект' not in header
     page = client.get('/', headers=as_member).text
     assert 'href="/projects/new"' not in page
+
+
+def test_text_filters():
+    from datetime import datetime, timedelta
+    from src.web.app import _dt, _plural
+    assert [_plural(n, 'часть', 'части', 'частей') for n in (1, 2, 5, 11, 21, 104)] == \
+        ['1 часть', '2 части', '5 частей', '11 частей', '21 часть', '104 части']
+    now = datetime.now().replace(microsecond=0)
+    assert _dt(now.isoformat()) == f'сегодня {now:%H:%M}'
+    assert _dt((now - timedelta(days=1)).isoformat()).startswith('вчера ')
+    assert _dt('2025-03-07T22:50:07.123') == '07.03.2025 22:50'
+    assert _dt('') == '' and _dt('не дата') == 'не дата'

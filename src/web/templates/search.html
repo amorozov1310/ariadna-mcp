@@ -11,11 +11,11 @@
 <!-- Search mode tabs -->
 <div class="search-tabs">
     <a href="/projects/{{ project.id }}/search?mode=metadata&q={{ query }}{% if source_id %}&source_id={{ source_id }}{% endif %}"
-       class="search-tab {% if mode != 'procedures' and mode != 'code' %}active{% endif %}">Метаданные</a>
+       class="search-tab {% if mode != 'procedures' and mode != 'code' %}active{% endif %}">Объекты</a>
     <a href="/projects/{{ project.id }}/search?mode=procedures&q={{ query }}{% if source_id %}&source_id={{ source_id }}{% endif %}"
        class="search-tab {% if mode == 'procedures' %}active{% endif %}">Процедуры</a>
     <a href="/projects/{{ project.id }}/search?mode=code&q={{ query }}{% if source_id %}&source_id={{ source_id }}{% endif %}"
-       class="search-tab {% if mode == 'code' %}active{% endif %}">Код</a>
+       class="search-tab {% if mode == 'code' %}active{% endif %}">Текст кода</a>
 </div>
 
 <div class="card">
@@ -61,11 +61,11 @@
 
             {% if sources and sources|length > 1 %}
             <div class="form-group" style="flex:1.2">
-                <select name="source_id" style="padding:10px var(--space-4)" title="Фильтр по источнику данных">
-                    <option value="">Все источники</option>
+                <select name="source_id" style="padding:10px var(--space-4)" title="Часть проекта: конфигурация или расширение">
+                    <option value="">Весь проект</option>
                     {% for s in sources %}
                     <option value="{{ s.id }}" {% if source_id == s.id %}selected{% endif %}>
-                        {{ s.label }}{% if s.source_type == 'extension' %} (ext){% endif %}
+                        {{ s.label }}{% if s.source_type == 'extension' %} — расширение{% endif %}
                     </option>
                     {% endfor %}
                 </select>
@@ -82,8 +82,7 @@
 {% if query %}
 <div class="card">
     <div class="flex-between mb-8">
-        <h3>Результаты: {{ results|length }}{% if source_id %} <span class="text-muted" style="font-size:var(--fs-base);font-weight:400">(источник: {% for s in sources %}{% if s.id == source_id %}{{ s.label }}{% endif %}{% endfor %})</span>{% endif %}</h3>
-        <span class="text-muted num">{{ elapsed_ms }} мс</span>
+        <h3>Результаты: {{ results|length }}{% if source_id %} <span class="text-muted" style="font-size:var(--fs-base);font-weight:400">({% for s in sources %}{% if s.id == source_id %}{{ s.label }}{% endif %}{% endfor %})</span>{% endif %}</h3>
     </div>
 
     {% if results %}
