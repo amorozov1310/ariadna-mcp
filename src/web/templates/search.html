@@ -2,66 +2,66 @@
 {% block title %}Поиск — {{ project.name }}{% endblock %}
 {% block active_nav %}search{% endblock %}
 
-{% block content %}
-<h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#search"/></svg>
-    Поиск
-</h1>
+{% set base = '/projects/' ~ project.id ~ '/search' %}
+{% set many_parts = sources and sources|length > 1 %}
 
-<!-- Search mode tabs -->
-<div class="search-tabs">
-    <a href="/projects/{{ project.id }}/search?mode=metadata&q={{ query }}{% if source_id %}&source_id={{ source_id }}{% endif %}"
-       class="search-tab {% if mode != 'procedures' and mode != 'code' %}active{% endif %}">Объекты</a>
-    <a href="/projects/{{ project.id }}/search?mode=procedures&q={{ query }}{% if source_id %}&source_id={{ source_id }}{% endif %}"
-       class="search-tab {% if mode == 'procedures' %}active{% endif %}">Процедуры</a>
-    <a href="/projects/{{ project.id }}/search?mode=code&q={{ query }}{% if source_id %}&source_id={{ source_id }}{% endif %}"
-       class="search-tab {% if mode == 'code' %}active{% endif %}">Текст кода</a>
-</div>
+{# Адрес поиска с текущими условиями и заменой одного-двух параметров. #}
+{% macro url(mode_=mode, n_=None) -%}
+{{ base }}?mode={{ mode_ }}{% if query %}&q={{ query|urlencode }}{% endif %}
+{%- if mode_ == 'metadata' and kind %}&kind={{ kind|urlencode }}{% endif %}
+{%- if mode_ == 'procedures' and module_filter %}&module_filter={{ module_filter|urlencode }}{% endif %}
+{%- if mode_ == 'procedures' and export_only %}&export_only=1{% endif %}
+{%- if source_id %}&source_id={{ source_id|urlencode }}{% endif %}
+{%- if n_ %}&n={{ n_ }}{% endif %}
+{%- endmacro %}
+
+{# Бейдж части проекта — только если частей несколько и строка из расширения. #}
+{% macro part_badge(source_id_) -%}
+{% set info = source_info.get(source_id_) %}
+{% if many_parts and info and info.source_type == 'extension' %}<span class="badge badge-accent">расширение «{{ info.label }}»</span>{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<h1 class="page-title">Поиск</h1>
+
+<nav class="tabs" aria-label="Что искать">
+    <a href="{{ url('metadata') }}" {% if mode == 'metadata' %}aria-current="page"{% endif %}>Объекты</a>
+    <a href="{{ url('procedures') }}" {% if mode == 'procedures' %}aria-current="page"{% endif %}>Процедуры</a>
+    <a href="{{ url('code') }}" {% if mode == 'code' %}aria-current="page"{% endif %}>Текст кода</a>
+</nav>
 
 <div class="card">
-    <form method="get" action="/projects/{{ project.id }}/search">
-        <input type="hidden" name="mode" value="{{ mode or 'metadata' }}">
-        <div class="form-row">
-            <div class="form-group" style="flex:3">
-                <input name="q" value="{{ query }}"
-                       placeholder="{% if mode == 'procedures' %}напр. Расчет{% elif mode == 'code' %}напр. ЗначенияРеквизитовОбъекта{% else %}напр. Номенклатура{% endif %}"
-                       autofocus style="font-size:var(--fs-md);padding:10px var(--space-4)">
-            </div>
-
-            {% if mode == 'metadata' or not mode %}
-            <div class="form-group" style="flex:1">
-                {#
-                  Этап U0/U2: список видов приходит из db_stats.kinds — всё,
-                  что реально есть в индексе (Роль, Константа, WebСервис,
-                  ПланСчетов…), со счётчиком и по убыванию количества.
-                  Раньше здесь был захардкоженный перечень из 9 видов.
-                #}
-                <select name="kind" style="padding:10px var(--space-4)">
-                    <option value="">Все типы{% if kinds %} ({{ kinds|length }}){% endif %}</option>
+    <form method="get" action="{{ base }}" class="search-form">
+        <input type="hidden" name="mode" value="{{ mode }}">
+        <div class="search-main">
+            <label class="visually-hidden" for="search-q">Что найти</label>
+            <input id="search-q" type="search" name="q" value="{{ query }}" autofocus
+                   placeholder="{% if mode == 'procedures' %}Имя процедуры, напр. ОбработкаПроведения{% elif mode == 'code' %}Строка в коде, напр. ВЫБРАТЬ ПЕРВЫЕ 1{% else %}Объект по имени или своими словами, напр. Номенклатура{% endif %}">
+            <button type="submit" class="btn btn-primary">Найти</button>
+        </div>
+        <div class="filters">
+            {% if mode == 'metadata' %}
+            <label>Вид объекта
+                <select name="kind">
+                    <option value="">Все виды</option>
                     {% for k, cnt in kinds.items() %}
                     <option value="{{ k }}" {% if kind == k %}selected{% endif %}>{{ k }} — {{ cnt|num }}</option>
                     {% endfor %}
-                    {% if kind and kind not in kinds %}
-                    <option value="{{ kind }}" selected>{{ kind }}</option>
-                    {% endif %}
+                    {% if kind and kind not in kinds %}<option value="{{ kind }}" selected>{{ kind }}</option>{% endif %}
                 </select>
-            </div>
+            </label>
             {% elif mode == 'procedures' %}
-            <div class="form-group" style="flex:1">
-                <input name="module_filter" value="{{ module_filter }}" placeholder="напр. ОбщегоНазначения"
-                       style="padding:10px var(--space-4)">
-            </div>
-            <div class="form-group" style="flex:0.5">
-                <select name="export_only" style="padding:10px var(--space-4)">
-                    <option value="">Все</option>
-                    <option value="1" {% if export_only %}selected{% endif %}>Экспорт</option>
-                </select>
-            </div>
+            <label>Модуль
+                <input name="module_filter" value="{{ module_filter }}" placeholder="напр. ОбщегоНазначения">
+            </label>
+            <label class="filter-check">
+                <input type="checkbox" name="export_only" value="1" {% if export_only %}checked{% endif %}>
+                Только экспортные
+            </label>
             {% endif %}
-
-            {% if sources and sources|length > 1 %}
-            <div class="form-group" style="flex:1.2">
-                <select name="source_id" style="padding:10px var(--space-4)" title="Часть проекта: конфигурация или расширение">
+            {% if many_parts %}
+            <label>Часть проекта
+                <select name="source_id">
                     <option value="">Весь проект</option>
                     {% for s in sources %}
                     <option value="{{ s.id }}" {% if source_id == s.id %}selected{% endif %}>
@@ -69,96 +69,100 @@
                     </option>
                     {% endfor %}
                 </select>
-            </div>
+            </label>
             {% endif %}
-
-            <div class="form-group" style="flex:0">
-                <button type="submit" class="btn btn-primary" style="padding:10px var(--space-5)">Найти</button>
-            </div>
         </div>
     </form>
 </div>
 
-{% if query %}
+{% if query or listing %}
 <div class="card">
-    <div class="flex-between mb-8">
-        <h3>Результаты: {{ results|length }}{% if source_id %} <span class="text-muted" style="font-size:var(--fs-base);font-weight:400">({% for s in sources %}{% if s.id == source_id %}{{ s.label }}{% endif %}{% endfor %})</span>{% endif %}</h3>
-    </div>
+    <h2 class="results-title">
+        {% if listing %}{{ kind }}{% if not results %} — объектов нет{% endif %}
+        {% elif results %}Найдено{% if has_more %} больше {{ results|length }}{% else %}: {{ results|length }}{% endif %}
+        {% else %}Ничего не найдено{% endif %}
+    </h2>
 
     {% if results %}
-        {% if mode == 'procedures' %}
-        <div class="table-scroll">
-        <table class="detail-table" style="width:100%">
-            <thead>
-                <tr><th>Модуль</th><th>Имя</th><th>Вид</th><th>Директива</th><th>Экспорт</th><th>Строки</th><th>Источник</th></tr>
-            </thead>
-            <tbody>
-            {% for r in results %}
-            <tr>
-                <td style="font-size:var(--fs-sm);color:var(--text2)">{{ r.module_name }}</td>
-                <td><strong>{{ r.name }}</strong></td>
-                <td>{{ r.kind }}</td>
-                <td><span class="mono">{{ r.directive or '' }}</span></td>
-                <td>{% if r.is_export %}<svg class="icon icon-sm" style="color:var(--success)" aria-label="экспортная"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>{% endif %}</td>
-                <td class="mono">{{ r.start_line }}-{{ r.end_line }}</td>
-                <td><span class="badge badge-source">{{ r.source_label or r.source_id or '—' }}</span></td>
-            </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-        </div>
-
-        {% elif mode == 'code' %}
-        <div class="table-scroll">
-        <table class="detail-table" style="width:100%">
-            <thead>
-                <tr><th>Модуль</th><th>Строка</th><th>Контекст</th><th>Источник</th></tr>
-            </thead>
-            <tbody>
-            {% for r in results %}
-            <tr>
-                <td style="font-size:var(--fs-sm);color:var(--text2)">{{ r.module_name }}</td>
-                <td class="mono">{{ r.line }}</td>
-                <td style="font-size:var(--fs-sm);font-family:var(--mono);max-width:600px;white-space:pre-wrap">{{ r.context[:400] }}</td>
-                <td><span class="badge badge-source">{{ r.source_label or r.source_id or '—' }}</span></td>
-            </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-        </div>
-
-        {% else %}
+    <ul class="results">
+    {% if mode == 'procedures' %}
         {% for r in results %}
-        <div class="result-item">
-            <a href="/projects/{{ project.id }}/object/{{ r.full_name }}{% if r.source_id %}?source_id={{ r.source_id }}{% endif %}" class="result-name">{{ r.full_name }}</a>
-            <span class="result-kind">{{ r.kind }}</span>
-            {% if r.source_label or r.source_id %}
-            <span class="badge badge-source">{{ r.source_label or r.source_id }}</span>
-            {% endif %}
-            {% if r.synonym and r.synonym != r.name %}
-            <span class="text-muted" style="margin-left:6px">{{ r.synonym }}</span>
-            {% endif %}
-            {% if r.glossary %}
-            <a href="/projects/{{ project.id }}/glossary" class="badge badge-accent" style="margin-left:6px"
-               title="Найдено по словарю проекта">словарь: «{{ r.glossary }}»</a>
-            {% endif %}
-            {% if r.comment %}
-            <div class="result-comment">{{ r.comment }}</div>
-            {% endif %}
-        </div>
+        <li class="result">
+            <div class="result-line">
+                <a class="result-name" href="/projects/{{ project.id }}/calltree?procedure={{ r.name|urlencode }}&module={{ r.module_name|urlencode }}{% if r.source_id %}&source_id={{ r.source_id|urlencode }}{% endif %}">{{ r.name }}()</a>
+                {% if r.is_export %}<span class="badge badge-neutral">экспорт</span>{% endif %}
+                {% if r.directive %}<span class="badge badge-neutral">{{ r.directive }}</span>{% endif %}
+                {{ part_badge(r.source_id) }}
+            </div>
+            <div class="result-place">{{ r.module_name }} · {{ 'функция' if r.kind == 'Функция' else 'процедура' }} · стр. {{ r.start_line }}–{{ r.end_line }}</div>
+        </li>
         {% endfor %}
-        {% endif %}
+    {% elif mode == 'code' %}
+        {% for r in results %}
+        <li class="result">
+            <div class="result-line">
+                <span class="result-name">{{ r.module_name }}</span>
+                <span class="text-muted">стр. {{ r.line }}</span>
+                {{ part_badge(r.source_id) }}
+            </div>
+            <pre class="result-code">{{ r.context[:600]|highlight(query) }}</pre>
+        </li>
+        {% endfor %}
     {% else %}
-    <p class="text-muted">Ничего не найдено по запросу «{{ query }}»</p>
+        {% for r in results %}
+        <li class="result">
+            <div class="result-line">
+                <a class="result-name" href="/projects/{{ project.id }}/object/{{ r.full_name }}{% if r.source_id and many_parts %}?source_id={{ r.source_id }}{% endif %}">{{ r.full_name }}</a>
+                {% if r.glossary %}
+                <a href="/projects/{{ project.id }}/glossary" class="badge badge-accent" title="Найдено по словарю проекта">словарь: «{{ r.glossary }}»</a>
+                {% endif %}
+                {{ part_badge(r.source_id) }}
+            </div>
+            {% if (r.synonym and r.synonym != r.name) or r.comment %}
+            <div class="result-place">{{ r.synonym if r.synonym != r.name else '' }}{% if r.synonym and r.synonym != r.name and r.comment %} · {% endif %}{{ r.comment or '' }}</div>
+            {% endif %}
+        </li>
+        {% endfor %}
+    {% endif %}
+    </ul>
+    {% if has_more %}
+    <div class="results-more">
+        <span class="text-muted">Показаны первые {{ results|length }}.</span>
+        <a class="btn btn-secondary btn-sm" href="{{ url(mode, shown + page) }}">Показать ещё</a>
+    </div>
+    {% endif %}
+
+    {% elif query %}
+    <div class="empty-hint">
+        <p>По запросу «{{ query }}» здесь ничего нет. Что можно сделать:</p>
+        <ul>
+            {% if mode != 'metadata' %}<li><a href="{{ url('metadata') }}">поискать среди объектов</a></li>{% endif %}
+            {% if mode != 'procedures' %}<li><a href="{{ url('procedures') }}">поискать среди процедур</a></li>{% endif %}
+            {% if mode != 'code' %}<li><a href="{{ url('code') }}">поискать в тексте кода</a></li>{% endif %}
+            {% if mode == 'metadata' %}<li>переформулировать словами из 1С — «взаиморасчеты», «остатки товаров»</li>
+            <li>если объект называют по-своему — <a href="/projects/{{ project.id }}/glossary">добавить слово в словарь</a></li>{% endif %}
+            {% if kind or source_id or module_filter or export_only %}<li><a href="{{ base }}?mode={{ mode }}&q={{ query|urlencode }}">убрать фильтры</a></li>{% endif %}
+        </ul>
+    </div>
     {% endif %}
 </div>
-{% endif %}
 
-<style>
-.search-tabs { display:flex; gap:0; margin-bottom:var(--space-4); border-bottom:2px solid var(--border); }
-.search-tab { padding:10px var(--space-5); font-size:var(--fs-base); font-weight:500; color:var(--text2);
-              border-bottom:2px solid transparent; margin-bottom:-2px; }
-.search-tab:hover { color:var(--text); text-decoration:none; }
-.search-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
-</style>
+{% else %}
+<div class="card empty-hint">
+    <p>Например:</p>
+    <ul>
+        {% if mode == 'procedures' %}
+        <li><a href="{{ base }}?mode=procedures&q=ОбработкаПроведения">ОбработкаПроведения</a> — по имени, часть имени тоже подходит</li>
+        <li><a href="{{ base }}?mode=procedures&q=ПриСозданииНаСервере">ПриСозданииНаСервере</a> — обработчики форм</li>
+        {% elif mode == 'code' %}
+        <li><a href="{{ base }}?mode=code&q=ВЫБРАТЬ ПЕРВЫЕ 1">ВЫБРАТЬ ПЕРВЫЕ 1</a> — текст запроса</li>
+        <li><a href="{{ base }}?mode=code&q=ОбщегоНазначения.ЗначениеРеквизитаОбъекта">ОбщегоНазначения.ЗначениеРеквизитаОбъекта</a> — где вызывается</li>
+        {% else %}
+        <li><a href="{{ base }}?q=Номенклатура">Номенклатура</a> — по имени объекта</li>
+        <li><a href="{{ base }}?q=остатки товаров на складах">остатки товаров на складах</a> — своими словами</li>
+        {% if kinds %}<li>или выберите вид объекта — покажем все объекты этого вида</li>{% endif %}
+        {% endif %}
+    </ul>
+</div>
+{% endif %}
 {% endblock %}
