@@ -1,13 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!--
-    Нить Ариадны: спираль, выводящая из лабиринта наружу. Читается и
-    в 16 пикселях — линии редкие и одной толщины, засечек и мелких
-    деталей нет. Янтарная нить на петроле — те же два цвета, что и в
-    палитре интерфейса.
-  -->
-  <rect width="32" height="32" rx="8" fill="#0f766e"/>
-  <path d="M16 20.5a4.5 4.5 0 1 0-4.5-4.5v0A8.5 8.5 0 1 0 24.5 16"
-        fill="none" stroke="#FBBF24" stroke-width="2.6"
-        stroke-linecap="round"/>
-  <circle cx="16" cy="16" r="1.6" fill="#fff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Ариадна — Лабиринт: нить ведёт из лабиринта к точке (выход). -->
+  <rect width="64" height="64" rx="15" fill="#0D7C76"/>
+  <path d="M14 50 H47 Q49 50 49 48 V19 Q49 16 46 16 H20 Q16 16 16 20 V29 Q16 32 19 32 H34" fill="none" stroke="#FFD02C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="35" cy="32" r="5.5" fill="#FFD02C"/>
 </svg>

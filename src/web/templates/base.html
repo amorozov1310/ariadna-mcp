@@ -6,7 +6,9 @@
     <title>{% block title %}Ариадна{% endblock %}</title>
     {# Версия обязательна и здесь: иконку вкладки браузеры кэшируют
        упорнее всего остального и без смены URL держат старую неделями. #}
+    <link rel="icon" href="/static/favicon.ico?v={{ asset_v }}" sizes="any">
     <link rel="icon" href="/static/favicon.svg?v={{ asset_v }}" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v={{ asset_v }}">
     {#
       Страховка на случай, когда style.css не применился (кэш, офлайн,
       опечатка в пути): SVG без размеров разворачивается на всю ширину
@@ -121,11 +123,11 @@
           Цвет марки к тому же фиксированный — это бренд, он не должен
           меняться вместе с токеном темы.
         #}
-        <svg class="brand-mark" width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
-            <rect width="32" height="32" rx="8" fill="#0f766e"/>
-            <path d="M16 20.5a4.5 4.5 0 1 0-4.5-4.5v0A8.5 8.5 0 1 0 24.5 16"
-                  fill="none" stroke="#FBBF24" stroke-width="2.6" stroke-linecap="round"/>
-            <circle cx="16" cy="16" r="1.6" fill="#fff"/>
+        <svg class="brand-mark" width="26" height="26" viewBox="0 0 64 64" aria-hidden="true">
+            <rect width="64" height="64" rx="15" fill="#0D7C76"/>
+            <path d="M14 50 H47 Q49 50 49 48 V19 Q49 16 46 16 H20 Q16 16 16 20 V29 Q16 32 19 32 H34"
+                  fill="none" stroke="#FFD02C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="35" cy="32" r="5.5" fill="#FFD02C"/>
         </svg>
         <span class="brand-text">Ариадна</span>
     </a>

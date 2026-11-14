@@ -77,3 +77,16 @@ def test_graph_library_is_served_locally(client):
         resp = client.get(url)
         assert resp.status_code == 200 and len(resp.content) > 100_000, asset
     assert 'alert(' not in page                     # ошибки — сообщением на странице
+
+
+def test_icons_are_served(client):
+    """Знак «Лабиринт»: иконка вкладки (ICO и SVG), значок для телефона,
+    /favicon.ico, который браузеры просят сами, — без 404."""
+    page = client.get('/').text
+    links = re.findall(r'<link rel="(?:icon|apple-touch-icon)" href="([^"]+)"', page)
+    assert len(links) == 3
+    for url in links + ['/favicon.ico']:
+        resp = client.get(url)
+        assert resp.status_code == 200 and resp.content, url
+    assert client.get('/favicon.ico').headers['content-type'] == 'image/x-icon'
+    assert '#FFD02C' in client.get('/static/favicon.svg').text

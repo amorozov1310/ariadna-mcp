@@ -88,7 +88,8 @@ def _asset_version() -> str:
     (инлайновый SVG) растягивается во весь экран. Считается один раз при
     старте по mtime статики — образ пересобирается вместе с ней."""
     stamp = 0.0
-    for name in ('style.css', 'fonts.css', 'icons.svg', 'favicon.svg'):
+    for name in ('style.css', 'fonts.css', 'icons.svg', 'favicon.svg', 'favicon.ico',
+                 'apple-touch-icon.png'):
         try:
             stamp = max(stamp, (STATIC_DIR / name).stat().st_mtime)
         except OSError:
@@ -259,7 +260,7 @@ def favicon():
     этого маршрута каждый такой запрос рендерил бы страницу 404."""
     # no-cache: этот адрес браузер запрашивает сам, без ?v=, и без
     # явного указания держал бы прежнюю иконку после ребрендинга.
-    return FileResponse(STATIC_DIR / 'favicon.svg', media_type='image/svg+xml',
+    return FileResponse(STATIC_DIR / 'favicon.ico', media_type='image/x-icon',
                         headers={'Cache-Control': 'no-cache'})
 
 
