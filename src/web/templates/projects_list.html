@@ -2,6 +2,23 @@
 {% block title %}Проекты — Ариадна{% endblock %}
 {% block active_nav %}projects{% endblock %}
 
+{% macro status_badge(status) %}
+<span class="badge badge-{{ status }}">
+    {% if status == 'ready' %}Готов{% elif status == 'indexing' %}Индексация…{% elif status == 'error' %}Ошибка{% else %}Нет данных{% endif %}
+</span>
+{% endmacro %}
+
+{# «конфигурация + 2 расширения» — из чего состоит проект. #}
+{% macro composition(sources) %}
+{% set ext = sources|selectattr('source_type', 'equalto', 'extension')|list|length %}
+{% set main = sources|length - ext %}
+{% if not sources %}—{% else %}
+{{- 'конфигурация' if main else '' -}}
+{%- if main and ext %} + {% endif -%}
+{%- if ext %}{{ ext|plural('расширение', 'расширения', 'расширений') }}{% endif -%}
+{% endif %}
+{% endmacro %}
+
 {% block content %}
 {% set auth_user = request.state.user if request.state.user is defined else none %}
 {% set can_admin = not auth_user or auth_user.role == 'admin' %}
@@ -12,37 +29,56 @@
         <svg class="icon" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg> Создать проект</a>
     {% endif %}
 </div>
+
 {% if projects %}
-{% for p in projects %}
-<a href="/projects/{{ p.id }}" style="text-decoration:none;color:inherit">
 <div class="card">
-    <div class="card-header">
-        <h2>{{ p.name }}</h2>
-        <span class="badge badge-{{ p.status }}">
-            {% if p.status == 'ready' %}Готов{% elif p.status == 'indexing' %}Индексация…{% elif p.status == 'error' %}Ошибка{% else %}Пусто{% endif %}
-        </span>
+    <div class="table-scroll">
+    <table class="detail-table projects-table">
+        <thead>
+        <tr>
+            <th scope="col">Проект</th>
+            <th scope="col">Состояние</th>
+            <th scope="col">Состав</th>
+            <th scope="col" class="num">Объектов</th>
+            <th scope="col">Обновлён</th>
+            <th scope="col" title="Этим кодом проект называют в запросах агента (project_id)">Код для агента</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for p in projects %}
+        <tr class="row-link">
+            <td>
+                <a class="row-link-target" href="/projects/{{ p.id }}"><b>{{ p.name }}</b></a>
+                {% if p.description %}<div class="text-muted">{{ p.description }}</div>{% endif %}
+            </td>
+            <td>{{ status_badge(p.status) }}</td>
+            <td>{{ composition(p.sources) }}</td>
+            <td class="num">{{ p.index_stats.total_objects|num if p.index_stats.total_objects else '—' }}</td>
+            <td class="text-muted">{{ p.index_stats.last_indexed|dt if p.index_stats.last_indexed else '—' }}</td>
+            <td><span class="mono">{{ p.id }}</span></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
     </div>
-    <div class="text-muted">
-        {{ p.id }}
-        · {{ p.sources|length|plural('часть', 'части', 'частей') }}
-        {% if p.index_stats.total_objects %}
-        · {{ p.index_stats.total_objects|num }} объектов
-        {% endif %}
-        {% if p.description %}· {{ p.description }}{% endif %}
-    </div>
-    {% if p.index_stats.last_indexed %}
-    <div class="text-muted" style="margin-top:var(--space-1)">Обновлён: {{ p.index_stats.last_indexed|dt }}</div>
-    {% endif %}
 </div>
-</a>
-{% endfor %}
 {% else %}
-<div class="empty-state">
+<div class="card empty-start">
     {% if can_admin %}
-    <p>Нет проектов</p>
-    <a href="/projects/new" class="btn btn-primary">Создать первый проект</a>
+    <h2>Начните с проекта</h2>
+    <p class="text-muted">Проект — это конфигурация 1С и её расширения. Ариадна строит по ним индекс:
+        поиск объектов и процедур, вызовы, доработки — в браузере и для агента по MCP.</p>
+    <ol class="steps">
+        <li><b>Создайте проект</b> — название и короткий код латиницей.</li>
+        <li><b>Загрузите выгрузку</b> — Конфигуратор → «Конфигурация» → «Выгрузить конфигурацию в
+            файлы», папку упакуйте в .zip.</li>
+        <li><b>Дождитесь индекса</b> — он строится сам; крупная конфигурация — несколько минут.</li>
+    </ol>
+    <a href="/projects/new" class="btn btn-primary">Создать проект</a>
     {% else %}
-    <p>Проектов пока нет — их создаёт администратор.</p>
+    <h2>Проектов пока нет</h2>
+    <p class="text-muted">Проекты создаёт администратор Ариадны. Когда он добавит конфигурацию,
+        она появится здесь.</p>
     {% endif %}
 </div>
 {% endif %}

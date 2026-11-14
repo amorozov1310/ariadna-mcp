@@ -17,6 +17,30 @@
     <div class="text-muted mb-8">{{ project.description }}</div>
     {% endif %}
 
+    {# Состояние индекса — под заголовком, рядом с тем, на что смотрят. #}
+    <div id="reindex-status" class="progress-panel" role="status" style="margin-bottom:var(--space-3);display:none">
+        <div id="reindex-progress" class="progress-line">
+            <div class="spinner"></div>
+            <span id="reindex-text">Индексация…</span>
+            <span id="reindex-eta" class="progress-eta"></span>
+        </div>
+        <div class="progress-bar" id="reindex-bar" hidden><span id="reindex-fill"></span></div>
+        <div class="text-muted" id="reindex-hint" style="font-size:var(--fs-sm)">Страницу можно закрыть — индексация продолжится.</div>
+    </div>
+    <div id="reindex-error" class="notice notice-danger" role="alert" {% if project.status != 'error' %}hidden{% endif %}
+         style="margin-bottom:var(--space-3)">
+        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+        <div>
+            <b>Индекс не построен.</b>
+            <span id="reindex-error-text">{% if index_error %}{{ index_error }}{% else %}Причина — в журнале сервера (<span class="mono">docker compose logs ariadna</span>).{% endif %}</span>
+            {% if project.sources %}
+            <div style="margin-top:var(--space-2)">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="startReindex()">Повторить</button>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
     {% if stats.objects > 0 %}
     <div class="stats-grid">
         <div class="stat-card">
@@ -208,9 +232,60 @@
         {% endfor %}
     </div>
     {% else %}
-    <p class="text-muted" style="margin-top:var(--space-2)">Проект пуст — добавьте XML-выгрузку конфигурации.</p>
+    <div class="first-upload">
+        <h3>Добавьте выгрузку конфигурации</h3>
+        <p class="text-muted">Конфигуратор → «Конфигурация» → «Выгрузить конфигурацию в файлы», папку
+            упакуйте в архив. Индекс построится сам — крупная конфигурация за несколько минут.</p>
+        <form action="/api/projects/{{ project.id }}/sources" method="post"
+              enctype="multipart/form-data" class="js-upload">
+            <input type="hidden" name="auto_reindex" value="on">
+            <div class="form-group">
+                <label for="first-archive">Архив выгрузки (.zip или .tar.gz)</label>
+                <input id="first-archive" type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz" required>
+                <div class="form-hint form-warning">Нужна выгрузка Конфигуратора в файлы (XML). Проект EDT не подойдёт.</div>
+            </div>
+            <details class="disclosure">
+                <summary>Дополнительно: тип, название, код</summary>
+                <div class="disclosure-body form-row">
+                    <div class="form-group">
+                        <label>Тип</label>
+                        <select name="source_type">
+                            <option value="main">Конфигурация</option>
+                            <option value="extension">Расширение</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Название</label>
+                        <input name="label" required value="{{ project.name }}">
+                    </div>
+                    <div class="form-group">
+                        <label>Код части</label>
+                        <input name="source_id" required pattern="[a-zA-Z0-9_-]+" value="main" class="mono">
+                        <div class="form-hint">Латиницей; имя каталога на диске.</div>
+                    </div>
+                </div>
+            </details>
+            <div class="btn-row" style="margin-top:var(--space-3)">
+                <button type="submit" class="btn btn-primary">Загрузить и проиндексировать</button>
+            </div>
+        </form>
+        <details class="disclosure" style="margin-top:var(--space-3)">
+            <summary>Файлы уже лежат на сервере</summary>
+            <form action="/api/projects/{{ project.id }}/sources" method="post" class="disclosure-body">
+                <input type="hidden" name="auto_reindex" value="on">
+                <input type="hidden" name="source_type" value="main">
+                <input type="hidden" name="label" value="{{ project.name }}">
+                <input type="hidden" name="source_id" value="main">
+                <p class="text-muted" style="font-size:var(--fs-sm)">Положите выгрузку в каталог
+                    <span class="mono">data/projects/{{ project.id }}/sources/main/xml/</span>
+                    (в контейнере — <span class="mono">/data/…</span>) и нажмите кнопку.</p>
+                <button type="submit" class="btn btn-secondary btn-sm">Подключить и проиндексировать</button>
+            </form>
+        </details>
+    </div>
     {% endif %}
 
+    {% if project.sources %}
     <details class="disclosure" style="margin-top:var(--space-3)">
         <summary>
             <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg>
@@ -238,17 +313,20 @@
                 </div>
             </div>
             <div class="form-group">
-                <label>XML-выгрузка (.zip)</label>
+                <label>Архив выгрузки (.zip или .tar.gz)</label>
                 <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
-                <div class="form-hint">
-                    Конфигуратор → «Конфигурация» → «Выгрузить конфигурацию в файлы»
-                    (формат EDT не поддерживается). Файл необязателен при монтировании volume: положите выгрузку в
-                    <span class="mono">/data/projects/{{ project.id }}/sources/{id}/xml/</span>
-                </div>
+                <div class="form-hint form-warning">Нужна выгрузка Конфигуратора в файлы (XML). Проект EDT не подойдёт.</div>
+                <div class="form-hint">Без файла — если выгрузка уже лежит на сервере в
+                    <span class="mono">data/projects/{{ project.id }}/sources/&lt;код&gt;/xml/</span>.</div>
             </div>
+            <label style="display:block;margin:var(--space-2) 0">
+                <input type="checkbox" name="auto_reindex" checked>
+                Сразу обновить индекс
+            </label>
             <button type="submit" class="btn btn-primary btn-sm">Добавить</button>
         </form>
     </details>
+    {% endif %}
 </div>
 
 <!-- Действия -->
@@ -266,14 +344,6 @@
                 Удалить проект
             </button>
         </form>
-    </div>
-    <div id="reindex-status" class="progress-panel" style="margin-top:var(--space-3);display:none">
-        <div id="reindex-progress" class="progress-line">
-            <div class="spinner"></div>
-            <span id="reindex-text">Индексация…</span>
-            <span id="reindex-eta" class="progress-eta"></span>
-        </div>
-        <div class="progress-bar" id="reindex-bar" hidden><span id="reindex-fill"></span></div>
     </div>
 </div>
 
@@ -349,7 +419,8 @@ async function startReindex() {
     const progress = document.getElementById('reindex-progress');
     const text = document.getElementById('reindex-text');
 
-    btn.disabled = true;
+    if (btn) btn.disabled = true;
+    document.getElementById('reindex-error').hidden = true;
     statusDiv.style.display = 'grid';
     progress.className = 'progress-line loading';
     text.textContent = 'Индексация запущена…';
@@ -403,10 +474,10 @@ async function pollReindexStatus(progress, text, btn) {
             renderProgress(s);
             setTimeout(() => pollReindexStatus(progress, text, btn), 1500);
         } else if (s.status === 'error') {
-            document.getElementById('reindex-bar').hidden = true;
-            document.getElementById('reindex-eta').textContent = '';
-            progress.className = 'progress-line error';
-            text.textContent = 'Индексация завершилась с ошибкой';
+            document.getElementById('reindex-status').style.display = 'none';
+            const box = document.getElementById('reindex-error');
+            if (s.error) document.getElementById('reindex-error-text').textContent = s.error;
+            box.hidden = false;
             if (btn) btn.disabled = false;
         } else {
             // 'ready' (or anything else terminal)
