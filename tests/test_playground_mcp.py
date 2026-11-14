@@ -82,9 +82,13 @@ def _indexed_pm(data_dir: str) -> ProjectManager:
 
 
 def _wait_ready(pm: ProjectManager, project_id: str = 'p1') -> None:
+    # Мало дождаться статуса: 'ready' пишется до того, как фоновый поток
+    # отпустит блокировку переиндексации, и следующий reindex в этом зазоре
+    # отвечал «already running» (редкое падение в CI). Ждём и сам поток.
     deadline = time.time() + 30
     while time.time() < deadline:
-        if pm.get_project(project_id).status in ('ready', 'error'):
+        busy = any(t.is_alive() for t in list(pm._reindexing))
+        if not busy and pm.get_project(project_id).status in ('ready', 'error'):
             return
         time.sleep(0.05)
     raise AssertionError('переиндексация не закончилась')
