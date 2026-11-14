@@ -34,7 +34,7 @@
         <input type="hidden" name="entry_id" value="">
         <div class="form-group">
             <label>Цель — полное имя</label>
-            <input name="target" required class="mono"
+            <input name="target" required class="mono" value="{{ target|default('', true) }}"
                    placeholder="РегистрНакопления.ВзаиморасчетыПоАренде, Справочник.Поля.Площадь, ОбщийМодуль.X.Модуль.Процедура">
             <div class="form-hint">Объект, реквизит («Объект.Реквизит», в том числе реквизит формы) или
                 процедура («Модуль.Процедура»). Имя берите из поиска.</div>

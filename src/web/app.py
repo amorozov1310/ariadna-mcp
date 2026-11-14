@@ -154,6 +154,54 @@ def _highlight(text, needle):
 
 templates.env.filters['highlight'] = _highlight
 
+_REF_KINDS = {
+    'СправочникСсылка': 'Справочник', 'ДокументСсылка': 'Документ',
+    'ПеречислениеСсылка': 'Перечисление', 'ПланВидовХарактеристикСсылка': 'ПланВидовХарактеристик',
+    'ПланСчетовСсылка': 'ПланСчетов', 'ПланВидовРасчетаСсылка': 'ПланВидовРасчета',
+    'ПланОбменаСсылка': 'ПланОбмена', 'БизнесПроцессСсылка': 'БизнесПроцесс',
+    'ЗадачаСсылка': 'Задача', 'ОпределяемыйТип': 'ОпределяемыйТип',
+    'CatalogRef': 'Справочник', 'DocumentRef': 'Документ', 'EnumRef': 'Перечисление',
+    'ChartOfCharacteristicTypesRef': 'ПланВидовХарактеристик', 'ChartOfAccountsRef': 'ПланСчетов',
+    'ChartOfCalculationTypesRef': 'ПланВидовРасчета', 'ExchangePlanRef': 'ПланОбмена',
+    'BusinessProcessRef': 'БизнесПроцесс', 'TaskRef': 'Задача', 'DefinedType': 'ОпределяемыйТип',
+}
+
+
+def _split_types(type_desc: str) -> list[str]:
+    """Части составного типа: запятые внутри скобок («Строка(25, Переменная)»)
+    не разделяют."""
+    parts, depth, cur = [], 0, ''
+    for ch in type_desc or '':
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            parts.append(cur.strip())
+            cur = ''
+        else:
+            cur += ch
+    if cur.strip():
+        parts.append(cur.strip())
+    return parts
+
+
+def _type_links(type_desc, project_id):
+    from markupsafe import Markup, escape
+    out = []
+    for part in _split_types(str(type_desc or '')):
+        head, dot, tail = part.partition('.')
+        kind = _REF_KINDS.get(head)
+        if kind and dot and tail:
+            out.append(Markup('<a href="/projects/{}/object/{}.{}">{}</a>').format(
+                project_id, kind, tail, part))
+        else:
+            out.append(escape(part))
+    return Markup(', ').join(out)
+
+
+templates.env.filters['type_links'] = _type_links
+
 
 # ============================================
 # Error pages (Этап U0/U13)
