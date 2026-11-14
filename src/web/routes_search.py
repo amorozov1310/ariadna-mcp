@@ -82,6 +82,84 @@ def search_page(request: Request, project_id: str, q: str = '', kind: str = '',
     })
 
 
+PROCEDURE_LINES = 400                   # строк кода сразу; дальше — «Показать полностью»
+
+
+@router.get("/projects/{project_id}/procedure", response_class=HTMLResponse)
+def procedure_page(request: Request, project_id: str, module: str, name: str = '',
+                   source_id: str = '', line: int = 0, tab: str = 'code', full: str = ''):
+    """Страница процедуры: объявление, код с номерами строк, кто вызывает и что
+    вызывает. Адрес — модуль + имя (+ часть проекта: имя модуля бывает и в
+    конфигурации, и в расширении). Из поиска по тексту кода приходит модуль и
+    строка без имени — процедура находится по строке, строка подсвечивается.
+    Данные — те же функции ядра, что у get_procedure_context / get_procedure_code."""
+    from ..core.bsl_parser import read_bsl_text
+    pm = get_pm()
+    try:
+        project = pm.get_project(project_id)
+    except KeyError:
+        raise HTTPException(404)
+    engine = pm.get_search(project_id)
+    src = source_id or None
+
+    error, excerpt = '', []
+    if not name and line:
+        outline = engine.get_module_outline(module, source_id=src)
+        found = next((p_ for p_ in (outline or {}).get('procedures', [])
+                      if p_['start_line'] <= line <= p_['end_line']), None)
+        if found:
+            name = found['name']
+        elif outline:
+            # Строка вне процедур (комментарий над процедурой, раздел
+            # переменных, основная программа) — кусок модуля вокруг неё.
+            path = engine.module_file_path(outline['module'])
+            content = read_bsl_text(path) if path else None
+            if content is not None:
+                lines = content.split('\n')
+                first = max(1, line - 10)
+                excerpt = [(first + i, t) for i, t in enumerate(lines[first - 1:line + 10])]
+            error = f"Строка {line} — вне процедур модуля."
+        else:
+            error = f"Модуль «{module}» не найден."
+    ctx = engine.get_procedure_context(module, name, source_id=src) if name and not error else None
+    if isinstance(ctx, str):
+        error, ctx = f"Процедура «{name}» в модуле «{module}» не найдена.", None
+    elif ctx is None and not error:
+        error = 'Не указана процедура.'
+
+    code_lines, truncated, file_note = [], False, ''
+    if ctx:
+        proc, mod = ctx['procedure'], ctx['module']
+        path = engine.module_file_path(mod)
+        content = read_bsl_text(path) if path else None
+        if content is None:
+            file_note = ('Файл модуля недоступен на сервере — выгрузку переместили или удалили? '
+                         'Обновите индекс проекта.')
+        else:
+            all_lines = content.split('\n')[proc['start_line'] - 1:proc['end_line']]
+            truncated = len(all_lines) > PROCEDURE_LINES and not full
+            shown = all_lines[:PROCEDURE_LINES] if truncated else all_lines
+            code_lines = [(proc['start_line'] + i, text) for i, text in enumerate(shown)]
+
+    sources = engine.list_sources()
+    return templates.TemplateResponse(name="procedure.html", request=request, context={
+        "project": project,
+        "ctx": ctx,
+        "error": error,
+        "module": module,
+        "name": name,
+        "source_id": source_id,
+        "line": line,
+        "tab": tab if tab in ('code', 'callers', 'callees') else 'code',
+        "code_lines": code_lines,
+        "excerpt": excerpt,
+        "truncated": truncated,
+        "file_note": file_note,
+        "source_info": {s_['id']: s_ for s_ in sources},
+        "many_parts": len(sources) > 1,
+    })
+
+
 @router.get("/projects/{project_id}/object/{full_name:path}", response_class=HTMLResponse)
 def object_detail(request: Request, project_id: str, full_name: str, source_id: str = ''):
     pm = get_pm()

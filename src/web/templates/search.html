@@ -89,7 +89,7 @@
         {% for r in results %}
         <li class="result">
             <div class="result-line">
-                <a class="result-name" href="/projects/{{ project.id }}/calltree?procedure={{ r.name|urlencode }}&module={{ r.module_name|urlencode }}{% if r.source_id %}&source_id={{ r.source_id|urlencode }}{% endif %}">{{ r.name }}()</a>
+                <a class="result-name" href="/projects/{{ project.id }}/procedure?module={{ r.module_name|urlencode }}&name={{ r.name|urlencode }}{% if r.source_id and many_parts %}&source_id={{ r.source_id|urlencode }}{% endif %}">{{ r.name }}()</a>
                 {% if r.is_export %}<span class="badge badge-neutral">экспорт</span>{% endif %}
                 {% if r.directive %}<span class="badge badge-neutral">{{ r.directive }}</span>{% endif %}
                 {{ part_badge(r.source_id) }}
@@ -101,7 +101,7 @@
         {% for r in results %}
         <li class="result">
             <div class="result-line">
-                <span class="result-name">{{ r.module_name }}</span>
+                <a class="result-name" href="/projects/{{ project.id }}/procedure?module={{ r.module_name|urlencode }}&line={{ r.line }}{% if r.source_id and many_parts %}&source_id={{ r.source_id|urlencode }}{% endif %}#L{{ r.line }}">{{ r.module_name }}</a>
                 <span class="text-muted">стр. {{ r.line }}</span>
                 {{ part_badge(r.source_id) }}
             </div>
