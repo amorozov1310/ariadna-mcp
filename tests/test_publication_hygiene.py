@@ -78,9 +78,16 @@ def _violations(path: Path, text: str):
                 yield f'{path.relative_to(ROOT).as_posix()}:{n}: «{pair}»'
 
 
+# Сторонние библиотеки как есть (минифицированный код): короткие сочетания
+# букв в нём — не названия продуктов, а свой код мы туда не пишем.
+_VENDOR = 'src/web/static/vendor/'
+
+
 def test_no_product_names_in_tracked_files():
     found = []
     for path in _tracked_files():
+        if path.relative_to(ROOT).as_posix().startswith(_VENDOR):
+            continue
         text = _read_text(path)
         if text is not None:
             found.extend(_violations(path, text))
