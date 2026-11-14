@@ -5,7 +5,6 @@ data source (main config vs extension), and every result carries its
 `source_id` / `source_label` so the UI can show where each match came from.
 """
 
-import time
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse
 
@@ -15,10 +14,17 @@ from .app import templates, get_pm
 router = APIRouter()
 
 
+PAGE = 50                               # строк результата за раз; «Показать ещё» — +PAGE
+
+
 @router.get("/projects/{project_id}/search", response_class=HTMLResponse)
 def search_page(request: Request, project_id: str, q: str = '', kind: str = '',
                 mode: str = 'metadata', module_filter: str = '', export_only: str = '',
-                source_id: str = ''):
+                source_id: str = '', n: int = PAGE):
+    """Поиск: объекты, процедуры, текст кода. Без запроса, но с видом объекта
+    (ссылка с «Обзора») — список объектов этого вида. n — сколько строк
+    показать («Показать ещё» увеличивает его); одна лишняя строка из движка
+    говорит, что есть продолжение, без дорогого подсчёта общего числа."""
     pm = get_pm()
     try:
         project = pm.get_project(project_id)
@@ -27,36 +33,36 @@ def search_page(request: Request, project_id: str, q: str = '', kind: str = '',
 
     engine = pm.get_search(project_id)
     sources = engine.list_sources()
+    mode = mode if mode in ('metadata', 'procedures', 'code') else 'metadata'
+    n = max(PAGE, min(int(n or PAGE), 2000))
 
-    # Этап U0/U2: список видов метаданных берётся из индекса проекта, а не
-    # из захардкоженного перечня в шаблоне (там было 9 видов из 25+, и
-    # отфильтровать по Роли или Константе было невозможно). Порядок — по
-    # убыванию количества, рядом с видом показываем счётчик.
+    # Виды объектов — из индекса проекта, по убыванию количества.
     kinds: dict[str, int] = {}
     try:
-        kinds = pm.get_db(project_id).get_stats().get('kinds', {}) or {}
+        kinds = pm.get_db(project_id).get_kind_counts()
     except PROJECT_GONE:
         raise          # проект удалён во время запроса — 404 (app.py)
     except Exception:
         kinds = {}
 
-    results = []
-    elapsed_ms = 0
-    if q:
-        t0 = time.time()
-        src = source_id or None
-
+    results: list = []
+    src = source_id or None
+    listing = mode == 'metadata' and not q and bool(kind)
+    if q or listing:
         if mode == 'procedures':
             results = engine.search_procedures(
                 q, module_filter=module_filter or None,
-                export_only=bool(export_only), source_id=src, limit=50)
+                export_only=bool(export_only), source_id=src, limit=n + 1)
         elif mode == 'code':
-            results = engine.search_code(q, source_id=src, limit=50)
+            results = engine.search_code(q, source_id=src, limit=n + 1)
+        elif listing:
+            results = engine.list_objects(kind=kind, source_id=src, limit=n + 1)
         else:
-            results = engine.search_metadata(q, kind=kind or None, source_id=src)
+            results = engine.search_metadata(q, kind=kind or None, source_id=src, limit=n + 1)
+    has_more = len(results) > n
+    results = results[:n]
 
-        elapsed_ms = round((time.time() - t0) * 1000, 1)
-
+    labels = {s_['id']: s_ for s_ in sources}
     return templates.TemplateResponse(name="search.html", request=request, context={
         "project": project,
         "query": q,
@@ -66,9 +72,13 @@ def search_page(request: Request, project_id: str, q: str = '', kind: str = '',
         "export_only": export_only,
         "source_id": source_id,
         "sources": sources,
+        "source_info": labels,
         "kinds": kinds,
         "results": results,
-        "elapsed_ms": elapsed_ms,
+        "listing": listing,
+        "shown": n,
+        "has_more": has_more,
+        "page": PAGE,
     })
 
 

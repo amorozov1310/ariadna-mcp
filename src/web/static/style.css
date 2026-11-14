@@ -745,3 +745,29 @@ dialog.confirm::backdrop { background: rgba(0, 0, 0, .45); }
 dialog.confirm p { margin: 0 0 var(--space-4); }
 dialog.confirm .btn-row { justify-content: flex-end; }
 @media (max-width: 560px) { .parts-table .col-code { display: none; } .parts-table td, .parts-table th { padding: 6px 4px; } }
+
+/* ============================================================
+   Поиск (шаг 6 плана UI): одна вёрстка результатов для трёх вкладок
+   ============================================================ */
+.search-main { display: flex; gap: var(--space-2); }
+.search-main input { flex: 1; min-width: 0; font-size: var(--fs-md); padding: 10px var(--space-4); }
+.filters { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-3); align-items: flex-end; }
+.filters label { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); color: var(--text2); }
+.filters select, .filters input:not([type="checkbox"]) { min-width: 200px; }
+.filters .filter-check { flex-direction: row; align-items: center; gap: var(--space-2); padding-bottom: 8px; color: var(--text); }
+.results-title { font-size: var(--fs-md); margin-bottom: var(--space-2); }
+.results { list-style: none; margin: 0; padding: 0; }
+.result { padding: var(--space-2) 0; border-top: 1px solid var(--bg3); }
+.result:first-child { border-top: 0; }
+.result-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.result .result-name { font-family: var(--mono); font-size: var(--fs-base); font-weight: 500; overflow-wrap: anywhere; }
+.result-place { color: var(--text2); font-size: var(--fs-sm); margin-top: 2px; overflow-wrap: anywhere; }
+.result-code {
+    margin: var(--space-1) 0 0; padding: var(--space-2) var(--space-3); background: var(--bg-inset);
+    border-radius: var(--radius-sm); font-family: var(--mono); font-size: var(--fs-sm);
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9em; overflow: hidden;
+}
+.result-code mark, .result mark { background: var(--warning-bg); color: inherit; padding: 0 1px; border-radius: 2px; }
+.results-more { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-3); flex-wrap: wrap; }
+.empty-hint ul { margin: var(--space-2) 0 0 var(--space-5); display: grid; gap: var(--space-1); }
+@media (max-width: 560px) { .filters select, .filters input:not([type="checkbox"]) { min-width: 0; width: 100%; } .filters label { width: 100%; } }

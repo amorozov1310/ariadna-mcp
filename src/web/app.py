@@ -137,6 +137,24 @@ templates.env.filters['dt'] = _dt
 templates.env.filters['role'] = lambda r: ROLE_NAMES.get(r, r)
 
 
+def _highlight(text, needle):
+    """Текст с найденной подстрокой в <mark> (без учёта регистра); остальное
+    экранируется — в коде бывают < и &."""
+    import re
+    from markupsafe import Markup, escape
+    text = str(text or '')
+    needle = str(needle or '').strip()
+    if not needle:
+        return escape(text)
+    parts = re.split('(' + re.escape(needle) + ')', text, flags=re.IGNORECASE)
+    return Markup(''.join(
+        f'<mark>{escape(part)}</mark>' if i % 2 else str(escape(part))
+        for i, part in enumerate(parts)))
+
+
+templates.env.filters['highlight'] = _highlight
+
+
 # ============================================
 # Error pages (Этап U0/U13)
 # ============================================
