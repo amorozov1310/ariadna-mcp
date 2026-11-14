@@ -84,6 +84,7 @@ def project_dashboard(request: Request, project_id: str):
         "project": project,
         "stats": stats,
         "kinds_breakdown": _kinds_breakdown(kinds),
+        "index_error": pm.index_error(project_id) if project.status == 'error' else '',
     })
 
 
@@ -152,18 +153,24 @@ async def add_source(
     label: str = Form(...),
     source_type: str = Form('main'),
     xml_archive: UploadFile | None = File(None),
+    auto_reindex: str | None = Form(None),
 ):
+    """Добавить часть проекта (конфигурацию или расширение). auto_reindex=on —
+    сразу обновить индекс: первый запуск «проект → выгрузка → индекс» без
+    отдельного нажатия."""
     pm = get_pm()
     try:
         xml_fobj = xml_archive.file if xml_archive and xml_archive.filename else None
         xml_fname = xml_archive.filename if xml_archive else ''
 
-        await run_in_threadpool(
+        source = await run_in_threadpool(
             pm.add_source, project_id, source_id, label,
             source_type=source_type,
             xml_archive=xml_fobj,
             xml_archive_filename=xml_fname,
         )
+        if auto_reindex and source.xml_path:
+            pm.reindex_async(project_id)
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
@@ -222,6 +229,7 @@ async def project_status(project_id: str):
         "progress_current": progress.get('progress_current', 0),
         "progress_total": progress.get('progress_total', 0),
         "progress_phase": progress.get('progress_phase', ''),
+        "error": pm.index_error(project_id) if project.status == 'error' else '',
     })
 
 

@@ -132,6 +132,18 @@ class IndexStats:
     duration_sec: float = 0
 
 
+def _index_error_text(e: Exception) -> str:
+    """Причина упавшей индексации для человека: у повреждённой выгрузки
+    текст ParseError («syntax error: line 1, column 0») сам по себе ничего
+    не говорит."""
+    import xml.etree.ElementTree as ET
+    text = str(e) or type(e).__name__
+    if isinstance(e, ET.ParseError):
+        return (f'Файл выгрузки не читается как XML ({text}). Нужна выгрузка Конфигуратора '
+                f'в файлы — загрузите её заново.')
+    return text
+
+
 @dataclass
 class ProjectInfo:
     id: str
@@ -199,6 +211,9 @@ class ProjectManager:
         self._broken_calls: dict[str, tuple] = {}
         # Фоновые переиндексации (reindex_async) — close_all их дожидается.
         self._reindexing: set[threading.Thread] = set()
+        # Причина последней упавшей индексации проекта (для Web UI); в памяти —
+        # после перезапуска её нет, статус 'error' остаётся в реестре.
+        self._index_errors: dict[str, str] = {}
         self._warm_failed: dict[str, tuple] = {}
 
         # Ensure directories exist
@@ -1066,6 +1081,10 @@ class ProjectManager:
             thread.start()
         return False
 
+    def index_error(self, project_id: str) -> str:
+        """Причина последней упавшей индексации проекта ('' — неизвестна)."""
+        return self._index_errors.get(project_id, '')
+
     def diff_warming(self, project_id: str) -> bool:
         """Идёт ли фоновый расчёт сравнений проекта (warm_diffs)."""
         with self._base_diff_lock:
@@ -1435,6 +1454,7 @@ class ProjectManager:
             return total_stats
 
         except Exception as e:
+            self._index_errors[project_id] = _index_error_text(e)
             project.status = 'error'
             self._save_project_to_disk(project_id, project)
             db.update_state(status='error', progress_phase='')
@@ -1539,6 +1559,7 @@ class ProjectManager:
         # запускается.
         try:
             self._mark_indexing(project_id)
+            self._index_errors.pop(project_id, None)
         except Exception as e:
             lock.release()
             logger.exception("Не удалось начать переиндексацию проекта %s", project_id)
