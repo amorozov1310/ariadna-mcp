@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}{{ name or module }} — {{ project.name }}{% endblock %}
+{% block active_nav %}search{% endblock %}
+
+{% macro proc_url(module_, name_, source_id_='', tab_='') -%}
+/projects/{{ project.id }}/procedure?module={{ module_|urlencode }}&name={{ name_|urlencode }}
+{%- if source_id_ %}&source_id={{ source_id_|urlencode }}{% endif %}{% if tab_ %}&tab={{ tab_ }}{% endif %}
+{%- endmacro %}
+
+{% block content %}
+{% set base_url = proc_url(module, name, source_id) %}
+<nav class="breadcrumbs" aria-label="Путь">
+    <a href="/projects/{{ project.id }}/search?mode=procedures">Поиск</a> /
+    <span class="mono">{{ ctx.module.name if ctx else module }}</span>
+</nav>
+
+{% if error %}
+<h1 class="page-title">{{ name or module }}</h1>
+<div class="notice notice-warning" role="alert">
+    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>{{ error }}{% if not excerpt %} <a href="/projects/{{ project.id }}/search?mode=procedures&q={{ (name or module)|urlencode }}">Найти в поиске</a>{% endif %}</div>
+</div>
+{% if excerpt %}
+<div class="card" style="margin-top:var(--space-3)">
+    <div class="code-block" role="region" aria-label="Фрагмент модуля" tabindex="0">
+        {% for n, text in excerpt %}<div class="code-line{% if n == line %} code-line-hit{% endif %}" id="L{{ n }}"><span class="code-ln">{{ n }}</span><span class="code-text">{{ text }}</span></div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+{% else %}
+{% set proc = ctx.procedure %}
+{% set mod = ctx.module %}
+{% set info = source_info.get(mod.source_id) %}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title mono proc-title">{{ proc.name }}()</h1>
+        <div class="proc-badges">
+            <span class="badge badge-neutral">{{ 'функция' if proc.kind == 'Функция' else 'процедура' }}</span>
+            {% if proc.is_export %}<span class="badge badge-neutral">экспорт</span>{% endif %}
+            {% if proc.directive %}<span class="badge badge-neutral">{{ proc.directive }}</span>{% endif %}
+            {% if many_parts and info and info.source_type == 'extension' %}<span class="badge badge-accent">расширение «{{ info.label }}»</span>{% endif %}
+            <span class="text-muted">стр. {{ proc.start_line }}–{{ proc.end_line }}</span>
+        </div>
+    </div>
+    <div class="btn-row">
+        <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/graph?procedure={{ proc.name|urlencode }}&module={{ mod.name|urlencode }}&direction=up&depth=3">Открыть на схеме</a>
+        {% if project.base_project %}
+        <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/procedure?module={{ mod.name|urlencode }}&name={{ proc.name|urlencode }}">Сравнить с типовой</a>
+        {% endif %}
+    </div>
+</div>
+
+<p class="proc-place">
+    {% if mod.object_full_name %}<a href="/projects/{{ project.id }}/object/{{ mod.object_full_name }}">{{ mod.object_full_name }}</a>{% if mod.object_synonym %} <span class="text-muted">({{ mod.object_synonym }})</span>{% endif %} · {% endif %}
+    <span class="mono">{{ mod.name }}</span>{% if ctx.region %} · область «{{ ctx.region }}»{% endif %}
+</p>
+{% if ctx.comment %}<pre class="proc-comment">{{ ctx.comment|join('\n') }}</pre>{% endif %}
+{% if ctx.glossary %}<p class="text-muted">Словарь: {% for t in ctx.glossary.terms %}«{{ t }}»{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+
+<nav class="tabs" aria-label="Процедура">
+    <a href="{{ base_url }}" {% if tab == 'code' %}aria-current="page"{% endif %}>Код</a>
+    <a href="{{ base_url }}&tab=callers" {% if tab == 'callers' %}aria-current="page"{% endif %}>Кто вызывает · {{ ctx.callers|length }}</a>
+    <a href="{{ base_url }}&tab=callees" {% if tab == 'callees' %}aria-current="page"{% endif %}>Что вызывает · {{ ctx.callees|length + ctx.unresolved|length }}</a>
+</nav>
+
+{% if tab == 'code' %}
+<div class="card">
+    {% if file_note %}
+    <div class="notice notice-warning"><svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg><div>{{ file_note }}</div></div>
+    {% else %}
+    <div class="code-block" role="region" aria-label="Код процедуры" tabindex="0">
+        {% for n, text in code_lines %}<div class="code-line{% if n == line %} code-line-hit{% endif %}" id="L{{ n }}"><span class="code-ln">{{ n }}</span><span class="code-text">{{ text }}</span></div>
+        {% endfor %}
+    </div>
+    {% if truncated %}
+    <div class="results-more">
+        <span class="text-muted">Показаны первые {{ code_lines|length }} строк из {{ proc.end_line - proc.start_line + 1 }}.</span>
+        <a class="btn btn-secondary btn-sm" href="{{ base_url }}&full=1{% if line %}&line={{ line }}#L{{ line }}{% endif %}">Показать полностью</a>
+    </div>
+    {% endif %}
+    {% endif %}
+</div>
+
+{% elif tab == 'callers' %}
+<div class="card">
+    {% if ctx.callers %}
+    <ul class="results">
+        {% for c in ctx.callers %}
+        <li class="result">
+            <div class="result-line">
+                <a class="result-name" href="{{ proc_url(c.module_name, c.procedure_name) }}">{{ c.procedure_name }}()</a>
+                {% if c.sites > 1 %}<span class="badge badge-neutral">{{ c.sites|plural('вызов', 'вызова', 'вызовов') }}</span>{% endif %}
+            </div>
+            <div class="result-place">{{ c.module_name }} · стр. {{ c.line }}</div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-muted">Вызовов этой процедуры в проекте не найдено. Её могут вызывать платформа
+        (обработчики событий форм и объектов), динамически (<span class="mono">Выполнить</span>,
+        оповещения) или внешние системы.</p>
+    {% endif %}
+</div>
+
+{% else %}
+<div class="card">
+    {% if ctx.callees %}
+    <ul class="results">
+        {% for c in ctx.callees %}
+        <li class="result">
+            <div class="result-line">
+                <a class="result-name" href="{{ proc_url(c.module_name, c.procedure_name) }}">{{ c.procedure_name }}()</a>
+                {% if c.sites > 1 %}<span class="badge badge-neutral">{{ c.sites|plural('вызов', 'вызова', 'вызовов') }}</span>{% endif %}
+            </div>
+            <div class="result-place">{{ c.module_name }} · вызов в стр. {{ c.line }}</div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% if ctx.unresolved %}
+    <h3 class="results-title" style="margin-top:var(--space-4)">Не сопоставлены с процедурами проекта</h3>
+    <p class="text-muted" style="font-size:var(--fs-sm)">Методы платформы, вызовы через переменную или процедуры вне выгрузки.</p>
+    <ul class="results">
+        {% for u in ctx.unresolved %}
+        <li class="result"><span class="mono">{{ u.name }}</span> <span class="text-muted">· стр. {{ u.line }}{% if u.sites > 1 %} · {{ u.sites|plural('вызов', 'вызова', 'вызовов') }}{% endif %}</span></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% if not ctx.callees and not ctx.unresolved %}<p class="text-muted">Процедура никого не вызывает.</p>{% endif %}
+</div>
+{% endif %}
+{% endif %}
+
+{% if line %}
+<script>
+// Строка из поиска по тексту кода — в центр экрана.
+(function () {
+    const hit = document.getElementById('L{{ line }}');
+    if (hit) hit.scrollIntoView({block: 'center'});
+})();
+</script>
+{% endif %}
+{% endblock %}

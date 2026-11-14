@@ -3,7 +3,7 @@
 {% block active_nav %}checks{% endblock %}
 
 {% macro caller(i) -%}
-<a class="mono" href="/projects/{{ project.id }}/calltree?procedure={{ i.caller_proc|urlencode }}&module={{ i.caller_module|urlencode }}&source_id={{ i.source_id|urlencode }}&direction=down">{{ i.caller_module }}.{{ i.caller_proc }}</a>
+<a class="mono" href="/projects/{{ project.id }}/procedure?module={{ i.caller_module|urlencode }}&name={{ i.caller_proc|urlencode }}&source_id={{ i.source_id|urlencode }}&line={{ i.line }}#L{{ i.line }}">{{ i.caller_module }}.{{ i.caller_proc }}</a>
 <span class="text-muted">:{{ i.line }}</span>
 {%- if project.sources|length > 1 %} <span class="badge badge-empty">{{ i.source_id }}</span>{% endif %}
 {%- endmacro %}

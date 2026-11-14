@@ -70,7 +70,7 @@ def test_show_more(client, monkeypatch):
 
 def test_procedures_link_and_labels(client):
     main = _main(client.get('/projects/p1/search?mode=procedures&q=Оформить').text)
-    assert 'ОформитьЗаказ()' in main and '/calltree?procedure=' in main
+    assert 'ОформитьЗаказ()' in main and '/procedure?module=' in main
     assert 'Только экспортные' in main and '>Модуль' in main
     assert 'экспорт' in main and 'стр.' in main
     assert 'расширение' not in main                     # одна часть — бейджей частей нет

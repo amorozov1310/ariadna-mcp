@@ -771,3 +771,17 @@ dialog.confirm .btn-row { justify-content: flex-end; }
 .results-more { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-3); flex-wrap: wrap; }
 .empty-hint ul { margin: var(--space-2) 0 0 var(--space-5); display: grid; gap: var(--space-1); }
 @media (max-width: 560px) { .filters select, .filters input:not([type="checkbox"]) { min-width: 0; width: 100%; } .filters label { width: 100%; } }
+
+/* ============================================================
+   Страница процедуры (шаг 7 плана UI)
+   ============================================================ */
+.proc-title { margin-bottom: var(--space-1); overflow-wrap: anywhere; }
+.proc-badges { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); }
+.proc-place { color: var(--text2); margin: var(--space-2) 0; overflow-wrap: anywhere; }
+.proc-comment { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); background: var(--bg-inset); border-radius: var(--radius-sm); font-family: var(--mono); font-size: var(--fs-sm); color: var(--text2); white-space: pre-wrap; }
+.code-block { font-family: var(--mono); font-size: 13px; line-height: 1.55; overflow-x: auto; background: var(--bg-inset); border-radius: var(--radius-sm); padding: var(--space-2) 0; }
+.code-line { display: flex; min-width: max-content; }
+.code-ln { flex: none; width: 4.5em; padding-right: var(--space-3); text-align: right; color: var(--text3); user-select: none; }
+.code-text { white-space: pre; padding-right: var(--space-4); }
+.code-line-hit { background: var(--warning-bg); }
+.code-line:target { background: var(--accent-soft); }
