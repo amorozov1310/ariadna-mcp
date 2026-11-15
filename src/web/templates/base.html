@@ -92,6 +92,7 @@
 {% if can_admin %}
 <a class="menu-item" href="/admin/tokens">{{ icon('key') }} Доступ и токены</a>
 <a class="menu-item" href="/admin/license">{{ icon('file-text') }} Лицензия</a>
+<hr>
 {% endif %}
 {{ theme_item() }}
 {% if auth_user %}
@@ -106,8 +107,9 @@
         <span class="account-name">{{ auth_user.name }}</span> {{ icon('chevron-down', 'icon icon-sm') }}
     </summary>
     {% else %}
-    <summary class="menu-button menu-button-icon" title="Сервер: доступ, лицензия, тема" aria-label="Сервер: доступ, лицензия, тема">
-        {{ icon('settings') }}
+    {# Шестерёнка со стрелкой — меню (доступ, лицензия, тема), а не переключатель темы. #}
+    <summary class="menu-button" title="Сервер: доступ, лицензия, тема" aria-label="Сервер: доступ, лицензия, тема">
+        {{ icon('settings') }} {{ icon('chevron-down', 'icon icon-sm') }}
     </summary>
     {% endif %}
     <div class="menu-list menu-list-right">{{ account_items() }}</div>
