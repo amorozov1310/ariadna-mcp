@@ -564,3 +564,30 @@ def test_diff_pages_layout(release_pm):
         assert 'Создайте проект с типовой того же релиза' in client.get('/projects/typical/diff').text
     finally:
         app_module.set_pm(previous)
+
+
+def test_overview_cards_show_only_computed_numbers(pm):
+    """Карточки «Обзора» — числа только из уже посчитанного: заход на страницу
+    проверку вызовов и сравнение не запускает (сравнение после индексации
+    считается в фоне само — _warm_related)."""
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        pm.reindex('custom')
+        thread = pm._warming.get('custom')
+        if thread is not None:
+            thread.join(30)
+        client.get('/projects/custom')
+        assert 'broken' not in pm.overview_counts('custom'), 'страница не запускает проверку вызовов'
+        assert not pm.broken_calls_ready('custom')
+        totals = pm.get_base_diff('custom').totals()
+        pm.broken_calls('custom')
+        counts = pm.overview_counts('custom')
+        assert counts['diff'] == totals and 'broken' in counts and counts['glossary'] == 0
+        page = client.get('/projects/custom').text
+        assert 'overview-num' in page and 'изменен' in page
+    finally:
+        app_module.set_pm(previous)

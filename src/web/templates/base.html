@@ -74,10 +74,14 @@
 {{ section_link('playground', '/playground', 'Консоль MCP', 'flask') }}
 {{ section_link('settings', '/settings', 'Настройки проекта', 'settings') }}
 {% endmacro %}
+{# Тема — три варианта, текущий отмечен (Q10): «системная» следует настройке ОС. #}
 {% macro theme_item() %}
-<button type="button" class="menu-item" onclick="toggleTheme()">
-    {{ icon('moon', 'icon icon-to-dark') }}{{ icon('sun', 'icon icon-to-light') }} Сменить тему
-</button>
+<div class="menu-note" role="presentation">Тема</div>
+<div class="theme-choice" role="group" aria-label="Тема">
+    <button type="button" class="menu-item" data-theme-set="system" aria-pressed="false" onclick="setTheme('system')">{{ icon('monitor') }} Системная</button>
+    <button type="button" class="menu-item" data-theme-set="light" aria-pressed="false" onclick="setTheme('light')">{{ icon('sun') }} Светлая</button>
+    <button type="button" class="menu-item" data-theme-set="dark" aria-pressed="false" onclick="setTheme('dark')">{{ icon('moon') }} Тёмная</button>
+</div>
 {% endmacro %}
 {# Меню сервера / пользователя: локально — значок, на сервере — имя и роль. #}
 {% macro account_items() %}
@@ -136,10 +140,20 @@
             {{ icon('chevron-down', 'icon icon-sm') }}
         </summary>
         <div class="switcher-menu">
+            {% if projects_all|length > 10 %}
+            <input type="search" class="switcher-filter" placeholder="Найти проект" aria-label="Найти проект">
+            {% endif %}
+            {% set state_label = {'ready': 'готов', 'indexing': 'идёт индексация', 'error': 'ошибка индексации', 'empty': 'нет данных'} %}
             {% for p in projects_all %}
-            {# Смена проекта сохраняет текущий раздел (U8). #}
-            <a href="/projects/{{ p.id }}{{ section_paths.get(nav_section, '') }}"
-               {% if p.id == project.id %}aria-current="true"{% endif %}>{{ p.name }}</a>
+            {# Смена проекта сохраняет текущий раздел (U8). Точка — состояние
+               индекса: о сбое в другом проекте видно отсюда (A7). #}
+            <a href="/projects/{{ p.id }}{{ section_paths.get(nav_section, '') }}" class="switcher-item"
+               data-name="{{ (p.name ~ ' ' ~ p.id)|lower }}"
+               {% if p.id == project.id %}aria-current="true"{% endif %}>
+                <span class="status-dot status-dot-{{ p.status }}" title="{{ state_label.get(p.status, p.status) }}"></span>
+                <span class="ellipsis">{{ p.name }}</span>
+                <span class="visually-hidden">— {{ state_label.get(p.status, p.status) }}</span>
+            </a>
             {% endfor %}
             {% if can_admin %}
             <hr>
@@ -203,19 +217,36 @@
    спрятано в HTML-комментарий — читается только через self.active_nav()
    в шапке. #}
 <script>
-// Переключение всегда ставит явный выбор — от системной темы к
-// противоположной тому, что человек видит сейчас. Сохраняем в
-// localStorage: это удобство одного браузера, а не общее состояние.
-function toggleTheme() {
-    var root = document.documentElement;
-    var current = root.getAttribute('data-theme');
-    if (!current) {
-        current = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
-    var next = current === 'dark' ? 'light' : 'dark';
-    root.setAttribute('data-theme', next);
-    try { localStorage.setItem('theme', next); } catch (e) { /* хранилище недоступно */ }
+// Тема: «system» — без атрибута, по prefers-color-scheme; «light»/«dark» —
+// явный выбор. Сохраняем в localStorage: это удобство одного браузера, а не
+// общее состояние. Текущий вариант отмечается во всех меню (aria-pressed).
+function markTheme() {
+    var current = document.documentElement.getAttribute('data-theme') || 'system';
+    document.querySelectorAll('[data-theme-set]').forEach(function (b) {
+        b.setAttribute('aria-pressed', b.dataset.themeSet === current ? 'true' : 'false');
+    });
 }
+function setTheme(mode) {
+    var root = document.documentElement;
+    if (mode === 'light' || mode === 'dark') root.setAttribute('data-theme', mode);
+    else root.removeAttribute('data-theme');
+    try {
+        if (mode === 'light' || mode === 'dark') localStorage.setItem('theme', mode);
+        else localStorage.removeItem('theme');
+    } catch (e) { /* хранилище недоступно */ }
+    markTheme();
+}
+markTheme();
+
+// Фильтр в переключателе проекта (больше 10 проектов).
+document.querySelectorAll('.switcher-filter').forEach(function (input) {
+    input.addEventListener('input', function () {
+        var q = input.value.trim().toLowerCase();
+        input.parentElement.querySelectorAll('.switcher-item').forEach(function (a) {
+            a.hidden = q && a.dataset.name.indexOf(q) < 0;
+        });
+    });
+});
 
 // Меню (<details class="menu">): одно открытое за раз, закрываются по Esc
 // и щелчку мимо; Esc возвращает фокус на кнопку меню.

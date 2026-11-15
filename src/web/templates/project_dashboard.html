@@ -72,14 +72,34 @@
     </div>
 </div>
 
+{# Числа — только из уже посчитанного (ProjectManager.overview_counts): заход
+   на «Обзор» не запускает сравнение и проверку вызовов. Нет числа — описание. #}
 <div class="overview-cards">
     <a class="card overview-card" href="/projects/{{ project.id }}/diff">
         <h3>Доработки</h3>
-        <p class="text-muted">{% if project.base_project %}Что изменено относительно типовой и что пересечётся с новым релизом.{% else %}Сравнение с типовой не настроено — выберите её на странице.{% endif %}</p>
+        {% if counts.diff %}
+        <p class="overview-num">{{ counts.diff.procedures_changed|plural('процедура изменена', 'процедуры изменены', 'процедур изменено') }}</p>
+        <p class="text-muted">{{ counts.diff.objects_added|plural('новый объект', 'новых объекта', 'новых объектов') }} ·
+            {{ counts.diff.attributes_added|plural('новый реквизит', 'новых реквизита', 'новых реквизитов') }} у типовых</p>
+        {% elif project.base_project %}
+        <p class="text-muted">Что изменено относительно типовой и что пересечётся с новым релизом.</p>
+        {% else %}
+        <p class="text-muted">Сравнение с типовой не настроено — выберите её на странице.</p>
+        {% endif %}
     </a>
     <a class="card overview-card" href="/projects/{{ project.id }}/checks">
         <h3>Проверка вызовов</h3>
+        {% if counts.broken is defined %}
+        {% if counts.broken %}
+        <p class="overview-num overview-num-bad">{{ counts.broken|plural('ошибочный вызов', 'ошибочных вызова', 'ошибочных вызовов') }}</p>
+        <p class="text-muted">Упадут с «Метод объекта не обнаружен».</p>
+        {% else %}
+        <p class="overview-num">Ошибок нет</p>
+        <p class="text-muted">Все вызовы «Модуль.Метод()» ведут к существующим методам.</p>
+        {% endif %}
+        {% else %}
         <p class="text-muted">Вызовы, которые упадут с «Метод объекта не обнаружен».</p>
+        {% endif %}
     </a>
     <a class="card overview-card" href="/projects/{{ project.id }}/graph">
         <h3>Вызовы</h3>
@@ -87,7 +107,12 @@
     </a>
     <a class="card overview-card" href="/projects/{{ project.id }}/glossary">
         <h3>Словарь</h3>
+        {% if counts.glossary %}
+        <p class="overview-num">{{ counts.glossary|plural('слово', 'слова', 'слов') }}</p>
+        <p class="text-muted">Как пользователи называют объекты конфигурации.</p>
+        {% else %}
         <p class="text-muted">Какими словами пользователи называют объекты конфигурации.</p>
+        {% endif %}
     </a>
 </div>
 

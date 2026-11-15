@@ -89,9 +89,17 @@ def project_dashboard(request: Request, project_id: str):
     except Exception:
         logger.exception("Не удалось прочитать виды метаданных проекта %s", project_id)
 
+    try:
+        counts = pm.overview_counts(project_id)
+    except PROJECT_GONE:
+        raise
+    except Exception:
+        counts = {}
+
     return templates.TemplateResponse(name="project_dashboard.html", request=request, context={
         "project": project,
         "stats": stats,
+        "counts": counts,
         "kinds_breakdown": _kinds_breakdown(kinds),
         "index_error": pm.index_error(project_id) if project.status == 'error' else '',
     })

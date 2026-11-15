@@ -101,3 +101,23 @@ def test_text_filters():
     assert _dt((now - timedelta(days=1)).isoformat()).startswith('вчера ')
     assert _dt('2025-03-07T22:50:07.123') == '07.03.2025 22:50'
     assert _dt('') == '' and _dt('не дата') == 'не дата'
+
+
+def test_theme_menu_has_three_choices(web):
+    """Тема — «Системная / Светлая / Тёмная», текущая отмечается скриптом (Q10)."""
+    _, client = web
+    header = _header(client.get('/projects/p1').text)
+    for mode, label in (('system', 'Системная'), ('light', 'Светлая'), ('dark', 'Тёмная')):
+        assert f'data-theme-set="{mode}"' in header and label in header
+    assert 'Сменить тему' not in header
+
+
+def test_switcher_shows_state_and_filters_long_lists(web):
+    """Переключатель проекта: точка состояния у каждого, фильтр — от 11 проектов (A7)."""
+    pm, client = web
+    header = _header(client.get('/projects/p1').text)
+    assert 'status-dot status-dot-empty' in header and 'switcher-filter' not in header
+    for i in range(10):
+        pm.create_project(f'x{i}', f'Проект {i}')
+    header = _header(client.get('/projects/p1').text)
+    assert 'switcher-filter' in header and header.count('class="switcher-item"') == 11
