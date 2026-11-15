@@ -26,12 +26,12 @@
 </details>
 
 {% if error %}
-<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-4)">
+<div class="notice notice-warning" role="alert">
     <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }}</div>
 </div>
 {% elif saved %}
-<div class="notice notice-success" role="status" style="margin-bottom:var(--space-4)">
+<div class="notice notice-success" role="status">
     <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
     <div>Сохранено: <span class="mono">{{ saved }}</span></div>
 </div>
@@ -72,7 +72,7 @@
     <div class="card-header">
         <h2 class="section-title">Записи · {{ entries|length|num }}</h2>
         {% if entries|length > 5 %}
-        <input type="search" id="glossary-filter" placeholder="Фильтр" aria-label="Фильтр записей словаря" style="max-width:260px">
+        <input type="search" id="glossary-filter" placeholder="Фильтр" aria-label="Фильтр записей словаря" class="filter-input">
         {% endif %}
     </div>
     {% if entries %}
@@ -97,8 +97,7 @@
                         data-terms="{{ e.terms|join(', ') }}" data-note="{{ e.note }}">
                     <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
                 </button>
-                <form action="/api/projects/{{ project.id }}/glossary/{{ e.id }}/delete" method="post"
-                      style="display:inline" data-confirm="Удалить запись словаря «{{ e.target }}»?"
+                <form class="d-inline" action="/api/projects/{{ project.id }}/glossary/{{ e.id }}/delete" method="post" data-confirm="Удалить запись словаря «{{ e.target }}»?"
                       data-confirm-action="Удалить">
                     <button type="submit" class="btn btn-danger btn-sm btn-icon"
                             title="Удалить" aria-label="Удалить: {{ e.target }}">

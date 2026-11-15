@@ -4,7 +4,7 @@
 {% block active_nav %}playground{% endblock %}
 {% block content %}
 <h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg>
+    <svg class="icon icon-lg" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg>
     Консоль MCP
 </h1>
 <p class="muted">Те же инструменты, параметры и ответы, что видит агент; проект
@@ -28,7 +28,7 @@
         <div id="tool-params"></div>
 
         <button onclick="executeTool()" class="btn btn-primary" id="run-btn">
-            <svg class="icon"><use href="/static/icons.svg?v={{ asset_v }}#play"/></svg> Выполнить</button>
+            <svg class="icon" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#play"/></svg> Выполнить</button>
     </div>
 
     <div class="playground-result">
@@ -47,7 +47,7 @@
         <div id="result-box" class="result-box" aria-live="polite">
             <p class="muted">Выберите инструмент и нажмите «Выполнить»</p>
         </div>
-        <div id="result-meta" class="muted" style="margin-top:8px"></div>
+        <div id="result-meta" class="muted mt-2"></div>
     </div>
 </div>
 

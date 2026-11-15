@@ -16,10 +16,6 @@
       только размеры — идёт ДО <link>, поэтому обычные правила из
       style.css (в том числе .icon-lg / .icon-sm) перекрывают эти.
     #}
-    <style>
-        .brand-mark { width: 26px; height: 26px; }
-        .icon { width: 16px; height: 16px; }
-    </style>
     {# Шрифты — отдельным файлом и ПЕРЕД style.css: правила @font-face
        должны быть известны браузеру к моменту, когда он встретит
        font-family в токенах. #}
@@ -136,7 +132,7 @@
     {% set projects_all = all_projects() %}
     <details class="switcher menu">
         <summary title="Сменить проект">
-            <span style="overflow:hidden;text-overflow:ellipsis">{{ project.name }}</span>
+            <span class="ellipsis">{{ project.name }}</span>
             {{ icon('chevron-down', 'icon icon-sm') }}
         </summary>
         <div class="switcher-menu">

@@ -22,13 +22,13 @@
 </div>
 
 {% if license.status in ('outdated', 'invalid') %}
-<div class="notice notice-warning" style="margin-bottom:var(--space-4)">
+<div class="notice notice-warning">
     <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>Лицензия: {{ license.message }}. Сверх одного токена доступ закрыт. <a href="/admin/license">Лицензия</a></div>
 </div>
 {% endif %}
 {% if error %}
-<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-4)">
+<div class="notice notice-warning" role="alert">
     <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }}</div>
 </div>
@@ -86,7 +86,7 @@
             <li>агентам, которые уже подключены, понадобится заголовок с токеном;</li>
             <li>коллегам токены выдаёте здесь же; больше одного — по <a href="/admin/license">лицензии</a>.</li>
         </ul>
-        <div class="notice notice-warning" style="margin:var(--space-3) 0">
+        <div class="notice notice-warning mt-3">
             <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
             <div>Потеряете токен администратора — войти будет нечем. Восстановление — только с доступом
                 к серверу: новый токен выдаёт команда

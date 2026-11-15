@@ -39,8 +39,8 @@
         </details>
     </div>
     {% if scheme.versions_differ %}
-    <div class="notice notice-warning" style="margin-top:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div class="notice notice-warning mt-3">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
         <div>Версии проекта и типовой различаются — в «Что доработано» попадут и изменения типовой
             между этими релизами. Типовая должна быть того же релиза, что и проект.</div>
     </div>
@@ -120,7 +120,7 @@
         <span class="spinner" aria-hidden="true"></span>
         <div>
             <div class="diff-pending-title">Идёт сравнение… <span class="text-muted" id="diff-elapsed"></span></div>
-            <div class="text-muted" style="font-size:var(--fs-sm)">
+            <div class="text-muted text-sm">
                 Индексы крупных конфигураций читаются с диска; когда расчёт закончится, страница
                 обновится сама.
             </div>

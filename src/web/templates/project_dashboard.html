@@ -48,14 +48,14 @@
     · <a href="/projects/{{ project.id }}/settings?tab=data">Состав и индекс</a>
 </p>
 {% if project.status == 'indexing' and stats.objects %}
-<p class="text-muted" style="font-size:var(--fs-sm)">Числа — по итогам прошлой индексации; обновятся, когда текущая закончится.</p>
+<p class="text-muted text-sm">Числа — по итогам прошлой индексации; обновятся, когда текущая закончится.</p>
 {% endif %}
 
 {% if not stats.objects and project.status not in ('indexing', 'error') %}
-<div class="notice notice-info" style="margin-bottom:var(--space-3)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
+<div class="notice notice-info">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
     <div>Индекс ещё не построен.
-        <button type="button" class="btn btn-primary btn-sm js-reindex" onclick="startReindex()" style="margin-left:var(--space-2)">Обновить индекс</button>
+        <button type="button" class="btn btn-primary btn-sm js-reindex ml-2" onclick="startReindex()">Обновить индекс</button>
     </div>
 </div>
 {% endif %}
@@ -67,7 +67,7 @@
             <input type="search" name="q" placeholder="Объект, процедура или текст кода…" aria-label="Найти в конфигурации">
         </label>
     </form>
-    <div class="text-muted" style="font-size:var(--fs-sm);margin-top:var(--space-2)">
+    <div class="text-muted text-sm mt-2">
         Например: «Номенклатура», «ОбработкаПроведения»; процедуру по описанию — вкладка «Процедуры» на странице поиска.
     </div>
 </div>
@@ -104,7 +104,7 @@
 <section class="card overview-kinds" aria-labelledby="kinds-title">
     <div class="card-header">
         <h2 class="section-title" id="kinds-title">Состав конфигурации</h2>
-        <span class="text-muted" style="font-size:var(--fs-sm)">
+        <span class="text-muted text-sm">
             {{ stats.objects|plural('объект', 'объекта', 'объектов') }} ·
             {{ kinds_breakdown|length|plural('вид', 'вида', 'видов') }} · щелчок по строке — список объектов вида
         </span>
@@ -113,7 +113,7 @@
         {% for k in kinds_breakdown[:6] %}{{ kind_row(k) }}{% endfor %}
     </div>
     {% if kinds_breakdown|length > 6 %}
-    <details class="disclosure" style="margin-top:var(--space-2)">
+    <details class="disclosure mt-2">
         <summary>Ещё {{ (kinds_breakdown|length - 6)|plural('вид', 'вида', 'видов') }}</summary>
         <div class="kinds disclosure-body">
             {% for k in kinds_breakdown[6:] %}{{ kind_row(k) }}{% endfor %}
@@ -124,7 +124,7 @@
 {% endif %}
 
 {% if can_admin %}
-<p class="text-muted" style="font-size:var(--fs-sm)">
+<p class="text-muted text-sm">
     Загрузка новой выгрузки, расширения, обновление индекса и удаление проекта — в
     <a href="/projects/{{ project.id }}/settings?tab=data">«Настройки проекта → Данные»</a>.
 </p>
