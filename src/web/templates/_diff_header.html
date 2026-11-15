@@ -1,131 +1,140 @@
-{# Шапка раздела «Отличия»: схема сравнения с версиями, вкладки двух разделов,
-   инструкция. Контекст — routes_diff._scheme: scheme.base / project / release
-   (id, версия или None) и active ('diff' | 'update'). #}
-{% macro chip(role, item, cls) %}
-<div class="diff-chip {{ cls }}">
-    <div class="diff-chip-role">{{ role }}</div>
-    {% if item %}
-    <a class="diff-chip-name" href="/projects/{{ item.id }}">{{ item.id }}</a>
-    <div class="diff-chip-version">{{ item.version or 'индекс не построен' }}</div>
-    {% else %}
-    <div class="diff-chip-version">не задан — необязательно</div>
-    {% endif %}
-</div>
-{% endmacro %}
+{# Шапка раздела «Доработки»: строка сравнения с версиями и «Изменить»,
+   вкладки двух разделов; мастер, если типовая не задана; «Как это работает» —
+   в конце страницы. Контекст — routes_diff._scheme: scheme.base / project /
+   release (id, версия или None) и active ('diff' | 'update'). #}
+{% macro scheme_item(item, empty) -%}
+{% if item %}<a class="mono" href="/projects/{{ item.id }}">{{ item.id }}</a> <span class="text-muted">{{ item.version or 'индекс не построен' }}</span>
+{%- else %}<span class="text-muted">{{ empty }}</span>{% endif %}
+{%- endmacro %}
 
 {% macro diff_header(scheme, active, candidates, next_url) %}
-<h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#blocks"/></svg>
-    Доработки
-</h1>
+<h1 class="page-title">Доработки</h1>
 
-<div class="card">
-    <div class="diff-scheme">
-        {{ chip('Типовая — текущий релиз', scheme.base, 'diff-chip-base') }}
-        <span class="diff-scheme-arrow" aria-hidden="true">→</span>
-        {{ chip('Этот проект — ваша конфигурация', scheme.project, 'diff-chip-project') }}
-        <span class="diff-scheme-arrow" aria-hidden="true">→</span>
-        {{ chip('Новый релиз — на что обновляетесь', scheme.release, 'diff-chip-release') }}
+{% if not scheme.base %}
+{# Сравнение не настроено — мастер из двух шагов вместо схемы и инструкции. #}
+<div class="card diff-wizard">
+    <h2 class="section-title">Сравнение с типовой не настроено</h2>
+    <p class="text-muted">Это необязательно: без него Ариадна работает как обычно. Сравнение
+        покажет, что доработано в этой конфигурации относительно типовой, и где доработки
+        пересекутся с новым релизом.</p>
+    <ol class="steps">
+        <li><b>Создайте проект с типовой того же релиза</b>, что и эта конфигурация, — выгрузка типовой из
+            Конфигуратора (<a href="/projects/new">Создать проект</a>).</li>
+        <li><b>Выберите его здесь</b> как типовую. Новый релиз — по желанию, для подготовки к обновлению.</li>
+    </ol>
+    {{ comparison_fields(candidates, next_url) }}
+</div>
+{% else %}
+<div class="card diff-compare">
+    <div class="diff-compare-line">
+        <span class="text-muted">Сравнение:</span>
+        <span title="Типовая — текущий релиз">{{ scheme_item(scheme.base, '') }}</span>
+        <span aria-hidden="true">→</span>
+        <b title="Этот проект — ваша конфигурация">{{ scheme_item(scheme.project, '') }}</b>
+        <span aria-hidden="true">→</span>
+        <span title="Новый релиз — на что обновляетесь">{{ scheme_item(scheme.release, 'новый релиз не задан') }}</span>
+        <details class="disclosure diff-edit" id="comparison">
+            <summary>Изменить сравнение</summary>
+            <div class="disclosure-body">{{ comparison_fields(candidates, next_url) }}</div>
+        </details>
     </div>
-    {# Выбор базы и нового релиза — здесь же, у схемы: раньше форма была
-       только внизу страницы, под результатами, и её не находили. #}
-    <details class="disclosure diff-edit" id="comparison" {% if not scheme.base %}open{% endif %}>
-        <summary>
-            <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
-            {{ 'Изменить сравнение' if scheme.base else 'Выбрать типовую и новый релиз' }}
-        </summary>
-        <div class="disclosure-body">{{ comparison_fields(candidates, next_url) }}</div>
-    </details>
     {% if scheme.versions_differ %}
     <div class="notice notice-warning" style="margin-top:var(--space-3)">
         <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
-        <div>Версии проекта и базы различаются — в «Что доработано» попадут и изменения типовой
-            между этими релизами. Базой должна быть типовая того же релиза, что и проект.</div>
+        <div>Версии проекта и типовой различаются — в «Что доработано» попадут и изменения типовой
+            между этими релизами. Типовая должна быть того же релиза, что и проект.</div>
     </div>
     {% endif %}
-
-    <div class="diff-sections">
-        <a href="/projects/{{ project.id }}/diff" class="diff-section {% if active == 'diff' %}active{% endif %}">
-            <span class="diff-section-title">1. Что доработано</span>
-            <span class="diff-section-hint">этот проект против базы</span>
-        </a>
-        <a href="/projects/{{ project.id }}/diff/update" class="diff-section {% if active == 'update' %}active{% endif %}">
-            <span class="diff-section-title">2. Обновление на новый релиз</span>
-            <span class="diff-section-hint">ваши доработки × изменения релиза</span>
-        </a>
-    </div>
-
-    <details class="disclosure diff-help" {% if not scheme.base %}open{% endif %}>
-        <summary>Как пользоваться</summary>
-        <div class="disclosure-body">
-            <p>Всё здесь необязательно: без базы и нового релиза Ариадна работает как обычно —
-                поиск, граф вызовов, код. Они нужны, только если хотите видеть доработки и
-                готовиться к обновлению.</p>
-            <ol>
-                <li><b>Этот проект</b> — выгрузка вашей конфигурации из Конфигуратора.</li>
-                <li><b>База</b> (для «Что доработано») — отдельный проект с выгрузкой типовой
-                    <b>того же релиза</b>, что и ваша конфигурация. Выберите её в «Изменить сравнение» у схемы — раздел «Что доработано» покажет новые объекты и
-                    реквизиты, изменённые и добавленные процедуры и текст каждой правки.</li>
-                <li><b>Новый релиз</b> (для «Обновления», вместе с базой) — когда вышло обновление, заведите проект с выгрузкой новой
-                    типовой и выберите его там же. Раздел «Обновление на новый релиз» покажет, где ваши
-                    доработки пересекаются с изменениями релиза: эти места при обновлении сливаются
-                    вручную.</li>
-                <li><b>После обновления</b> вашей конфигурации загрузите её новую выгрузку в этот
-                    проект и выберите базой проект нового релиза (поле «Новый релиз» очистится
-                    само); проект старой типовой больше не нужен.</li>
-            </ol>
-            <p class="text-muted">Агенту то же доступно инструментами <span class="mono">diff_from_base</span>
-                и <span class="mono">update_conflicts</span>; подробно — docs/diff.md в репозитории.</p>
-        </div>
-    </details>
 </div>
+{% endif %}
+
+<nav class="tabs" aria-label="Разделы доработок">
+    <a href="/projects/{{ project.id }}/diff" {% if active == 'diff' %}aria-current="page"{% endif %}>Что доработано</a>
+    <a href="/projects/{{ project.id }}/diff/update" {% if active == 'update' %}aria-current="page"{% endif %}>Обновление на новый релиз</a>
+</nav>
 {% endmacro %}
 
-{# Форма базы и нового релиза: у схемы в «Отличиях» и в настройках проекта. #}
+{% macro diff_help() %}
+<details class="card disclosure diff-help">
+    <summary>Как это работает</summary>
+    <div class="disclosure-body">
+        <ol>
+            <li><b>Этот проект</b> — выгрузка вашей конфигурации из Конфигуратора.</li>
+            <li><b>Типовая</b> (для «Что доработано») — отдельный проект с выгрузкой типовой
+                <b>того же релиза</b>. «Что доработано» покажет новые объекты и реквизиты,
+                изменённые и добавленные процедуры и текст каждой правки.</li>
+            <li><b>Новый релиз</b> (для «Обновления», вместе с типовой) — проект с выгрузкой новой
+                типовой. «Обновление на новый релиз» покажет, где ваши доработки пересекаются с
+                изменениями релиза: эти места при обновлении сливаются вручную.</li>
+            <li><b>После обновления</b> загрузите новую выгрузку вашей конфигурации в этот проект и
+                выберите типовой проект нового релиза (поле «Новый релиз» очистится само).</li>
+        </ol>
+        <p class="text-muted">Агенту то же доступно инструментами <span class="mono">diff_from_base</span>
+            и <span class="mono">update_conflicts</span>; подробно — docs/diff.md в репозитории.</p>
+    </div>
+</details>
+{% endmacro %}
+
+{# Меню «Скачать ▾»: CSV для Excel и Markdown. #}
+{% macro download_menu(csv_url, md_url, csv_hint, md_hint) %}
+<details class="menu">
+    <summary class="menu-button">Скачать <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#chevron-down"/></svg></summary>
+    <div class="menu-list menu-list-right">
+        <a class="menu-item" href="{{ csv_url }}" title="{{ csv_hint }}">Таблица для Excel (CSV)</a>
+        <a class="menu-item" href="{{ md_url }}" title="{{ md_hint }}">Отчёт Markdown</a>
+    </div>
+</details>
+{% endmacro %}
+
+{# Форма типовой и нового релиза: в «Доработках» и в настройках проекта. #}
 {% macro comparison_fields(candidates, next_url) %}
     <form action="/api/projects/{{ project.id }}/comparison" method="post" class="diff-base-form">
         <input type="hidden" name="next" value="{{ next_url }}">
-        <label for="base-project">База — проект с типовой того же релиза, что и этот проект
-            (необязательно; нужна для «Что доработано»)</label>
-        <div class="diff-base-row">
-            <select id="base-project" name="base_project">
-                <option value="">— нет —</option>
-                {% for p in candidates %}
-                <option value="{{ p.id }}" {% if p.id == project.base_project %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
-                {% endfor %}
-            </select>
-        </div>
-        <label for="release-project">Новый релиз — проект с типовой, на которую обновляетесь
-            (необязательно; нужен для «Обновления», вместе с базой)</label>
-        <div class="diff-base-row">
-            <select id="release-project" name="release_project">
-                <option value="">— нет —</option>
-                {% for p in candidates %}
-                <option value="{{ p.id }}" {% if p.id == project.release_project %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
-                {% endfor %}
-            </select>
+        <div class="calls-row">
+            <label for="base-project">Типовая того же релиза
+                <select id="base-project" name="base_project">
+                    <option value="">— нет —</option>
+                    {% for p in candidates %}
+                    <option value="{{ p.id }}" {% if p.id == project.base_project %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label for="release-project">Новый релиз — необязательно
+                <select id="release-project" name="release_project">
+                    <option value="">— нет —</option>
+                    {% for p in candidates %}
+                    <option value="{{ p.id }}" {% if p.id == project.release_project %}selected{% endif %}>{{ p.name }} ({{ p.id }})</option>
+                    {% endfor %}
+                </select>
+            </label>
             <button type="submit" class="btn btn-primary">Сохранить</button>
         </div>
     </form>
 {% endmacro %}
 
 {# Сравнение ещё считается в фоне (ProjectManager.warm_diffs): карточка
-   ожидания, страница сама обновится, когда расчёт закончится. #}
+   ожидания с прошедшим временем, страница сама обновится. #}
 {% macro pending_card() %}
-<div class="card diff-pending" id="diff-pending">
+<div class="card diff-pending" id="diff-pending" role="status">
     <div class="diff-pending-row">
         <span class="spinner" aria-hidden="true"></span>
         <div>
-            <div class="diff-pending-title">Идёт сравнение…</div>
+            <div class="diff-pending-title">Идёт сравнение… <span class="text-muted" id="diff-elapsed"></span></div>
             <div class="text-muted" style="font-size:var(--fs-sm)">
-                Индексы крупных конфигураций читаются с диска: первый раз после запуска — до
-                полуминуты, дальше — мгновенно. Страница обновится сама.
+                Индексы крупных конфигураций читаются с диска; когда расчёт закончится, страница
+                обновится сама. Её можно закрыть — результат сохранится до следующего изменения.
             </div>
         </div>
     </div>
 </div>
 <script>
 (function () {
+    const started = Date.now();
+    const elapsed = document.getElementById('diff-elapsed');
+    setInterval(function () {
+        const s = Math.round((Date.now() - started) / 1000);
+        elapsed.textContent = s < 60 ? `${s} с` : `${Math.floor(s / 60)} мин ${s % 60} с`;
+    }, 1000);
     function poll() {
         fetch('/api/projects/{{ project.id }}/diff/warming', {cache: 'no-store'})
             .then(function (r) { return r.json(); })

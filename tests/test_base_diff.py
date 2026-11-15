@@ -144,7 +144,7 @@ def test_web_diff_pages(pm):
         proc = client.get('/projects/custom/diff/procedure',
                           params={'module': 'ОбщийМодуль.ЦеныСервер.Модуль', 'name': 'РассчитатьЦену'})
         assert proc.status_code == 200 and 'diff-line-add' in proc.text
-        assert 'База — проект с типовой' in client.get('/projects/typical/diff').text
+        assert 'Сравнение с типовой не настроено' in client.get('/projects/typical/diff').text
         # Без базы — не ошибка, а подсказка: база и релиз необязательны.
         no_base = client.get('/projects/typical/diff/update').text
         assert 'Для этого раздела нужны база' in no_base and 'notice-warning' not in no_base
@@ -267,8 +267,8 @@ def test_web_scheme_and_comparison_form(release_pm):
         assert r.status_code == 303 and r.headers['location'] == '/projects/custom/diff/update'
         release_pm.get_update_conflicts('custom')
         page = client.get('/projects/custom/diff').text
-        for text in ('Типовая — текущий релиз', 'ДемоКонфигурация 1.2.3.4', '1. Что доработано',
-                     '2. Обновление на новый релиз', 'Как пользоваться'):
+        for text in ('Сравнение:', 'ДемоКонфигурация 1.2.3.4', 'Что доработано',
+                     'Обновление на новый релиз', 'Как это работает'):
             assert text in page
         # Выбор базы и релиза — у схемы, один раз на странице; и в настройках проекта.
         assert 'Изменить сравнение' in page and page.count('name="release_project"') == 1

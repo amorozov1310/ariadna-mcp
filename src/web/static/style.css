@@ -855,3 +855,23 @@ dialog.confirm .btn-row { justify-content: flex-end; }
 /* Поле внутри «рамки с значком» (поиск на «Обзоре») — без своей рамки. */
 main .appsearch-field input { border: 0; height: auto; padding: 0; background: none; box-shadow: none; }
 main .appsearch-field { height: var(--control-h-lg); }
+/* ============================================================
+   Доработки (шаг 10 плана UI) — шапка и «Что доработано»
+   ============================================================ */
+.diff-compare-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.diff-compare-line .diff-edit { margin-left: auto; }
+.diff-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-2); }
+.diff-all-numbers { margin-bottom: var(--space-3); }
+.diff-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
+.diff-toolbar .diff-filter { flex: 1 1 200px; }
+.diff-grid { display: grid; grid-template-columns: minmax(0, 1fr) repeat(4, 6.5em); gap: var(--space-2); align-items: center; }
+.diff-grid .num { text-align: right; font-variant-numeric: tabular-nums; }
+.diff-grid-head { padding: 0 var(--space-2) var(--space-1); border-bottom: 1px solid var(--border); }
+.diff-sort { background: none; border: 0; padding: 0; color: var(--text2); font: inherit; font-size: var(--fs-sm); cursor: pointer; text-align: left; }
+.diff-sort.num { text-align: right; }
+.diff-sort[aria-sort] { color: var(--accent-strong); }
+.diff-item > summary.diff-grid { list-style: none; cursor: pointer; padding: var(--space-2); border-bottom: 1px solid var(--bg3); }
+.diff-item > summary::-webkit-details-marker { display: none; }
+.diff-item > summary:hover { background: var(--bg); }
+.diff-warn { color: var(--danger); font-weight: 600; }
+@media (max-width: 720px) { .diff-grid { grid-template-columns: minmax(0, 1fr) repeat(4, 3.5em); font-size: var(--fs-sm); } }
