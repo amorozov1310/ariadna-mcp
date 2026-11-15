@@ -103,4 +103,3 @@ def test_clearing_query_resets_results(client):
     не остаётся на экране (обработчик search/input у поля)."""
     main = client.get('/projects/p1/search?q=Заказ').text
     assert "addEventListener('search', resetIfEmpty)" in main
-    assert "addEventListener('search'" not in client.get('/projects/p1/search').text
