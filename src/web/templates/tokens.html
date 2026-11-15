@@ -1,85 +1,193 @@
 {% extends "base.html" %}
-{% block title %}Доступ и токены — Ариадна{% endblock %}
+{% block title %}Доступ — Ариадна{% endblock %}
 {% block active_nav %}tokens{% endblock %}
 
+{% macro role_select() %}
+<label>Роль
+    <select name="role">
+        {% for r in roles %}<option value="{{ r }}" {% if r == 'user' %}selected{% endif %}>{{ r|role }}</option>{% endfor %}
+    </select>
+</label>
+{% endmacro %}
+
 {% block content %}
-<div class="card">
-    <h3 class="section-title">Доступ и токены</h3>
-    <p class="text-muted" style="font-size:var(--fs-sm)">
-        Личный токен — у каждого человека и робота свой: его можно отозвать, не трогая остальных.
-        Агент передаёт токен в заголовке <span class="mono">Authorization: Bearer …</span>
-        (в настройке MCP-сервера — <span class="mono">"headers"</span>), в Web UI с ним входят на
-        странице «Вход». <b>Администратор</b> — проекты, их состав и удаление, токены;
-        <b>участник</b> — поиск, все инструменты чтения, обновление индекса, словарь.
-    </p>
-    <p class="text-muted" style="font-size:var(--fs-sm)">
-        Токенов: <b>{{ tokens|length }}</b> из <b>{{ limit }}</b> —
-        {% if license.valid %}{{ license.message }}{% else %}без лицензии один токен (закрыть свой
-        сервер бесплатно), токены для команды — по ключу{% endif %}.
-        <a href="/admin/license">Лицензия</a>
-    </p>
-    {% if license.status in ('outdated', 'invalid') %}
-    <div class="notice notice-warning" style="margin-bottom:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
-        <div>Лицензия: {{ license.message }}. Сверх одного токена доступ закрыт.</div>
-    </div>
+<div class="page-header">
+    <h1 class="page-title">Доступ</h1>
+    {% if enabled %}
+    <button type="button" class="btn btn-primary" id="token-add" {% if error %}hidden{% endif %}>
+        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg>
+        Выдать токен
+    </button>
     {% endif %}
-    {% if not enabled %}
-    <div class="notice notice-info" style="margin-bottom:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
-        <div>Токенов пока нет — Ариадна открыта без входа. Первый токен включает авторизацию
-            и всегда получает роль администратора; вы войдёте с ним автоматически.</div>
+</div>
+
+{% if license.status in ('outdated', 'invalid') %}
+<div class="notice notice-warning" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>Лицензия: {{ license.message }}. Сверх одного токена доступ закрыт. <a href="/admin/license">Лицензия</a></div>
+</div>
+{% endif %}
+{% if error %}
+<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>{{ error }}</div>
+</div>
+{% endif %}
+
+{% if new_token %}
+{# Токен показывается один раз: поле для копирования и готовая настройка агента. #}
+<div class="card token-created" role="status">
+    <h2 class="section-title">Токен создан</h2>
+    <p>Для «{{ new_info.name }}» ({{ new_info.role|role }}). Скопируйте сейчас — повторно он не
+        показывается.{% if first %} <b>Вход по токенам включён, вы вошли с этим токеном.</b>{% endif %}</p>
+    <div class="code-copy">
+        <input type="text" id="new-token" class="mono" value="{{ new_token }}" readonly aria-label="Новый токен">
+        <button type="button" class="btn btn-primary js-copy" data-copy="new-token">
+            <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#copy"/></svg>
+            Копировать</button>
     </div>
-    {% endif %}
-    {% if error %}
-    <div class="notice notice-warning" style="margin-bottom:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
-        <div>{{ error }}</div>
-    </div>
-    {% endif %}
-    {% if new_token %}
-    <div class="notice notice-info" style="margin-bottom:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#key"/></svg>
-        <div>
-            Токен для «{{ new_info.name }}» ({{ new_info.role|role }}). Скопируйте сейчас — повторно он не
-            показывается:
-            <div class="token-once" style="margin-top:var(--space-2)">{{ new_token }}</div>
-            {% if first %}<p style="margin-top:var(--space-2)">Авторизация включена, вы вошли с этим токеном.</p>{% endif %}
+    <details class="disclosure">
+        <summary>Как подключить агента</summary>
+        <div class="disclosure-body">
+            <p class="text-muted">Claude Code — файл <span class="mono">.mcp.json</span> в корне проекта
+                (у Cursor — <span class="mono">.cursor/mcp.json</span>, без строки <span class="mono">"type"</span>).
+                Адрес MCP — порт на единицу больше, чем у Web UI, если порты не меняли.</p>
+            <pre class="code-snippet" id="agent-config"></pre>
+            <button type="button" class="btn btn-secondary btn-sm js-copy" data-copy="agent-config">
+                <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#copy"/></svg>
+                Копировать настройку</button>
+            <p class="text-muted form-hint">Чтобы не хранить токен в файле проекта — переменная окружения,
+                см. docs/team.md.</p>
         </div>
+    </details>
+</div>
+<script>
+(function () {
+    const port = Number(location.port || (location.protocol === 'https:' ? 443 : 80)) + 1;
+    const config = {mcpServers: {ariadna: {
+        type: 'http',
+        url: `${location.protocol}//${location.hostname}:${port}/mcp`,
+        headers: {Authorization: 'Bearer ' + document.getElementById('new-token').value},
+    }}};
+    document.getElementById('agent-config').textContent = JSON.stringify(config, null, 2);
+})();
+</script>
+{% endif %}
+
+{% if not enabled %}
+    {% if enable %}
+    {# Включение входа — необратимо без доступа к серверу: сначала последствия. #}
+    <div class="card">
+        <h2 class="section-title">Включить вход по токенам</h2>
+        <p>После этого:</p>
+        <ul class="plain-list">
+            <li>каждый запрос к Ариадне — Web UI, агент по MCP, скрипты — требует личный токен;</li>
+            <li>первый токен — администратора; вы войдёте с ним в этом браузере сразу;</li>
+            <li>агентам, которые уже подключены, понадобится заголовок с токеном;</li>
+            <li>коллегам токены выдаёте здесь же; больше одного — по <a href="/admin/license">лицензии</a>.</li>
+        </ul>
+        <div class="notice notice-warning" style="margin:var(--space-3) 0">
+            <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+            <div>Потеряете токен администратора — войти будет нечем. Восстановление — только с доступом
+                к серверу: новый токен выдаёт команда
+                <span class="mono">python -m src.auth create --name Админ --role admin</span>
+                (в Docker — <span class="mono">docker compose exec ariadna python -m src.auth create --name Админ --role admin</span>).</div>
+        </div>
+        <form method="post" action="/api/admin/tokens" class="calls-row">
+            <label>Владелец токена администратора
+                <input type="text" name="name" placeholder="Иван Петров" required autofocus>
+            </label>
+            <button type="submit" class="btn btn-primary">Включить вход и создать токен</button>
+            <a href="/admin/tokens" class="btn btn-ghost">Отмена</a>
+        </form>
+    </div>
+    {% elif not new_token %}
+    <div class="card access-off">
+        <h2 class="section-title">Вход не включён</h2>
+        <p class="text-muted">Ариадна открыта без входа — так удобно, когда она работает только на вашем
+            компьютере. На общем сервере включите вход: у каждого человека и робота будет свой токен,
+            его можно отозвать, не трогая остальных.</p>
+        <a href="/admin/tokens?enable=1" class="btn btn-primary">Включить вход по токенам…</a>
     </div>
     {% endif %}
-    <form method="post" action="/api/admin/tokens" class="calls-row" style="margin-bottom:var(--space-3)">
+{% else %}
+<div class="card" id="token-form-card" {% if not error %}hidden{% endif %}>
+    <h2 class="section-title">Новый токен</h2>
+    <form method="post" action="/api/admin/tokens" class="calls-row">
         <label>Владелец
-            <input type="text" name="name" class="form-input" placeholder="Иван Петров / робот выгрузки" required>
+            <input type="text" name="name" placeholder="Иван Петров / робот выгрузки" required>
         </label>
-        <label>Роль
-            <select name="role">
-                {% for r in roles %}<option value="{{ r }}" {% if r == 'user' %}selected{% endif %}>{{ r|role }}</option>{% endfor %}
-            </select>
-        </label>
+        {{ role_select() }}
         <button type="submit" class="btn btn-primary">Создать токен</button>
+        <button type="button" class="btn btn-ghost" id="token-cancel">Отмена</button>
     </form>
 </div>
 
-{% if tokens %}
 <div class="card">
+    <div class="card-header">
+        <h2 class="section-title">Токены · {{ tokens|length }} из {{ limit }}</h2>
+        <a href="/admin/license" class="text-muted">{% if license.valid %}{{ license.message }}{% else %}без лицензии — один токен{% endif %}</a>
+    </div>
+    <div class="table-scroll">
     <table class="detail-table">
-        <tr><th>Владелец</th><th>Роль</th><th>Создан</th><th>Последний вход</th><th></th></tr>
+        <thead><tr>
+            <th scope="col">Владелец</th><th scope="col">Роль</th><th scope="col">Создан</th>
+            <th scope="col">Последний вход</th><th scope="col"><span class="visually-hidden">Действия</span></th>
+        </tr></thead>
+        <tbody>
         {% for t in tokens %}
+        {% set mine = me and me.id == t.id %}
         <tr>
-            <td>{{ t.name }}{% if me and me.id == t.id %} <span class="badge badge-ready">вы</span>{% endif %}</td>
+            <td>{{ t.name }}{% if mine %} <span class="badge">вы</span>{% endif %}</td>
             <td>{{ t.role|role }}</td>
             <td class="text-muted">{{ t.created_at|dt }}</td>
             <td class="text-muted">{{ t.last_used|dt if t.last_used else '—' }}</td>
-            <td>
+            <td class="row-actions">
                 <form method="post" action="/api/admin/tokens/{{ t.id }}/revoke"
-                      onsubmit="return confirm('Отозвать токен «{{ t.name }}»?')">
-                    <button type="submit" class="btn btn-secondary btn-sm">Отозвать</button>
+                      data-confirm="{% if mine %}Это ваш токен: после отзыва вы сразу выйдете и войти с ним больше не сможете. Отозвать?{% else %}Отозвать токен «{{ t.name }}»? {{ t.name }} больше не сможет войти, агенты с этим токеном перестанут работать.{% endif %}"
+                      data-confirm-action="Отозвать">
+                    <button type="submit" class="btn btn-danger btn-sm">Отозвать</button>
                 </form>
             </td>
         </tr>
         {% endfor %}
+        </tbody>
     </table>
+    </div>
 </div>
 {% endif %}
+
+<details class="card disclosure">
+    <summary>Как устроен доступ</summary>
+    <div class="disclosure-body text-muted">
+        <p>Личный токен — у каждого человека и робота свой. В Web UI с ним входят на странице «Вход»,
+            агент передаёт его в заголовке <span class="mono">Authorization: Bearer …</span>
+            (в настройке MCP-сервера — <span class="mono">"headers"</span>).</p>
+        <p><b>Администратор</b> — проекты, их состав и удаление, токены, лицензия;
+            <b>участник</b> — поиск, все инструменты чтения, обновление индекса, словарь.</p>
+        <p>Без лицензии — один токен (закрыть свой сервер бесплатно); токены для команды — по ключу.
+            Подробно — docs/team.md.</p>
+    </div>
+</details>
+
+<script>
+(function () {
+    document.querySelectorAll('.js-copy').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            const el = document.getElementById(btn.dataset.copy);
+            const label = btn.innerHTML;
+            navigator.clipboard.writeText(el.value !== undefined ? el.value : el.textContent).then(function () {
+                btn.textContent = 'Скопировано';
+                setTimeout(function () { btn.innerHTML = label; }, 1500);
+            });
+        });
+    });
+    const add = document.getElementById('token-add');
+    const card = document.getElementById('token-form-card');
+    if (add && card) {
+        add.addEventListener('click', function () { card.hidden = false; add.hidden = true; card.querySelector('input').focus(); });
+        document.getElementById('token-cancel').addEventListener('click', function () { card.hidden = true; add.hidden = false; });
+    }
+})();
+</script>
 {% endblock %}

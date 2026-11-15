@@ -3,55 +3,64 @@
 {% block active_nav %}license{% endblock %}
 
 {% block content %}
+<h1 class="page-title">Лицензия</h1>
+
+{% if installed %}
+<div class="notice notice-success" role="status" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
+    <div>Ключ установлен.</div>
+</div>
+{% endif %}
+{% if error %}
+<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>Ключ не принят: {{ error }}</div>
+</div>
+{% endif %}
+
 <div class="card">
-    <h3 class="section-title">Лицензия</h3>
-    <p class="text-muted" style="font-size:var(--fs-sm)">
+    <div class="license-summary">
+        {% if state.valid %}<span class="badge badge-ready">действует</span>
+        {% elif state.status == 'none' %}<span class="badge">нет ключа</span>
+        {% else %}<span class="badge badge-error">не действует</span>{% endif %}
+        {% if state.info %}
+        <span><b>{{ state.info.owner }}</b> · {{ state.info.users|plural('пользователь', 'пользователя', 'пользователей') }}
+            · обновления до {{ state.info.updates_until.split('-')|reverse|join('.') }}</span>
+        {% endif %}
+    </div>
+    <p class="text-muted">{{ state.message }}</p>
+    <dl class="kv">
+        <dt>Токенов</dt><dd>{{ used }} из {{ limit }} — <a href="/admin/tokens">Доступ</a></dd>
+        <dt>Эта версия</dt><dd>{{ version }}, вышла {{ released.strftime('%d.%m.%Y') }}</dd>
+        {% if state.info %}<dt>Номер ключа</dt><dd class="mono">{{ state.info.id }}</dd>{% endif %}
+    </dl>
+
+    {# Действующий ключ заменять незачем — форма свёрнута. #}
+    <details class="disclosure" {% if not state.valid or error %}open{% endif %}>
+        <summary>{% if state.status == 'none' %}Установить ключ{% else %}Заменить ключ{% endif %}</summary>
+        <form method="post" action="/api/admin/license" enctype="multipart/form-data" class="disclosure-body">
+            <div class="form-group">
+                <label for="key-file">Файл ключа</label>
+                <input type="file" id="key-file" name="key_file" accept=".key,.txt">
+            </div>
+            <div class="form-group">
+                <label for="key-text">или текст ключа</label>
+                <textarea id="key-text" name="key" class="mono" rows="5"
+                          placeholder="-----BEGIN ARIADNA LICENSE-----"></textarea>
+                <div class="form-hint">Ключ проверяется сразу: неверный не заменит установленный.</div>
+            </div>
+            <button type="submit" class="btn btn-primary">Установить ключ</button>
+        </form>
+    </details>
+</div>
+
+<details class="card disclosure">
+    <summary>Что даёт лицензия</summary>
+    <div class="disclosure-body text-muted">
         Для одного человека Ариадна бесплатна — в том числе с токеном администратора, чтобы закрыть
         свой сервер. Командный режим — личные токены для коллег и роботов — по ключу. Ключ бессрочный
         и работает со всеми версиями, вышедшими до даты окончания обновлений; более новые версии
         потребуют продления.
-    </p>
-    {% if installed %}
-    <div class="notice notice-info" style="margin-bottom:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
-        <div>Ключ установлен.</div>
     </div>
-    {% endif %}
-    {% if error %}
-    <div class="notice notice-warning" style="margin-bottom:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
-        <div>Ключ не принят: {{ error }}</div>
-    </div>
-    {% endif %}
-    <table class="detail-table" style="margin-bottom:var(--space-3)">
-        <tr><th>Состояние</th><td>
-            {% if state.valid %}<span class="badge badge-ready">действует</span>
-            {% elif state.status == 'none' %}<span class="badge">нет ключа</span>
-            {% else %}<span class="badge badge-error">не действует</span>{% endif %}
-            <span class="text-muted">{{ state.message }}</span></td></tr>
-        {% if state.info %}
-        <tr><th>Владелец</th><td>{{ state.info.owner }}</td></tr>
-        <tr><th>Пользователей</th><td>{{ state.info.users }}</td></tr>
-        <tr><th>Обновления до</th><td>{{ state.info.updates_until }}</td></tr>
-        <tr><th>Номер ключа</th><td class="mono">{{ state.info.id }}</td></tr>
-        {% endif %}
-        <tr><th>Токенов</th><td>{{ used }} из {{ limit }} (<a href="/admin/tokens">токены</a>)</td></tr>
-        <tr><th>Эта версия</th><td>{{ version }}, вышла {{ released.strftime('%d.%m.%Y') }}</td></tr>
-    </table>
-    <form method="post" action="/api/admin/license" enctype="multipart/form-data">
-        <div class="form-group">
-            <label>Файл ключа</label>
-            <input type="file" name="key_file" accept=".key,.txt">
-        </div>
-        <div class="form-group">
-            <label>или текст ключа</label>
-            <textarea name="key" class="mono" rows="5" style="width:100%"
-                      placeholder="-----BEGIN ARIADNA LICENSE-----"></textarea>
-            <div class="form-hint">Ключ проверяется сразу: неверный не заменит установленный.</div>
-        </div>
-        <div class="btn-row">
-            <button type="submit" class="btn btn-primary">Установить ключ</button>
-        </div>
-    </form>
-</div>
+</details>
 {% endblock %}

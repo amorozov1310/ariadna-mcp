@@ -125,7 +125,8 @@ def logout():
 
 
 @router.get('/admin/tokens', response_class=HTMLResponse)
-def tokens_page(request: Request, created: str = '', first: str = '', error: str = ''):
+def tokens_page(request: Request, created: str = '', first: str = '', error: str = '',
+                enable: str = ''):
     store = tokens()
     new_token = request.cookies.get(_NEW_COOKIE, '') if created else ''
     new_info = next((t for t in store.list() if t.id == created), None) if new_token else None
@@ -133,7 +134,9 @@ def tokens_page(request: Request, created: str = '', first: str = '', error: str
         'tokens': store.list(), 'roles': ROLES, 'error': error,
         'limit': store.limit(), 'license': store.license.state(),
         'enabled': store.enabled(), 'me': current_user(request),
-        'new_token': new_token if new_info else '', 'new_info': new_info, 'first': bool(first)})
+        'new_token': new_token if new_info else '', 'new_info': new_info, 'first': bool(first),
+        # Шаг «Включить вход по токенам» — экран с последствиями перед первым токеном.
+        'enable': bool(enable)})
     if new_token:
         resp.delete_cookie(_NEW_COOKIE, path='/admin/tokens')
     return resp
