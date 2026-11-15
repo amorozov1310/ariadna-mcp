@@ -214,6 +214,8 @@ class ProjectManager:
         # Причина последней упавшей индексации проекта (для Web UI); в памяти —
         # после перезапуска её нет, статус 'error' остаётся в реестре.
         self._index_errors: dict[str, str] = {}
+        self._checks_warming: dict[str, threading.Thread] = {}
+        self._checks_failed: dict[str, tuple] = {}
         self._warm_failed: dict[str, tuple] = {}
 
         # Ensure directories exist
@@ -1201,6 +1203,49 @@ class ProjectManager:
                 result.append(Intercept(r['name'], target, r['source_id'], handler,
                                         f'&{keyword}:{target} {FORM_EVENT_MARK}'))
         return result
+
+    def broken_calls_ready(self, project_id: str) -> bool:
+        """Посчитана ли проверка вызовов для текущего индекса (есть в кэше)."""
+        key = self._diff_key(self.get_db(project_id))
+        with self._base_diff_lock:
+            cached = self._broken_calls.get(project_id)
+        return bool(cached and cached[0] == key)
+
+    def warm_broken_calls(self, project_id: str) -> bool:
+        """Готова ли проверка вызовов; нет — считает её в фоне (на крупной
+        конфигурации это десятки секунд) и возвращает False: страница
+        открывается сразу с «Идёт проверка…» и ждёт."""
+        if self.broken_calls_ready(project_id):
+            return True
+        key = self._diff_key(self.get_db(project_id))
+        with self._base_diff_lock:
+            failed = self._checks_failed.get(project_id)
+            if failed and failed[0] == key:
+                # Упала на этом же индексе — показать причину, а не крутить заново.
+                del self._checks_failed[project_id]
+                raise ValueError(f"Проверка вызовов не посчитана: {failed[1]}")
+            running = self._checks_warming.get(project_id)
+            if running is not None and running.is_alive():
+                return False
+
+            def run():
+                try:
+                    self.broken_calls(project_id)
+                except Exception as e:
+                    logger.exception("Проект %s: проверка вызовов не посчитана", project_id)
+                    with self._base_diff_lock:
+                        self._checks_failed[project_id] = (key, str(e) or type(e).__name__)
+
+            thread = threading.Thread(target=run, daemon=True, name=f'checks-{project_id}')
+            self._checks_warming[project_id] = thread
+            thread.start()
+        return False
+
+    def checks_warming(self, project_id: str) -> bool:
+        """Идёт ли фоновая проверка вызовов проекта."""
+        with self._base_diff_lock:
+            thread = self._checks_warming.get(project_id)
+        return thread is not None and thread.is_alive()
 
     def broken_calls(self, project_id: str, source_id: str = '', module_name: str = '') -> dict:
         """Вызовы несуществующих и неэкспортных методов (src/core/broken_calls.py).
