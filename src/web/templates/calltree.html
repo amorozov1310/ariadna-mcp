@@ -34,7 +34,7 @@
 
 {% if error %}
 <div class="notice notice-warning" role="alert">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }} <a href="/projects/{{ project.id }}/search?mode=procedures&q={{ procedure|urlencode }}">Найти в поиске</a></div>
 </div>
 {% elif choices %}

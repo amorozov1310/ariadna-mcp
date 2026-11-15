@@ -56,8 +56,8 @@
 </div>
 
 {% if error %}
-<div class="notice notice-warning" style="margin-bottom:var(--space-4)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+<div class="notice notice-warning">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }}</div>
 </div>
 {% elif pending %}
@@ -66,7 +66,7 @@
         <span class="spinner" aria-hidden="true"></span>
         <div>
             <div class="diff-pending-title">Идёт проверка вызовов… <span class="text-muted" id="checks-elapsed"></span></div>
-            <div class="text-muted" style="font-size:var(--fs-sm)">На крупной конфигурации — до минуты:
+            <div class="text-muted text-sm">На крупной конфигурации — до минуты:
                 проверяется каждый вызов «Модуль.Метод()». Результат появится здесь сам; потом, до
                 следующей индексации, страница открывается мгновенно.</div>
         </div>
@@ -90,15 +90,15 @@
 })();
 </script>
 {% elif not result %}
-<div class="notice notice-info" style="margin-bottom:var(--space-4)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
+<div class="notice notice-info">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
     <div>Индекс проекта не готов (статус {{ project.status }}) — проверка после индексации.</div>
 </div>
 {% else %}
 {% set indexed = project.index_stats.last_indexed %}
 {% if not result.missing and not result.not_export %}
-<div class="notice notice-success" role="status" style="margin-bottom:var(--space-4)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
+<div class="notice notice-success" role="status">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
     <div><b>Ошибок в вызовах не найдено.</b>
         Все вызовы «Модуль.Метод()»{% if source or module %} под фильтром{% endif %} ведут к существующим
         экспортным методам{% if indexed %} — по индексу от {{ indexed|dt }}{% endif %}.

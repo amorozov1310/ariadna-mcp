@@ -14,15 +14,15 @@
 {{ diff_header(scheme, 'update', candidates, '/projects/' ~ project.id ~ '/diff/update') }}
 
 {% if error %}
-<div class="notice notice-warning" style="margin-bottom:var(--space-4)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+<div class="notice notice-warning">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }}</div>
 </div>
 {% endif %}
 
 {% if hint %}
-<div class="notice notice-info" style="margin-bottom:var(--space-4)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
+<div class="notice notice-info">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#info"/></svg>
     <div>{{ hint }}</div>
 </div>
 {% endif %}
@@ -39,15 +39,15 @@
 
 <div class="card">
     <div class="diff-toolbar">
-        <h2 class="section-title" style="margin:0">
+        <h2 class="section-title m-0">
             {% if total %}Пересечений с релизом {{ result.release_project }}: {{ total|num }}{% else %}Пересечений с релизом нет{% endif %}
         </h2>
-        <span style="margin-left:auto"></span>
+        <span class="ml-auto"></span>
         {{ download_menu('/projects/' ~ project.id ~ '/diff/update/export?release=' ~ (result.release_project|urlencode) ~ '&format=csv',
                          '/projects/' ~ project.id ~ '/diff/update/export?release=' ~ (result.release_project|urlencode) ~ '&format=md',
                          'Пересечения с колонками «Решение» и «Ответственный»', 'Чек-лист пересечений') }}
     </div>
-    <p class="text-muted" style="font-size:var(--fs-sm)">Только места, которые тронуты и вами, и релизом;
+    <p class="text-muted text-sm">Только места, которые тронуты и вами, и релизом;
         остальное при обновлении сливается само.</p>
 
     {% if total %}
@@ -68,13 +68,13 @@
     </ul>
     {% set zero = kinds|reject('in', groups)|list %}
     {% if zero %}
-    <p class="text-muted" style="font-size:var(--fs-sm)">Нет пересечений: {% for kind in zero %}{{ kinds[kind] }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
+    <p class="text-muted text-sm">Нет пересечений: {% for kind in zero %}{{ kinds[kind] }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
     {% endif %}
     {% endif %}
 
     <details class="disclosure">
         <summary>Все цифры</summary>
-        <div class="disclosure-body text-muted" style="font-size:var(--fs-sm)">
+        <div class="disclosure-body text-muted text-sm">
             Обе стороны сравниваются с типовой «{{ result.base_project }}» ({{ result.base_version }}).
             Релиз {{ result.release_version }} изменил модулей {{ t.modules_changed|num }} (новых
             {{ t.modules_added|num }}, удалено {{ t.modules_removed|num }}); процедур изменено
@@ -86,7 +86,7 @@
 
 {% if total %}
 <div class="card">
-    <input type="search" id="conflict-filter" class="diff-filter" placeholder="Фильтр по имени" aria-label="Фильтр по имени" style="width:100%;max-width:360px;margin-bottom:var(--space-3)">
+    <input type="search" id="conflict-filter" class="diff-filter filter-wide" placeholder="Фильтр по имени" aria-label="Фильтр по имени">
     {% for sev, sev_title, sev_kinds in severity %}
     {% for kind in sev_kinds if groups.get(kind) %}
     <details class="conflict-section" id="{{ kind }}" open>

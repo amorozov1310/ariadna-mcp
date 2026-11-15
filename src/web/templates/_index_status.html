@@ -4,23 +4,22 @@
    вкладка, агент по MCP, робот выгрузки) — страница подхватывает её сама. #}
 
 {% macro status_panel(project, index_error, can_retry) %}
-<div id="reindex-status" class="progress-panel" role="status" style="margin-bottom:var(--space-3);display:none">
+<div id="reindex-status" class="progress-panel mb-3" role="status" hidden>
     <div id="reindex-progress" class="progress-line">
         <div class="spinner"></div>
         <span id="reindex-text">Индексация…</span>
         <span id="reindex-eta" class="progress-eta"></span>
     </div>
     <div class="progress-bar" id="reindex-bar" hidden><span id="reindex-fill"></span></div>
-    <div class="text-muted" style="font-size:var(--fs-sm)">Страницу можно закрыть — индексация продолжится.</div>
+    <div class="text-muted text-sm">Страницу можно закрыть — индексация продолжится.</div>
 </div>
-<div id="reindex-error" class="notice notice-danger" role="alert" {% if project.status != 'error' %}hidden{% endif %}
-     style="margin-bottom:var(--space-3)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+<div id="reindex-error" class="notice notice-danger" role="alert" {% if project.status != 'error' %}hidden{% endif %}>
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>
         <b>Индекс не построен.</b>
         <span id="reindex-error-text">{% if index_error %}{{ index_error }}{% else %}Причина — в журнале сервера (<span class="mono">docker compose logs ariadna</span>).{% endif %}</span>
         {% if can_retry and project.sources %}
-        <div style="margin-top:var(--space-2)">
+        <div class="mt-2">
             <button type="button" class="btn btn-secondary btn-sm" onclick="startReindex()">Повторить</button>
         </div>
         {% endif %}
@@ -93,7 +92,7 @@ function reindexButtons(disabled) {
 function showIndexing(message) {
     reindexButtons(true);
     document.getElementById('reindex-error').hidden = true;
-    document.getElementById('reindex-status').style.display = 'grid';
+    document.getElementById('reindex-status').hidden = false;
     document.getElementById('reindex-progress').className = 'progress-line loading';
     document.getElementById('reindex-text').textContent = message;
 }
@@ -134,7 +133,7 @@ async function pollReindexStatus() {
             renderProgress(s);
             setTimeout(pollReindexStatus, 1500);
         } else if (s.status === 'error') {
-            document.getElementById('reindex-status').style.display = 'none';
+            document.getElementById('reindex-status').hidden = true;
             if (s.error) document.getElementById('reindex-error-text').textContent = s.error;
             document.getElementById('reindex-error').hidden = false;
             reindexButtons(false);
@@ -167,7 +166,7 @@ document.querySelectorAll('form.js-upload').forEach(function (form) {
         if (!line) {
             line = document.createElement('div');
             line.className = 'progress-line loading';
-            line.style.marginTop = 'var(--space-2)';
+            line.classList.add('mt-2');
             line.innerHTML = '<div class="spinner"></div><span></span>';
             form.appendChild(line);
         }
@@ -247,11 +246,11 @@ document.querySelectorAll('form.js-upload').forEach(function (form) {
                 </div>
             </div>
         </details>
-        <div class="btn-row" style="margin-top:var(--space-3)">
+        <div class="btn-row mt-3">
             <button type="submit" class="btn btn-primary">Загрузить и проиндексировать</button>
         </div>
     </form>
-    <details class="disclosure" style="margin-top:var(--space-3)">
+    <details class="disclosure mt-3">
         <summary>Файлы уже лежат на сервере</summary>
         <form action="/api/projects/{{ project.id }}/sources" method="post" class="disclosure-body">
             <input type="hidden" name="auto_reindex" value="on">
@@ -259,7 +258,7 @@ document.querySelectorAll('form.js-upload').forEach(function (form) {
             <input type="hidden" name="source_type" value="main">
             <input type="hidden" name="label" value="{{ project.name }}">
             <input type="hidden" name="source_id" value="main">
-            <p class="text-muted" style="font-size:var(--fs-sm)">Положите выгрузку в каталог
+            <p class="text-muted text-sm">Положите выгрузку в каталог
                 <span class="mono">data/projects/{{ project.id }}/sources/main/xml/</span>
                 (в контейнере — <span class="mono">/data/…</span>) и нажмите кнопку.</p>
             <button type="submit" class="btn btn-secondary btn-sm">Подключить и проиндексировать</button>

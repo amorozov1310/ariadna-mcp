@@ -21,8 +21,8 @@
 {% endif %}
 
 {% if error %}
-<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-3)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+<div class="notice notice-warning" role="alert">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }} <a href="/projects/{{ project.id }}/search?mode=procedures&q={{ procedure|urlencode }}">Найти в поиске</a></div>
 </div>
 {% elif choices %}
@@ -33,12 +33,12 @@
 <div class="card">
     <div class="flex-between mb-8">
         <div>
-            <h3 id="graph-title" style="margin:0">Схема</h3>
-            <div id="graph-stats" class="text-muted" style="font-size:12px"></div>
+            <h2 id="graph-title" class="graph-title">Схема</h2>
+            <div id="graph-stats" class="text-muted text-sm"></div>
         </div>
         <div>
             <button class="btn btn-secondary btn-sm" onclick="fitGraph()">Вписать в окно</button>
-            <label class="text-muted" style="font-size:var(--fs-sm);margin-left:8px">
+            <label class="text-muted text-sm graph-layout">
                 Вид:
                 <select id="layout-select" onchange="setLayout(this.value)">
                     <option value="hierarchical">Дерево</option>
@@ -48,20 +48,20 @@
         </div>
     </div>
 
-    <div id="graph-error" class="notice notice-warning" role="alert" hidden style="margin-bottom:var(--space-2)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div id="graph-error" class="notice notice-warning" role="alert" hidden>
+        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
         <div id="graph-error-text"></div>
     </div>
 
-    <div id="legend" style="display:none;margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:4px;font-size:12px"></div>
+    <div id="legend" class="graph-legend" hidden></div>
 
-    <div id="graph-wrap" style="position:relative">
-        <div id="graph-container" style="width:100%;height:min(70vh, 720px);border:1px solid var(--border);border-radius:6px;background:var(--bg-inset);position:relative"></div>
-        <div id="graph-empty" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);text-align:center;pointer-events:none">
-            <svg class="icon" style="width:40px;height:40px;opacity:.3;margin-bottom:var(--space-2)"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
+    <div id="graph-wrap" class="graph-wrap">
+        <div id="graph-container" class="graph-container"></div>
+        <div id="graph-empty" class="graph-overlay">
+            <svg class="icon graph-empty-icon" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
             <div>Укажите процедуру и нажмите «Показать»</div>
         </div>
-        <div id="graph-loader" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);pointer-events:none">
+        <div id="graph-loader" class="graph-overlay" role="status" hidden>
             Строю схему…
         </div>
     </div>
@@ -69,10 +69,6 @@
 
 {% endif %}
 
-<style>
-.legend-item { display:inline-flex; align-items:center; gap:6px; margin-right:14px; }
-.legend-swatch { width:14px; height:14px; border-radius:3px; display:inline-block; }
-</style>
 
 <script>
 const PROJECT_ID = "{{ project.id }}";
@@ -106,8 +102,8 @@ function showGraphError(text) {
 }
 
 function showLoader(show) {
-    document.getElementById('graph-empty').style.display = 'none';
-    document.getElementById('graph-loader').style.display = show ? 'block' : 'none';
+    document.getElementById('graph-empty').hidden = true;
+    document.getElementById('graph-loader').hidden = !show;
 }
 
 const CALLS = {{ {'procedure': procedure, 'module': module, 'direction': direction,
@@ -153,9 +149,9 @@ function renderGraph(data, title) {
         legendEl.innerHTML = '<strong>Источники:</strong> ' + data.legend.map(l =>
             `<span class="legend-item"><span class="legend-swatch" style="background:${l.color}"></span>${l.source_label}</span>`
         ).join('');
-        legendEl.style.display = 'block';
+        legendEl.hidden = false;
     } else {
-        legendEl.style.display = 'none';
+        legendEl.hidden = true;
     }
 
     // Nuclear option: destroy the old vis.Network AND completely replace the
@@ -169,8 +165,7 @@ function renderGraph(data, title) {
     const oldContainer = document.getElementById('graph-container');
     const newContainer = document.createElement('div');
     newContainer.id = 'graph-container';
-    newContainer.style.cssText = oldContainer.style.cssText;
-    // Preserve the stylesheet-derived inline style attribute set in markup
+    newContainer.className = oldContainer.className;
     oldContainer.parentNode.replaceChild(newContainer, oldContainer);
 
     const container = newContainer;

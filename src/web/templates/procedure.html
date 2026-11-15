@@ -17,11 +17,11 @@
 {% if error %}
 <h1 class="page-title">{{ name or module }}</h1>
 <div class="notice notice-warning" role="alert">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }}{% if not excerpt %} <a href="/projects/{{ project.id }}/search?mode=procedures&q={{ (name or module)|urlencode }}">Найти в поиске</a>{% endif %}</div>
 </div>
 {% if excerpt %}
-<div class="card" style="margin-top:var(--space-3)">
+<div class="card mt-3">
     <div class="code-block" role="region" aria-label="Фрагмент модуля" tabindex="0">
         {% for n, text in excerpt %}<div class="code-line{% if n == line %} code-line-hit{% endif %}" id="L{{ n }}"><span class="code-ln">{{ n }}</span><span class="code-text">{{ text }}</span></div>
         {% endfor %}
@@ -68,7 +68,7 @@
 {% if tab == 'code' %}
 <div class="card">
     {% if file_note %}
-    <div class="notice notice-warning"><svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg><div>{{ file_note }}</div></div>
+    <div class="notice notice-warning"><svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg><div>{{ file_note }}</div></div>
     {% else %}
     <div class="code-block" role="region" aria-label="Код процедуры" tabindex="0">
         {% for n, text in code_lines %}<div class="code-line{% if n == line %} code-line-hit{% endif %}" id="L{{ n }}"><span class="code-ln">{{ n }}</span><span class="code-text">{{ text }}</span></div>
@@ -120,8 +120,8 @@
     </ul>
     {% endif %}
     {% if ctx.unresolved %}
-    <h3 class="results-title" style="margin-top:var(--space-4)">Не сопоставлены с процедурами проекта</h3>
-    <p class="text-muted" style="font-size:var(--fs-sm)">Методы платформы, вызовы через переменную или процедуры вне выгрузки.</p>
+    <h3 class="results-title mt-4">Не сопоставлены с процедурами проекта</h3>
+    <p class="text-muted text-sm">Методы платформы, вызовы через переменную или процедуры вне выгрузки.</p>
     <ul class="results">
         {% for u in ctx.unresolved %}
         <li class="result"><span class="mono">{{ u.name }}</span> <span class="text-muted">· стр. {{ u.line }}{% if u.sites > 1 %} · {{ u.sites|plural('вызов', 'вызова', 'вызовов') }}{% endif %}</span></li>

@@ -40,8 +40,8 @@
 {% if project.base_project %}
 
 {% if error %}
-<div class="notice notice-warning" style="margin-bottom:var(--space-4)">
-    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+<div class="notice notice-warning">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>{{ error }}</div>
 </div>
 {% endif %}
@@ -137,7 +137,7 @@
     </div>
     <p class="text-muted" id="diff-empty" hidden>Под фильтр ничего не попало.</p>
     {% else %}
-    <p class="text-muted" style="margin-top:var(--space-3)">{{ empty_text[section] }}</p>
+    <p class="text-muted mt-3">{{ empty_text[section] }}</p>
     {% endif %}
 </div>
 {% endif %}

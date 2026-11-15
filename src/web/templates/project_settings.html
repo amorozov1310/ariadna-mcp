@@ -106,7 +106,7 @@
                 <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
                 <div class="form-hint">Заменит прежнюю выгрузку этой части целиком.</div>
             </div>
-            <label style="display:block;margin:var(--space-2) 0">
+            <label class="check-line">
                 <input type="checkbox" name="auto_reindex" checked> Сразу обновить индекс
             </label>
             <div class="btn-row">
@@ -118,7 +118,7 @@
     {% endif %}
 
     {% if can_admin %}
-    <details class="disclosure" style="margin-top:var(--space-3)">
+    <details class="disclosure mt-3">
         <summary>
             <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg>
             Добавить расширение или конфигурацию
@@ -151,7 +151,7 @@
                 <div class="form-hint">Без файла — если выгрузка уже лежит на сервере в
                     <span class="mono">data/projects/{{ project.id }}/sources/&lt;код&gt;/xml/</span>.</div>
             </div>
-            <label style="display:block;margin:var(--space-2) 0">
+            <label class="check-line">
                 <input type="checkbox" name="auto_reindex" checked> Сразу обновить индекс
             </label>
             <button type="submit" class="btn btn-primary">Добавить</button>

@@ -6,13 +6,13 @@
 <h1 class="page-title">Лицензия</h1>
 
 {% if installed %}
-<div class="notice notice-success" role="status" style="margin-bottom:var(--space-4)">
+<div class="notice notice-success" role="status">
     <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
     <div>Ключ установлен.</div>
 </div>
 {% endif %}
 {% if error %}
-<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-4)">
+<div class="notice notice-warning" role="alert">
     <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
     <div>Ключ не принят: {{ error }}</div>
 </div>
