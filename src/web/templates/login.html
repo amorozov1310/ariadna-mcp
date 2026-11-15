@@ -4,25 +4,25 @@
 
 {% block content %}
 <div class="card login-card">
-    <h3 class="section-title">Вход</h3>
+    <h1 class="page-title">Вход</h1>
     {% if not enabled %}
     <p class="text-muted">Авторизация не включена — токенов нет, Ариадна открыта без входа.
         <a href="/">К проектам</a></p>
     {% else %}
-    <p class="text-muted" style="font-size:var(--fs-sm)">
-        Введите личный токен — его выдаёт администратор Ариадны. Тот же токен агент передаёт
-        в заголовке <span class="mono">Authorization: Bearer …</span>.
-    </p>
     {% if error %}
-    <div class="notice notice-warning" style="margin-bottom:var(--space-3)">
-        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-3)">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
         <div>Токен не подошёл — проверьте его или попросите новый у администратора.</div>
     </div>
     {% endif %}
     <form method="post" action="/login">
         <input type="hidden" name="next" value="{{ next }}">
-        <input type="password" name="token" class="form-input" placeholder="ar_…" autofocus required
-               style="width:100%;margin-bottom:var(--space-3)">
+        <div class="form-group">
+            <label for="login-token">Личный токен</label>
+            <input type="password" id="login-token" name="token" placeholder="ar_…" autofocus required
+                   autocomplete="current-password">
+            <div class="form-hint">Выдаёт администратор Ариадны. Тот же токен — в настройке агента.</div>
+        </div>
         <button type="submit" class="btn btn-primary">Войти</button>
     </form>
     {% endif %}
