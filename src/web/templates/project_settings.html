@@ -41,14 +41,15 @@
        колонка «Код» скрывается, таблица помещается и так. #}
     <table class="detail-table parts-table">
         <thead><tr>
-            <th scope="col">Название</th><th scope="col">Тип</th><th scope="col" class="col-code">Код</th>
+            <th scope="col">Название</th><th scope="col" class="col-type">Тип</th><th scope="col" class="col-code">Код</th>
             <th scope="col">Индекс</th><th scope="col"><span class="visually-hidden">Действия</span></th>
         </tr></thead>
         <tbody>
         {% for src in project.sources %}
         <tr>
-            <td><b>{{ src.label }}</b></td>
-            <td>{{ 'расширение' if src.source_type == 'extension' else 'конфигурация' }}</td>
+            {% set src_type = 'расширение' if src.source_type == 'extension' else 'конфигурация' %}
+            <td><b>{{ src.label }}</b><span class="type-inline text-muted text-sm">{{ src_type }}</span></td>
+            <td class="col-type">{{ src_type }}</td>
             <td class="col-code"><span class="mono">{{ src.id }}</span></td>
             <td>
                 {% if not src.xml_path %}<span class="badge badge-error" title="Выгрузки нет — индексировать нечего">нет выгрузки</span>
@@ -90,20 +91,20 @@
             <input type="hidden" name="next" value="{{ base }}?tab=data">
             <div class="form-row">
                 <div class="form-group">
-                    <label>Название</label>
-                    <input name="label" value="{{ edit_source.label }}">
+                    <label for="e-label">Название</label>
+                    <input id="e-label" name="label" value="{{ edit_source.label }}">
                 </div>
                 <div class="form-group">
-                    <label>Тип</label>
-                    <select name="source_type">
+                    <label for="e-type">Тип</label>
+                    <select id="e-type" name="source_type">
                         <option value="main" {% if edit_source.source_type == 'main' %}selected{% endif %}>Конфигурация</option>
                         <option value="extension" {% if edit_source.source_type == 'extension' %}selected{% endif %}>Расширение</option>
                     </select>
                 </div>
             </div>
             <div class="form-group">
-                <label>Новая выгрузка (.zip или .tar.gz) — необязательно</label>
-                <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
+                <label for="e-file">Новая выгрузка (.zip или .tar.gz) — необязательно</label>
+                <input type="file" id="e-file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
                 <div class="form-hint">Заменит прежнюю выгрузку этой части целиком.</div>
             </div>
             <label class="check-line">
@@ -128,25 +129,25 @@
             <input type="hidden" name="next" value="{{ base }}?tab=data">
             <div class="form-row">
                 <div class="form-group">
-                    <label>Название</label>
-                    <input name="label" required placeholder="напр. Обмен с сайтом">
+                    <label for="a-label">Название</label>
+                    <input id="a-label" name="label" required placeholder="напр. Обмен с сайтом">
                 </div>
                 <div class="form-group">
-                    <label>Тип</label>
-                    <select name="source_type">
+                    <label for="a-type">Тип</label>
+                    <select id="a-type" name="source_type">
                         <option value="extension">Расширение</option>
                         <option value="main">Конфигурация</option>
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Код части</label>
-                    <input name="source_id" required pattern="[a-zA-Z0-9_-]+" placeholder="напр. exchange" class="mono">
+                    <label for="a-code">Код части</label>
+                    <input id="a-code" name="source_id" required pattern="[a-zA-Z0-9_-]+" placeholder="напр. exchange" class="mono">
                     <div class="form-hint">Латиницей; так часть называется в запросах агента и в каталоге на диске.</div>
                 </div>
             </div>
             <div class="form-group">
-                <label>Архив выгрузки (.zip или .tar.gz)</label>
-                <input type="file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
+                <label for="a-file">Архив выгрузки (.zip или .tar.gz)</label>
+                <input type="file" id="a-file" name="xml_archive" accept=".zip,.tar.gz,.tgz">
                 <div class="form-hint form-warning">Нужна выгрузка Конфигуратора в файлы (XML). Проект EDT не подойдёт.</div>
                 <div class="form-hint">Без файла — если выгрузка уже лежит на сервере в
                     <span class="mono">data/projects/{{ project.id }}/sources/&lt;код&gt;/xml/</span>.</div>
@@ -184,7 +185,7 @@
                 <input id="p-name" name="name" value="{{ project.name }}" required>
             </div>
             <div class="form-group">
-                <label>Код проекта</label>
+                <span class="form-label">Код проекта</span>
                 <div class="code-copy">
                     <span class="mono" id="p-code">{{ project.id }}</span>
                     <button type="button" class="btn btn-secondary"

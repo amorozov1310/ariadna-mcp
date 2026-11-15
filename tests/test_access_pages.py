@@ -90,3 +90,27 @@ def test_error_page_has_one_primary_action(web):
     assert page.status_code == 404
     assert page.text.count('btn btn-primary') == 1 and 'К списку проектов' in page.text
     assert 'Назад' in page.text and 'Все проекты' not in page.text
+
+
+def test_participant_sees_no_admin_forms(web, monkeypatch):
+    """Участник не видит форм, которые сервер ему не даст сохранить (403)."""
+    import shutil
+    from license_helper import install_team_license
+    pm, client = web
+    fixtures = Path(__file__).parent / 'fixtures' / 'xml_ru'
+    for pid in ('p', 'typ'):
+        pm.create_project(pid, pid)
+        shutil.copytree(fixtures, pm.projects_dir / pid / 'sources' / 'main' / 'xml')
+        pm.add_source(pid, 'main', 'Основная')
+    install_team_license(monkeypatch, pm.data_dir, users=5)
+    store = TokenStore(pm.data_dir)
+    _, admin = store.create('Админ', 'admin')
+    _, user = store.create('Участник', 'user')
+    as_user = {'Authorization': f'Bearer {user}'}
+    as_admin = {'Authorization': f'Bearer {admin}'}
+    for path in ('/projects/p/diff', '/projects/p/diff/update'):
+        page = client.get(path, headers=as_user).text
+        assert '/comparison' not in page and 'Сравнение настраивает администратор' in page
+        assert '/comparison' in client.get(path, headers=as_admin).text
+    danger = client.get('/projects/p/settings?tab=danger', headers=as_user).text
+    assert 'Удалить проект навсегда' not in danger and 'Состав проекта' in danger

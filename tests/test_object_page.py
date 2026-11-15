@@ -98,3 +98,11 @@ def test_defined_type_value_type_links(client):
 def test_no_empty_module_flags_line(client):
     main = _page(client, 'Справочник.Склады', source_id='main')
     assert 'Флаги модуля' not in main
+
+
+def test_where_used_only_for_kinds_that_can_be_a_type(client):
+    """Регистр или общий модуль не бывает типом реквизита: вкладки «Где используется · 0» нет."""
+    reg = _page(client, 'РегистрНакопления.ТоварыНаСкладах', source_id='main')
+    assert 'Где используется' not in reg
+    cat = _page(client, 'Справочник.Номенклатура', source_id='main')
+    assert 'Где используется' in cat

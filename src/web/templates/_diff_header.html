@@ -8,6 +8,10 @@
 {%- endmacro %}
 
 {% macro diff_header(scheme, active, candidates, next_url) %}
+{# Участнику форма сравнения не показывается: сохранить её может только
+   администратор (POST …/comparison — 403). #}
+{% set auth_user = request.state.user if request.state.user is defined else none %}
+{% set can_admin = not auth_user or auth_user.role == 'admin' %}
 <h1 class="page-title">Доработки</h1>
 
 {% if not scheme.base %}
@@ -22,7 +26,8 @@
             Конфигуратора (<a href="/projects/new">Создать проект</a>).</li>
         <li><b>Выберите его здесь</b> как типовую. Новый релиз — по желанию, для подготовки к обновлению.</li>
     </ol>
-    {{ comparison_fields(candidates, next_url) }}
+    {% if can_admin %}{{ comparison_fields(candidates, next_url) }}
+    {% else %}<p class="text-muted">Сравнение настраивает администратор Ариадны.</p>{% endif %}
 </div>
 {% else %}
 <div class="card diff-compare">
@@ -33,10 +38,12 @@
         <b title="Этот проект — ваша конфигурация">{{ scheme_item(scheme.project, '') }}</b>
         <span aria-hidden="true">→</span>
         <span title="Новый релиз — на что обновляетесь">{{ scheme_item(scheme.release, 'новый релиз не задан') }}</span>
+        {% if can_admin %}
         <details class="disclosure diff-edit" id="comparison">
             <summary>Изменить сравнение</summary>
             <div class="disclosure-body">{{ comparison_fields(candidates, next_url) }}</div>
         </details>
+        {% endif %}
     </div>
     {% if scheme.versions_differ %}
     <div class="notice notice-warning mt-3">

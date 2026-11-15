@@ -61,12 +61,12 @@
     <summary>Все цифры</summary>
     <div class="disclosure-body table-scroll"><table class="detail-table">
         <tbody>
-        <tr><td>Изменено типовых модулей</td><td class="num">{{ totals.modules_changed|num }} из {{ diff.modules_total|num }}</td></tr>
-        <tr><td>Новых модулей / удалено модулей</td><td class="num">{{ totals.modules_added|num }} / {{ totals.modules_removed|num }}</td></tr>
-        <tr><td>Новых процедур (в изменённых и новых модулях)</td><td class="num">{{ (totals.procedures_added + totals.procedures_in_added_modules)|num }}</td></tr>
-        <tr><td>Удалено процедур / изменена сигнатура</td><td class="num">{{ totals.procedures_removed|num }} / {{ totals.procedures_signature|num }}</td></tr>
-        <tr><td>Реквизиты типовых: удалено / тип изменён</td><td class="num">{{ totals.attributes_removed|num }} / {{ totals.attributes_retyped|num }}</td></tr>
-        <tr><td>Форм добавлено</td><td class="num">{{ totals.forms_added|num }}</td></tr>
+        <tr><th scope="row">Изменено типовых модулей</th><td class="num">{{ totals.modules_changed|num }} из {{ diff.modules_total|num }}</td></tr>
+        <tr><th scope="row">Новых модулей / удалено модулей</th><td class="num">{{ totals.modules_added|num }} / {{ totals.modules_removed|num }}</td></tr>
+        <tr><th scope="row">Новых процедур (в изменённых и новых модулях)</th><td class="num">{{ (totals.procedures_added + totals.procedures_in_added_modules)|num }}</td></tr>
+        <tr><th scope="row">Удалено процедур / изменена сигнатура</th><td class="num">{{ totals.procedures_removed|num }} / {{ totals.procedures_signature|num }}</td></tr>
+        <tr><th scope="row">Реквизиты типовых: удалено / тип изменён</th><td class="num">{{ totals.attributes_removed|num }} / {{ totals.attributes_retyped|num }}</td></tr>
+        <tr><th scope="row">Форм добавлено</th><td class="num">{{ totals.forms_added|num }}</td></tr>
         </tbody>
     </table></div>
 </details>

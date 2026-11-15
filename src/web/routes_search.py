@@ -216,7 +216,10 @@ def object_detail(request: Request, project_id: str, full_name: str, source_id: 
         tabs.append(('content', 'Состав', len(details.get('subsystem_content') or [])))
     if details['forms']: tabs.append(('forms', 'Формы', len(details['forms'])))
     if modules: tabs.append(('modules', 'Модули и процедуры', sum(len(m['procedures']) for m in modules)))
-    tabs.append(('refs', 'Где используется', len(refs)))
+    # «Где используется» — ссылки на объект в типах реквизитов: только у видов,
+    # которые бывают типом (у общего модуля или регистра вкладка «· 0» вводила в заблуждение).
+    if obj['kind'] in set(_REF_KINDS.values()):
+        tabs.append(('refs', 'Где используется', len(refs)))
     active = tab if tab in {t[0] for t in tabs} else tabs[0][0]
 
     return templates.TemplateResponse(name="object_detail.html", request=request, context={
