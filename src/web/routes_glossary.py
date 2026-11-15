@@ -25,7 +25,8 @@ def _project(project_id: str):
 
 
 @router.get("/projects/{project_id}/glossary", response_class=HTMLResponse)
-def glossary_page(request: Request, project_id: str, error: str = '', saved: str = ''):
+def glossary_page(request: Request, project_id: str, error: str = '', saved: str = '',
+                  target: str = ''):
     project = _project(project_id)
     entries = get_pm().get_glossary(project_id).entries()
     return templates.TemplateResponse(name="glossary.html", request=request, context={
@@ -34,6 +35,7 @@ def glossary_page(request: Request, project_id: str, error: str = '', saved: str
         "kind_label": _KIND_LABEL,
         "error": error,
         "saved": saved,
+        "target": target,
     })
 
 

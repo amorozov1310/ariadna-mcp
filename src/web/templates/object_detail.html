@@ -4,113 +4,227 @@
 
 {% block active_nav %}search{% endblock %}
 
+{% macro proc_url(module_, name_) -%}
+/projects/{{ project.id }}/procedure?module={{ module_|urlencode }}&name={{ name_|urlencode }}
+{%- if many_parts and current_source_id %}&source_id={{ current_source_id|urlencode }}{% endif %}
+{%- endmacro %}
+
+{% macro filter_box(target_id, count) %}
+{% if count > 20 %}
+<label class="table-filter">
+    <span class="visually-hidden">Фильтр</span>
+    <input type="search" placeholder="Фильтр по имени…" data-filter="{{ target_id }}">
+</label>
+{% endif %}
+{% endmacro %}
+
 {% block content %}
-<div class="breadcrumbs">
-    <a href="/projects/{{ project.id }}">{{ project.name }}</a> /
-    <a href="/projects/{{ project.id }}/search">Поиск</a> / {{ obj.full_name }}
+{% set base = '/projects/' ~ project.id ~ '/object/' ~ obj.full_name %}
+{% set src_q = ('source_id=' ~ current_source_id) if (many_parts and current_source_id) else '' %}
+<nav class="breadcrumbs" aria-label="Путь">
+    <a href="/projects/{{ project.id }}/search">Поиск</a> /
+    <a href="/projects/{{ project.id }}/search?kind={{ obj.kind|urlencode }}">{{ obj.kind }}</a> /
+    <span>{{ obj.name }}</span>
+</nav>
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title mono obj-title">{{ obj.full_name }}</h1>
+        <div class="proc-badges">
+            {% if obj.synonym and obj.synonym != obj.name %}<span>{{ obj.synonym }}</span>{% endif %}
+            {% if details.module %}
+                {% if details.module.is_server %}<span class="badge badge-neutral">сервер</span>{% endif %}
+                {% if details.module.is_client %}<span class="badge badge-neutral">клиент</span>{% endif %}
+                {% if details.module.server_call %}<span class="badge badge-neutral">вызов сервера</span>{% endif %}
+                {% if details.module.is_global %}<span class="badge badge-neutral">глобальный</span>{% endif %}
+                {% if details.module.is_privileged %}<span class="badge badge-neutral">привилегированный</span>{% endif %}
+            {% endif %}
+            {% if many_parts and details.source_label %}<span class="badge badge-accent">{{ details.source_label }}</span>{% endif %}
+        </div>
+    </div>
+    <div class="btn-row">
+        <button type="button" class="btn btn-secondary btn-sm" data-copy="{{ obj.full_name }}">Копировать имя</button>
+        <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/glossary?target={{ obj.full_name|urlencode }}#entry-form">В словарь</a>
+    </div>
 </div>
+
+{% if obj.comment %}<p class="text-muted">{{ obj.comment }}</p>{% endif %}
+
+{% if details.matches and details.matches|length > 1 %}
+<div class="source-switcher">
+    <span class="text-muted">Тот же объект в частях проекта:</span>
+    {% for m in details.matches %}
+        {% if m.source_id == current_source_id %}<span class="source-pill active">{{ m.source_label }}</span>
+        {% else %}<a href="{{ base }}?source_id={{ m.source_id }}" class="source-pill">{{ m.source_label }}{% if m.source_type == 'extension' %} — расширение{% endif %}</a>{% endif %}
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if value_type or hints or records or details.recorded_by or standard or details.glossary %}
+<div class="card obj-facts">
+    {% if value_type %}<p><b>Тип:</b> {{ value_type|type_links(project.id) }}</p>{% endif %}
+    {% for h in hints %}<p class="mono obj-hint">{{ h }}</p>{% endfor %}
+    {% if records %}
+    <p><b>Движения по регистрам ({{ records|length }}):</b>
+        {% for r in records %}<a href="/projects/{{ project.id }}/object/{{ r }}">{{ r }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+    {% endif %}
+    {% if details.recorded_by %}
+    <details class="disclosure">
+        <summary>Движения делают документы ({{ details.recorded_by|length }})</summary>
+        <div class="disclosure-body">{% for r in details.recorded_by %}<a href="/projects/{{ project.id }}/object/{{ r }}">{{ r }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</div>
+    </details>
+    {% endif %}
+    {% if standard %}<p class="text-muted">{{ standard }}</p>{% endif %}
+    {% if details.glossary %}
+    <p class="text-muted">Словарь:
+        {% for g in details.glossary %}{% for t in g.terms %}«{{ t }}»{% if not loop.last %}, {% endif %}{% endfor %}{% if not loop.last %}; {% endif %}{% endfor %}</p>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if details.help %}
+<details class="card disclosure">
+    <summary>Справка объекта</summary>
+    <div class="disclosure-body obj-help">{{ details.help[:6000] }}{% if details.help|length > 6000 %}…{% endif %}</div>
+</details>
+{% endif %}
+
+<nav class="tabs" aria-label="Состав объекта">
+    {% for key, label, count in tabs %}
+    <a href="{{ base }}?tab={{ key }}{% if src_q %}&{{ src_q }}{% endif %}" {% if tab == key %}aria-current="page"{% endif %}>{{ label }} · {{ count|num }}</a>
+    {% endfor %}
+</nav>
 
 <div class="card">
-    <h2>{{ obj.full_name }}</h2>
-    <span class="result-kind">{{ obj.kind }}</span>
-    {% if details.source_label or details.source_id %}
-    <span class="badge badge-source" title="Источник данных">{{ details.source_label or details.source_id }}</span>
-    {% endif %}
-    {% if obj.synonym and obj.synonym != obj.name %}
-    <span class="text-muted" style="margin-left:8px">{{ obj.synonym }}</span>
-    {% endif %}
-    {% if obj.comment %}<div class="text-muted mt-16">{{ obj.comment }}</div>{% endif %}
-
-    {% if details.matches and details.matches|length > 1 %}
-    <div class="source-switcher mt-16">
-        <div class="text-muted" style="font-size:12px;margin-bottom:6px">Тот же объект в других частях проекта:</div>
-        {% for m in details.matches %}
-            {% if m.source_id == current_source_id %}
-            <span class="source-pill active">{{ m.source_label }}</span>
-            {% else %}
-            <a href="/projects/{{ project.id }}/object/{{ obj.full_name }}?source_id={{ m.source_id }}"
-               class="source-pill">{{ m.source_label }}{% if m.source_type == 'extension' %} — расширение{% endif %}</a>
-            {% endif %}
-        {% endfor %}
-    </div>
-    {% endif %}
-
-    {% if details.module %}
-    <div class="mt-16">
-        <strong>Флаги модуля:</strong>
-        {% if details.module.is_server %}<span class="badge badge-ready">Сервер</span>{% endif %}
-        {% if details.module.is_client %}<span class="badge badge-accent">Клиент</span>{% endif %}
-        {% if details.module.is_global %}<span class="badge badge-warning">Глобальный</span>{% endif %}
-        {% if details.module.is_privileged %}<span class="badge badge-danger">Привилегированный</span>{% endif %}
-        {% if details.module.server_call %}<span class="badge badge-info">ВызовСервера</span>{% endif %}
-    </div>
-    {% endif %}
-</div>
-
-{% if details.attributes %}
-<div class="card detail-section">
-    <h3>Реквизиты ({{ details.attributes|length }})</h3>
+{% if tab == 'attributes' %}
+    {{ filter_box('attr-table', attributes|length) }}
     <div class="table-scroll">
-    <table class="detail-table">
-        <tr><th>Имя</th><th>Тип</th><th>Вид</th></tr>
-        {% for a in details.attributes %}
-        <tr>
-            <td>{{ a.name }}{% if a.synonym and a.synonym != a.name %} <span class="text-muted">({{ a.synonym }})</span>{% endif %}</td>
-            <td class="mono">{{ a.type_desc }}</td>
-            <td>{% if a.kind != 'Реквизит' %}<span class="result-kind">{{ a.kind }}</span>{% endif %}</td>
+    <table class="detail-table" id="attr-table">
+        <thead><tr><th scope="col">Имя</th><th scope="col">Синоним</th><th scope="col">Тип</th></tr></thead>
+        <tbody>
+        {% for a in attributes %}
+        <tr data-name="{{ a.name|lower }} {{ (a.synonym or '')|lower }}">
+            <td><span class="mono">{{ a.name }}</span>{% if a.kind != 'Реквизит' %} <span class="badge badge-neutral">{{ a.kind|lower }}</span>{% endif %}</td>
+            <td class="text-muted">{{ a.synonym if a.synonym != a.name else '' }}</td>
+            <td class="obj-type">{{ a.type_desc|type_links(project.id) }}</td>
         </tr>
         {% endfor %}
+        </tbody>
     </table>
     </div>
-</div>
-{% endif %}
 
-{% if details.tabular_sections %}
-<div class="card detail-section">
-    <h3>Табличные части ({{ details.tabular_sections|length }})</h3>
+{% elif tab == 'tables' %}
     {% for ts_name, ts_attrs in details.tabular_sections.items() %}
-    <h3 style="margin-top:12px;font-size:14px">{{ ts_name }}</h3>
-    {% if ts_attrs %}
-    <table class="detail-table">
-        <tr><th>Имя</th><th>Тип</th></tr>
-        {% for a in ts_attrs %}
-        <tr>
-            <td>{{ a.name.replace('ТЧ.' + ts_name + '.', '') }}</td>
-            <td class="mono">{{ a.type_desc }}</td>
+    <details class="disclosure obj-ts" {% if loop.length == 1 %}open{% endif %}>
+        <summary><span class="mono">{{ ts_name }}</span> <span class="text-muted">· {{ ts_attrs|length|plural('реквизит', 'реквизита', 'реквизитов') }}</span></summary>
+        <div class="disclosure-body table-scroll">
+        <table class="detail-table">
+            <thead><tr><th scope="col">Имя</th><th scope="col">Синоним</th><th scope="col">Тип</th></tr></thead>
+            <tbody>
+            {% for a in ts_attrs %}
+            <tr>
+                <td class="mono">{{ a.name.replace('ТЧ.' + ts_name + '.', '') }}</td>
+                <td class="text-muted">{{ a.synonym if a.synonym and a.synonym != a.name.replace('ТЧ.' + ts_name + '.', '') else '' }}</td>
+                <td class="obj-type">{{ a.type_desc|type_links(project.id) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </details>
+    {% endfor %}
+
+{% elif tab == 'values' %}
+    <ul class="results">
+        {% for e in details.enum_values %}
+        <li class="result"><span class="mono">{{ e.name }}</span>{% if e.synonym and e.synonym != e.name %} <span class="text-muted">{{ e.synonym }}</span>{% endif %}</li>
+        {% endfor %}
+    </ul>
+
+{% elif tab == 'content' %}
+    {% if details.subsystem_content %}
+    <ul class="results">
+        {% for c in details.subsystem_content %}
+        <li class="result"><a class="mono" href="/projects/{{ project.id }}/object/{{ c }}">{{ c }}</a></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% if details.child_subsystems %}
+    <h3 class="results-title" style="margin-top:var(--space-3)">Дочерние подсистемы</h3>
+    <ul class="results">
+        {% for c in details.child_subsystems %}
+        <li class="result"><a class="mono" href="/projects/{{ project.id }}/object/{{ c.full_name }}">{{ c.full_name }}</a>{% if c.synonym %} <span class="text-muted">{{ c.synonym }}</span>{% endif %}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+{% elif tab == 'forms' %}
+    <ul class="results">
+        {% for f in details.forms %}
+        {% set form_module = (modules|selectattr('name', 'equalto', obj.full_name ~ '.Форма.' ~ f.name)|list) %}
+        <li class="result">
+            <span class="mono">{{ f.name }}</span>
+            {% if form_module %}<span class="text-muted">· {{ form_module[0].procedures|length|plural('процедура', 'процедуры', 'процедур') }} — во вкладке «Модули и процедуры»</span>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+
+{% elif tab == 'modules' %}
+    {% for m in modules %}
+    <details class="disclosure obj-ts" {% if loop.length == 1 %}open{% endif %}>
+        <summary><span class="mono">{{ m.name }}</span> <span class="text-muted">· {{ m.procedures|length|plural('процедура', 'процедуры', 'процедур') }}</span></summary>
+        <ul class="results disclosure-body">
+            {% for p in m.procedures %}
+            <li class="result">
+                <div class="result-line">
+                    <a class="result-name" href="{{ proc_url(m.name, p.name) }}">{{ p.name }}()</a>
+                    {% if p.is_export %}<span class="badge badge-neutral">экспорт</span>{% endif %}
+                    {% if p.directive %}<span class="badge badge-neutral">{{ p.directive }}</span>{% endif %}
+                    <span class="text-muted">стр. {{ p.start_line }}–{{ p.end_line }}</span>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+    </details>
+    {% endfor %}
+
+{% elif tab == 'refs' %}
+    {% if refs %}
+    <p class="text-muted">Реквизиты других объектов, у которых в типе есть {{ obj.full_name }}{% if refs_more %} (первые 200){% endif %}.</p>
+    {{ filter_box('refs-table', refs|length) }}
+    <div class="table-scroll">
+    <table class="detail-table" id="refs-table">
+        <thead><tr><th scope="col">Объект</th><th scope="col">Реквизит</th></tr></thead>
+        <tbody>
+        {% for r in refs %}
+        <tr data-name="{{ r.object_full_name|lower }} {{ r.attr_name|lower }}">
+            <td><a class="mono" href="/projects/{{ project.id }}/object/{{ r.object_full_name }}">{{ r.object_full_name }}</a></td>
+            <td class="mono">{{ r.attr_name.replace('ТЧ.', '') }}</td>
         </tr>
         {% endfor %}
+        </tbody>
     </table>
-    {% endif %}
-    {% endfor %}
-</div>
-{% endif %}
-
-{% if details.forms %}
-<div class="card detail-section">
-    <h3>Формы ({{ details.forms|length }})</h3>
-    {% for f in details.forms %}
-    <div style="padding:4px 0">{{ f.name }}</div>
-    {% endfor %}
-</div>
-{% endif %}
-
-{% if details.enum_values %}
-<div class="card detail-section">
-    <h3>Значения перечисления ({{ details.enum_values|length }})</h3>
-    {% for e in details.enum_values %}
-    <div style="padding:4px 0">
-        {{ e.name }}
-        {% if e.synonym and e.synonym != e.name %}<span class="text-muted">({{ e.synonym }})</span>{% endif %}
     </div>
-    {% endfor %}
-</div>
+    {% else %}
+    <p class="text-muted">Ни один реквизит других объектов не ссылается на {{ obj.full_name }}.
+        Использования в коде ищите во вкладке «Текст кода» <a href="/projects/{{ project.id }}/search?mode=code&q={{ obj.name|urlencode }}">поиска</a>.</p>
+    {% endif %}
 {% endif %}
+</div>
 
-<style>
-.source-switcher { padding:var(--space-3); background:var(--bg-inset); border-radius:var(--radius-sm); }
-.source-pill { display:inline-block; padding:4px var(--space-3); margin-right:6px; font-size:var(--fs-sm);
-               background:var(--bg2); color:var(--text); border:1px solid var(--border); border-radius:var(--radius-pill); }
-.source-pill:hover { background:var(--accent-soft); border-color:var(--accent); text-decoration:none; }
-.source-pill.active { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
-</style>
+<script>
+// Фильтр длинных таблиц по имени и синониму.
+document.querySelectorAll('input[data-filter]').forEach(function (input) {
+    const rows = document.querySelectorAll('#' + input.dataset.filter + ' tbody tr');
+    input.addEventListener('input', function () {
+        const q = input.value.trim().toLowerCase();
+        rows.forEach(function (tr) { tr.hidden = q && !tr.dataset.name.includes(q); });
+    });
+});
+document.querySelectorAll('[data-copy]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(btn.dataset.copy).then(function () { btn.textContent = 'Скопировано'; });
+    });
+});
+</script>
 {% endblock %}

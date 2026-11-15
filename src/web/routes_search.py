@@ -161,22 +161,79 @@ def procedure_page(request: Request, project_id: str, module: str, name: str = '
 
 
 @router.get("/projects/{project_id}/object/{full_name:path}", response_class=HTMLResponse)
-def object_detail(request: Request, project_id: str, full_name: str, source_id: str = ''):
+def object_detail(request: Request, project_id: str, full_name: str, source_id: str = '',
+                  tab: str = ''):
     pm = get_pm()
     try:
         project = pm.get_project(project_id)
     except KeyError:
         raise HTTPException(404)
 
+    from ..core.register_info import RECORDS, VALUE_TYPE, query_hints
+    from ..core.standard_attributes import standard_attributes_line
     engine = pm.get_search(project_id)
     details = engine.get_object_details(full_name, source_id=source_id or None)
     if not details:
-        raise HTTPException(404, f"Object '{full_name}' not found")
+        raise HTTPException(404, f"Объект «{full_name}» не найден")
+
+    obj = details['object']
+    props = details.get('properties') or {}
+    # Реквизиты шапки: реквизиты табличных частей («ТЧ.Имя.Реквизит») — только
+    # во вкладке «Табличные части», без повторов.
+    attributes = [a for a in details['attributes'] if not a['name'].startswith('ТЧ.')]
+    resources = [a['name'] for a in attributes if a['kind'] == 'Ресурс']
+
+    # Модули объекта (модуль объекта, менеджера, форм) с их процедурами.
+    conn = pm.get_db(project_id).read_conn()
+    modules = []
+    for m in conn.execute(
+            """SELECT id, name FROM modules WHERE object_id = ? ORDER BY name""", (obj['id'],)):
+        procs = [dict(r) for r in conn.execute(
+            """SELECT name, kind, is_export, directive, start_line, end_line
+               FROM procedures WHERE module_id = ? ORDER BY start_line""", (m['id'],))]
+        modules.append({'name': m['name'], 'procedures': procs})
+
+    # find_references ищет подстроку имени в типе; «где используется» — только
+    # ссылка именно на этот объект (СправочникСсылка.X, не ...XПоставщиков и не
+    # ДокументСсылка.X).
+    from .app import _REF_KINDS, _split_types
+
+    def refers_here(type_desc: str) -> bool:
+        for part in _split_types(type_desc or ''):
+            head, _, tail = part.partition('.')
+            if _REF_KINDS.get(head) == obj['kind'] and tail.casefold() == obj['name'].casefold():
+                return True
+        return False
+
+    refs = [r for r in engine.find_references(obj['name'], limit=1000)
+            if refers_here(r.get('type_desc'))]
+
+    tabs = []
+    if attributes: tabs.append(('attributes', 'Реквизиты', len(attributes)))
+    if details['tabular_sections']: tabs.append(('tables', 'Табличные части', len(details['tabular_sections'])))
+    if details['enum_values']: tabs.append(('values', 'Значения', len(details['enum_values'])))
+    if details.get('subsystem_content') or details.get('child_subsystems'):
+        tabs.append(('content', 'Состав', len(details.get('subsystem_content') or [])))
+    if details['forms']: tabs.append(('forms', 'Формы', len(details['forms'])))
+    if modules: tabs.append(('modules', 'Модули и процедуры', sum(len(m['procedures']) for m in modules)))
+    tabs.append(('refs', 'Где используется', len(refs)))
+    active = tab if tab in {t[0] for t in tabs} else tabs[0][0]
 
     return templates.TemplateResponse(name="object_detail.html", request=request, context={
         "project": project,
         "details": details,
         "current_source_id": details.get('source_id', ''),
+        "attributes": attributes,
+        "modules": modules,
+        "refs": refs[:200],
+        "refs_more": len(refs) > 200,
+        "tabs": tabs,
+        "tab": active,
+        "value_type": (props.get(VALUE_TYPE) or [''])[0],
+        "hints": query_hints(obj['full_name'], obj.get('kind', ''), props, resources),
+        "records": props.get(RECORDS) or [],
+        "standard": standard_attributes_line(obj.get('kind', ''), props),
+        "many_parts": len(engine.list_sources()) > 1,
     })
 
 

@@ -165,4 +165,16 @@
     </ul>
 </div>
 {% endif %}
+
+<script>
+// Очистили поле (крестиком или стёрли всё) — старые результаты не должны
+// оставаться: та же страница без запроса (вкладка и фильтры сохраняются).
+(function () {
+    const q = document.getElementById('search-q');
+    if (!q || !q.value) return;
+    function resetIfEmpty() { if (!q.value.trim()) q.form.submit(); }
+    q.addEventListener('search', resetIfEmpty);
+    q.addEventListener('input', resetIfEmpty);
+})();
+</script>
 {% endblock %}

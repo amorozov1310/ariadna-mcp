@@ -96,3 +96,10 @@ def test_tabs_keep_query(client):
     main = _main(client.get('/projects/p1/search?q=Заказ&mode=code').text)
     tabs = main[main.index('class="tabs"'):main.index('</nav>')]
     assert tabs.count('q=') == 3 and 'aria-current="page">Текст кода' in tabs
+
+
+def test_clearing_query_resets_results(client):
+    """Очистка поля поиска отправляет форму без запроса — прежняя выдача
+    не остаётся на экране (обработчик search/input у поля)."""
+    main = client.get('/projects/p1/search?q=Заказ').text
+    assert "addEventListener('search', resetIfEmpty)" in main

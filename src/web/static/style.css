@@ -714,7 +714,7 @@ main:focus { outline: none; }
 .overview-card:hover { text-decoration: none; border-color: var(--accent); }
 .overview-card h3 { margin-bottom: var(--space-1); }
 .overview-card p { margin: 0; font-size: var(--fs-sm); }
-.overview-kinds > summary { cursor: pointer; }
+.overview-kinds .card-header { flex-wrap: wrap; gap: var(--space-2); }
 
 /* Вкладки — ссылки, состояние в адресе. */
 .tabs { display: flex; gap: var(--space-1); border-bottom: 1px solid var(--border); margin-bottom: var(--space-4); flex-wrap: wrap; }
@@ -785,3 +785,22 @@ dialog.confirm .btn-row { justify-content: flex-end; }
 .code-text { white-space: pre; padding-right: var(--space-4); }
 .code-line-hit { background: var(--warning-bg); }
 .code-line:target { background: var(--accent-soft); }
+
+/* ============================================================
+   Карточка объекта (шаг 8 плана UI)
+   ============================================================ */
+.obj-title { margin-bottom: var(--space-1); overflow-wrap: anywhere; }
+.source-switcher { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-3); margin-bottom: var(--space-3); background: var(--bg-inset); border-radius: var(--radius-sm); font-size: var(--fs-sm); }
+.source-pill { display: inline-block; padding: 4px var(--space-3); background: var(--bg2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-pill); }
+.source-pill:hover { background: var(--accent-soft); border-color: var(--accent); text-decoration: none; }
+.source-pill.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.obj-facts p { margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
+.obj-facts p:last-child { margin-bottom: 0; }
+.obj-hint { font-size: var(--fs-sm); color: var(--text2); }
+.obj-help { white-space: pre-wrap; color: var(--text2); font-size: var(--fs-sm); }
+.obj-type { overflow-wrap: anywhere; font-size: var(--fs-sm); }
+.obj-type a { font-family: var(--mono); }
+.obj-ts { margin-bottom: var(--space-2); }
+.obj-ts > summary { cursor: pointer; }
+.table-filter { display: block; margin-bottom: var(--space-2); }
+.table-filter input { width: 100%; max-width: 320px; }

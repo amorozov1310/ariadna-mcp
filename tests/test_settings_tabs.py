@@ -121,3 +121,10 @@ def test_member_sees_no_changing_actions(web, monkeypatch):
     assert 'action="/api/projects/p1/update"' not in general and 'name="base_project"' not in general
     page = client.get('/projects/p1/settings?tab=danger', headers=h).text
     assert 'Опасная зона' not in page and '/api/projects/p1/delete' not in page
+
+
+def test_overview_kinds_section_is_visible(web):
+    _, client = web
+    main = _main(client.get('/projects/p1').text)
+    assert 'Состав конфигурации</h2>' in main and 'щелчок по строке' in main
+    assert main.count('class="kind-row"') >= 1 and '/search?kind=' in main
