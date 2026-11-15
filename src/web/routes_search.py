@@ -237,88 +237,117 @@ def object_detail(request: Request, project_id: str, full_name: str, source_id: 
     })
 
 
+def _procedure_matches(pm, project_id: str, procedure: str, module: str = '',
+                       source_id: str = '') -> list[dict]:
+    """Процедуры с таким именем (с учётом модуля и части проекта, если заданы)
+    — чтобы при одноимённых процедурах в разных модулях предложить выбор,
+    а не строить все деревья подряд."""
+    from ..core.search import resolve_module_ids
+    conn = pm.get_db(project_id).read_conn()
+    conds, params = ["p.name_cf = ?"], [procedure.strip().casefold()]
+    if module:
+        ids = resolve_module_ids(conn, module, source_id or None)
+        if not ids:
+            return []
+        conds.append(f"m.id IN ({','.join('?' * len(ids))})")
+        params.extend(ids)
+    if source_id:
+        conds.append("m.source_id = ?")
+        params.append(source_id)
+    return [dict(r) for r in conn.execute(
+        f"""SELECT p.name, m.name AS module_name, m.source_id, s.label AS source_label,
+                   s.source_type, p.start_line
+            FROM procedures p JOIN modules m ON m.id = p.module_id
+            LEFT JOIN sources s ON s.id = m.source_id
+            WHERE {' AND '.join(conds)} ORDER BY m.source_id, m.name""", params)]
+
+
+def _calls_context(request: Request, project_id: str, view: str, procedure: str, module: str,
+                   direction: str, depth, source_id: str, obj: str = '') -> tuple:
+    """Общее для «Вызовов» в обоих видах: форма, выбор при одноимённых
+    процедурах, ошибка «не найдена»."""
+    pm = get_pm()
+    try:
+        project = pm.get_project(project_id)
+    except KeyError:
+        raise HTTPException(404)
+    engine = pm.get_search(project_id)
+    try:
+        depth_int = max(1, min(int(depth or 3), 10))
+    except (ValueError, TypeError):
+        depth_int = 3
+    direction = 'up' if direction == 'up' else 'down'
+    matches, error = [], ''
+    if procedure:
+        matches = _procedure_matches(pm, project_id, procedure, module, source_id)
+        if not matches:
+            error = f"Процедура «{procedure}» не найдена" + (f" в модуле «{module}»" if module else '') + '.'
+        elif len(matches) == 1 and not module:
+            module = matches[0]['module_name']        # однозначно — модуль известен
+    ctx = {
+        "project": project,
+        "view": view,
+        "procedure": procedure,
+        "module": module,
+        "direction": direction,
+        "depth": depth_int,
+        "source_id": source_id,
+        "sources": engine.list_sources(),
+        "choices": matches if len(matches) > 1 else [],
+        "error": error,
+        "object": obj,
+    }
+    return pm, ctx
+
+
 @router.get("/projects/{project_id}/calltree", response_class=HTMLResponse)
 def calltree_page(
     request: Request, project_id: str,
     procedure: str = '', module: str = '', direction: str = 'down', depth: int = 3,
     source_id: str = '',
 ):
-    """Text-based call tree (works without client-side JS graphics)."""
-    pm = get_pm()
-    try:
-        project = pm.get_project(project_id)
-    except KeyError:
-        raise HTTPException(404)
-
-    engine = pm.get_search(project_id)
-    sources = engine.list_sources()
-
-    tree_text = None
+    """«Вызовы», вид «Дерево»: вложенный список, каждый узел — ссылка на
+    страницу процедуры (работает и без JS)."""
+    pm, ctx = _calls_context(request, project_id, 'tree', procedure, module, direction,
+                             depth, source_id)
     tree_node = None
-    not_ready = False
-    error = None
-
-    if procedure:
+    if procedure and not ctx['error'] and not ctx['choices']:
         from ..core.call_analyzer import CallAnalyzer
-        db = pm.get_db(project_id)
-        ca = CallAnalyzer(db)
-        try:
-            depth_int = max(1, min(int(depth or 3), 10))
-        except (ValueError, TypeError):
-            depth_int = 3
-        tree_node = ca.build_call_tree(
-            procedure,
-            module_name=module or None,
-            direction=direction or 'down',
-            depth=depth_int,
-            source_id=source_id or None,
-        )
+        tree_node = CallAnalyzer(pm.get_db(project_id)).build_call_tree(
+            procedure, module_name=ctx['module'] or None, direction=ctx['direction'],
+            depth=ctx['depth'], source_id=source_id or None)
         if tree_node is None:
-            error = f"Процедура «{procedure}» не найдена в индексе" + \
-                (f" (источник: {source_id})" if source_id else '')
-        else:
-            tree_text = ca.format_tree_simple(tree_node)
-
-    return templates.TemplateResponse(name="calltree.html", request=request, context={
-        "project": project,
-        "procedure": procedure,
-        "module": module,
-        "direction": direction or 'down',
-        "depth": depth,
-        "source_id": source_id,
-        "sources": sources,
-        "tree": tree_text,
-        "tree_node": tree_node,
-        "not_ready": not_ready,
-        "error": error,
-    })
+            ctx['error'] = f"Процедура «{procedure}» не найдена."
+    ctx['tree_node'] = tree_node
+    return templates.TemplateResponse(name="calltree.html", request=request, context=ctx)
 
 
 @router.get("/projects/{project_id}/graph", response_class=HTMLResponse)
 def graph_page(
     request: Request, project_id: str,
     procedure: str = '', module: str = '', direction: str = 'down', depth: int = 3,
-    source_id: str = '',
+    source_id: str = '', object: str = '',
 ):
-    """Interactive visual graph of a call tree (vis.js network)."""
+    """«Вызовы», вид «Схема» (vis-network). С object= — схема ссылок на объект
+    конфигурации (из «Где используется» карточки объекта)."""
+    _, ctx = _calls_context(request, project_id, 'graph', procedure, module, direction,
+                            depth, source_id, obj=object)
+    return templates.TemplateResponse(name="graph.html", request=request, context=ctx)
+
+
+@router.get("/api/projects/{project_id}/procedures/suggest")
+def suggest_procedures(project_id: str, q: str = ''):
+    """Подсказка имени процедуры в форме «Вызовов»: имя, модуль, часть проекта."""
     pm = get_pm()
     try:
-        project = pm.get_project(project_id)
+        pm.get_project(project_id)
     except KeyError:
         raise HTTPException(404)
-
-    engine = pm.get_search(project_id)
-    sources = engine.list_sources()
-
-    return templates.TemplateResponse(name="graph.html", request=request, context={
-        "project": project,
-        "procedure": procedure,
-        "module": module,
-        "direction": direction or 'down',
-        "depth": depth,
-        "source_id": source_id,
-        "sources": sources,
-    })
+    if len(q.strip()) < 2:
+        return []
+    rows = pm.get_search(project_id).search_procedures(q.strip(), limit=15)
+    return [{'name': r['name'], 'module': r['module_name'], 'source_id': r.get('source_id') or ''}
+            for r in rows]
 
 
 @router.get("/api/projects/{project_id}/graph/calltree")
