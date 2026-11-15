@@ -126,6 +126,11 @@ def _kinds_breakdown(kinds: dict[str, int]) -> list[dict]:
     return rows
 
 
+def is_admin(request):
+    from .routes_auth import is_admin as check
+    return check(request)
+
+
 SETTINGS_TABS = ('data', 'general', 'danger')
 
 
@@ -141,7 +146,8 @@ def project_settings(request: Request, project_id: str, tab: str = 'data', edit:
 
     return templates.TemplateResponse(name="project_settings.html", request=request, context={
         "project": project,
-        "tab": tab if tab in SETTINGS_TABS else 'data',
+        # «Опасная зона» — только администратору; участнику по такой ссылке — «Данные».
+        "tab": tab if tab in SETTINGS_TABS and (tab != 'danger' or is_admin(request)) else 'data',
         "edit_source": next((s for s in project.sources if s.id == edit), None),
         "index_error": pm.index_error(project_id) if project.status == 'error' else '',
         "candidates": [p for p in pm.list_projects() if p.id != project_id],

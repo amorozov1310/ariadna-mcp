@@ -70,7 +70,12 @@
     {% if file_note %}
     <div class="notice notice-warning"><svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg><div>{{ file_note }}</div></div>
     {% else %}
-    <div class="code-block" role="region" aria-label="Код процедуры" tabindex="0">
+    <div class="code-toolbar">
+        <button type="button" class="btn btn-secondary btn-sm" id="copy-code">
+            <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#copy"/></svg>
+            {% if truncated %}Копировать показанное{% else %}Копировать код{% endif %}</button>
+    </div>
+    <div class="code-block" role="region" aria-label="Код процедуры" tabindex="0" id="proc-code">
         {% for n, text in code_lines %}<div class="code-line{% if n == line %} code-line-hit{% endif %}" id="L{{ n }}"><span class="code-ln">{{ n }}</span><span class="code-text">{{ text }}</span></div>
         {% endfor %}
     </div>
@@ -82,6 +87,20 @@
     {% endif %}
     {% endif %}
 </div>
+<script>
+(function () {
+    const btn = document.getElementById('copy-code');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+        const text = [...document.querySelectorAll('#proc-code .code-text')].map(function (e) { return e.textContent; }).join('\n');
+        const label = btn.innerHTML;
+        navigator.clipboard.writeText(text).then(function () {
+            btn.textContent = 'Скопировано';
+            setTimeout(function () { btn.innerHTML = label; }, 1500);
+        });
+    });
+})();
+</script>
 
 {% elif tab == 'callers' %}
 <div class="card">

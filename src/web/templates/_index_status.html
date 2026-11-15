@@ -229,20 +229,20 @@ document.querySelectorAll('form.js-upload').forEach(function (form) {
             <summary>Дополнительно: тип, название, код</summary>
             <div class="disclosure-body form-row">
                 <div class="form-group">
-                    <label>Тип</label>
-                    <select name="source_type">
+                    <label for="f-type">Тип</label>
+                    <select id="f-type" name="source_type">
                         <option value="main">Конфигурация</option>
                         <option value="extension">Расширение</option>
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Название</label>
-                    <input name="label" required value="{{ project.name }}">
+                    <label for="f-label">Название</label>
+                    <input id="f-label" name="label" required value="{{ project.name }}">
                 </div>
                 <div class="form-group">
-                    <label>Код части</label>
-                    <input name="source_id" required pattern="[a-zA-Z0-9_-]+" value="main" class="mono">
-                    <div class="form-hint">Латиницей; имя каталога на диске.</div>
+                    <label for="f-code">Код части</label>
+                    <input id="f-code" name="source_id" required pattern="[a-zA-Z0-9_-]+" value="main" class="mono">
+                    <div class="form-hint">Латиницей; так часть называется в запросах агента.</div>
                 </div>
             </div>
         </details>

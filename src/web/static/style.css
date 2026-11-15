@@ -364,7 +364,7 @@ main input:focus, main select:focus, main textarea:focus {
 }
 main input[type="file"] { font-size: var(--fs-base); font-family: var(--font); color: var(--text); }
 .form-group { margin-bottom: var(--space-4); }
-.form-group label { display: block; font-size: var(--fs-sm); font-weight: 500; margin-bottom: var(--space-1); color: var(--text2); }
+.form-group label, .form-group .form-label { display: block; font-size: var(--fs-sm); font-weight: 500; margin-bottom: var(--space-1); color: var(--text2); }
 .form-group input, .form-group select, .form-group textarea {
     width: 100%; padding: 8px var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
     font-size: var(--fs-base); font-family: var(--font); background: var(--bg2); color: var(--text);
@@ -663,7 +663,13 @@ dialog.confirm {
 dialog.confirm::backdrop { background: rgba(0, 0, 0, .45); }
 dialog.confirm p { margin: 0 0 var(--space-4); }
 dialog.confirm .btn-row { justify-content: flex-end; }
-@media (max-width: 560px) { .parts-table .col-code { display: none; } .parts-table td, .parts-table th { padding: 6px 4px; } }
+.parts-table .type-inline { display: none; }
+@media (max-width: 560px) {
+    .parts-table .col-code, .parts-table .col-type { display: none; }
+    .parts-table .type-inline { display: block; }
+    .parts-table td, .parts-table th { padding: 6px 4px; }
+    .parts-table td:first-child { overflow-wrap: anywhere; }
+}
 
 /* ============================================================
    Поиск (шаг 6 плана UI): одна вёрстка результатов для трёх вкладок
@@ -697,7 +703,7 @@ dialog.confirm .btn-row { justify-content: flex-end; }
 .proc-title { margin-bottom: var(--space-1); overflow-wrap: anywhere; }
 .proc-badges { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); }
 .proc-place { color: var(--text2); margin: var(--space-2) 0; overflow-wrap: anywhere; }
-.proc-comment { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); background: var(--bg-inset); border-radius: var(--radius-sm); font-family: var(--mono); font-size: var(--fs-sm); color: var(--text2); white-space: pre-wrap; }
+.proc-comment { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); background: var(--bg-inset); border-radius: var(--radius-sm); font-family: var(--mono); font-size: var(--fs-sm); color: var(--text2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .code-block { font-family: var(--mono); font-size: 13px; line-height: 1.55; overflow-x: auto; background: var(--bg-inset); border-radius: var(--radius-sm); padding: var(--space-2) 0; }
 .code-line { display: flex; min-width: max-content; }
 .code-ln { flex: none; width: 4.5em; padding-right: var(--space-3); text-align: right; color: var(--text3); user-select: none; }
@@ -788,8 +794,11 @@ main .appsearch-field { height: var(--control-h-lg); }
 .conflict-sev-info { color: var(--text2); }
 .conflict-section { margin-bottom: var(--space-3); }
 .conflict-section > summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
-.conflict-sides { display: grid; gap: var(--space-4); }
-@media (min-width: 1100px) { .conflict-sides { grid-template-columns: 1fr 1fr; } .conflict-sides .card { min-width: 0; } }
+/* minmax(0, 1fr): без него колонка сетки растягивается по самой длинной строке
+   кода (на крупной конфигурации — тысячи пикселей), и страница уезжает вбок. */
+.conflict-sides { display: grid; gap: var(--space-4); grid-template-columns: minmax(0, 1fr); }
+.conflict-sides > * { min-width: 0; }
+@media (min-width: 1100px) { .conflict-sides { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 @media (max-width: 720px) { .conflict-cat { grid-template-columns: minmax(0, 1fr) 4em; } .conflict-cat .conflict-sev, .conflict-cat .kind-bar { display: none; } }
 
 /* ── Шаг 11: «Проверка вызовов», словарь, консоль MCP ───────────────── */
@@ -880,7 +889,7 @@ main .appsearch-field input:not([type="radio"]):not([type="checkbox"]):not([type
 /* Шапка таблицы (Q6): заметна на фоне строк — основной цвет текста, полужирный,
    граница снизу; подписи не переносятся. Заголовки строк (th в tbody,
    таблицы «ключ — значение») остаются прежними. */
-.detail-table thead th { color: var(--text); font-weight: 600; white-space: nowrap; vertical-align: bottom;
+.detail-table thead th { color: var(--text); font-weight: 600; vertical-align: bottom;
                          padding: var(--space-2); border-bottom: 2px solid var(--border-strong); }
 .detail-table thead + tbody tr:first-child td { border-top: 0; }
 .detail-table td { border-top-color: var(--border); }
@@ -900,3 +909,11 @@ main .appsearch-field input:not([type="radio"]):not([type="checkbox"]):not([type
 .card-inset { border: 0; background: var(--bg-inset); }
 .playground-result .result-box { border: 0; }
 .graph-container { border: 0; }
+@media (min-width: 720px) { .detail-table thead th { white-space: nowrap; } }
+/* Узкий экран: поля строки формы — во всю ширину, а не фиксированной ширины
+   за краем экрана. */
+@media (max-width: 560px) {
+    .calls-row label { flex: 1 1 100%; min-width: 0; }
+    .calls-row label input, .calls-row label select { width: 100%; }
+}
+.code-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--space-2); }
