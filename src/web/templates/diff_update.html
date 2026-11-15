@@ -1,7 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Обновление — {{ project.name }}{% endblock %}
 {% block active_nav %}diff{% endblock %}
-{% from "_diff_header.html" import diff_header, pending_card with context %}
+{% from "_diff_header.html" import diff_header, diff_help, download_menu, pending_card with context %}
+
+{# Порядок по тяжести: сначала то, что при обновлении сломается точно. #}
+{% set severity = [
+    ('must', 'Проверить обязательно', ['removed_in_release', 'intercepted_removed']),
+    ('merge', 'Слить вручную', ['both_changed', 'intercepted_changed', 'name_clash', 'removed_by_you']),
+    ('info', 'Для сведения', ['object_both', 'module_both']),
+] %}
 
 {% block content %}
 {{ diff_header(scheme, 'update', candidates, '/projects/' ~ project.id ~ '/diff/update') }}
@@ -26,55 +33,105 @@
 
 {% if result %}
 {% set t = result.release_totals %}
+{% set total = result.items|length %}
+{% set ns = namespace(max=1) %}
+{% for kind in kinds %}{% if (groups.get(kind) or [])|length > ns.max %}{% set ns.max = (groups.get(kind) or [])|length %}{% endif %}{% endfor %}
+
 <div class="card">
-    <div class="diff-title-row">
-        <h3 class="section-title">Обновление: доработки «{{ project.id }}» × изменения «{{ result.release_project }}»</h3>
-        <span class="diff-export">Скачать:
-            <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/update/export?release={{ result.release_project|urlencode }}&format=csv" title="Таблица для Excel: пересечения с колонками «Решение» и «Ответственный»">Excel (CSV)</a>
-            <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/update/export?release={{ result.release_project|urlencode }}&format=md" title="Чек-лист пересечений в Markdown">Markdown</a>
-        </span>
+    <div class="diff-toolbar">
+        <h2 class="section-title" style="margin:0">
+            {% if total %}Пересечений с релизом {{ result.release_project }}: {{ total|num }}{% else %}Пересечений с релизом нет{% endif %}
+        </h2>
+        <span style="margin-left:auto"></span>
+        {{ download_menu('/projects/' ~ project.id ~ '/diff/update/export?release=' ~ (result.release_project|urlencode) ~ '&format=csv',
+                         '/projects/' ~ project.id ~ '/diff/update/export?release=' ~ (result.release_project|urlencode) ~ '&format=md',
+                         'Пересечения с колонками «Решение» и «Ответственный»', 'Чек-лист пересечений') }}
     </div>
-    <p class="text-muted" style="font-size:var(--fs-sm)">
-        Обе стороны сравниваются с базой «{{ result.base_project }}» ({{ result.base_version }}).
-        Релиз {{ result.release_version }} изменил модулей {{ t.modules_changed|num }} (новых
-        {{ t.modules_added|num }}, удалено {{ t.modules_removed|num }}); процедур изменено
-        {{ t.procedures_changed|num }}, добавлено {{ t.procedures_added|num }}, удалено
-        {{ t.procedures_removed|num }}; новых объектов {{ t.objects_added|num }}. Ниже — только места,
-        которые тронуты и вами, и релизом: остальное при обновлении сливается само.
-    </p>
-    <div class="stats-grid">
-        {% for kind, title in kinds.items() %}
-        <div class="stat-card">
-            <div class="stat-value">{{ (groups.get(kind) or [])|length|num }}</div>
-            <div class="stat-label">{{ title[:1]|upper }}{{ title[1:] }}</div>
+    <p class="text-muted" style="font-size:var(--fs-sm)">Только места, которые тронуты и вами, и релизом;
+        остальное при обновлении сливается само.</p>
+
+    {% if total %}
+    <ul class="conflict-cats">
+        {% for sev, sev_title, sev_kinds in severity %}
+        {% for kind in sev_kinds if (groups.get(kind) or [])|length %}
+        {% set n = groups[kind]|length %}
+        <li>
+            <a href="#{{ kind }}" class="conflict-cat" data-kind="{{ kind }}">
+                <span class="conflict-sev conflict-sev-{{ sev }}">{{ sev_title }}</span>
+                <span class="conflict-title">{{ kinds[kind][:1]|upper }}{{ kinds[kind][1:] }}</span>
+                <span class="kind-bar"><span style="width:{{ (n / ns.max * 100)|round(1) }}%"></span></span>
+                <span class="num">{{ n|num }}</span>
+            </a>
+        </li>
+        {% endfor %}
+        {% endfor %}
+    </ul>
+    {% set zero = kinds|reject('in', groups)|list %}
+    {% if zero %}
+    <p class="text-muted" style="font-size:var(--fs-sm)">Нет пересечений: {% for kind in zero %}{{ kinds[kind] }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
+    {% endif %}
+    {% endif %}
+
+    <details class="disclosure">
+        <summary>Все цифры</summary>
+        <div class="disclosure-body text-muted" style="font-size:var(--fs-sm)">
+            Обе стороны сравниваются с типовой «{{ result.base_project }}» ({{ result.base_version }}).
+            Релиз {{ result.release_version }} изменил модулей {{ t.modules_changed|num }} (новых
+            {{ t.modules_added|num }}, удалено {{ t.modules_removed|num }}); процедур изменено
+            {{ t.procedures_changed|num }}, добавлено {{ t.procedures_added|num }}, удалено
+            {{ t.procedures_removed|num }}; новых объектов {{ t.objects_added|num }}.
         </div>
-        {% endfor %}
-    </div>
+    </details>
 </div>
 
-{% if not result.items %}
-<div class="card"><p class="text-muted">Доработки проекта не пересекаются с изменениями релиза.</p></div>
-{% endif %}
-
-{% for kind, title in kinds.items() if groups.get(kind) %}
+{% if total %}
 <div class="card">
-    <h3 class="section-title">{{ title[:1]|upper }}{{ title[1:] }} ({{ groups[kind]|length }})</h3>
-    <table class="detail-table">
-        {% for c in groups[kind] %}
-        <tr>
-            <td>
-                {% if c.procedure %}
-                <a class="mono" href="/projects/{{ project.id }}/diff/conflict?release={{ result.release_project|urlencode }}&module={{ c.module|urlencode }}&name={{ c.procedure|urlencode }}">{{ c.target }}</a>
-                {% else %}
-                <span class="mono">{{ c.target }}</span>
-                {% endif %}
-            </td>
-            <td class="text-muted">{{ c.note }}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <input type="search" id="conflict-filter" class="diff-filter" placeholder="Фильтр по имени" aria-label="Фильтр по имени" style="width:100%;max-width:360px;margin-bottom:var(--space-3)">
+    {% for sev, sev_title, sev_kinds in severity %}
+    {% for kind in sev_kinds if groups.get(kind) %}
+    <details class="conflict-section" id="{{ kind }}" open>
+        <summary>
+            <span class="conflict-sev conflict-sev-{{ sev }}">{{ sev_title }}</span>
+            <b>{{ kinds[kind][:1]|upper }}{{ kinds[kind][1:] }}</b>
+            <span class="text-muted">· {{ groups[kind]|length|num }}</span>
+        </summary>
+        <ul class="results">
+            {% for c in groups[kind] %}
+            <li class="result conflict-row" data-name="{{ (c.target ~ ' ' ~ c.object_name)|lower }}">
+                <div class="result-line">
+                    {% if c.procedure %}
+                    <a class="result-name" href="/projects/{{ project.id }}/diff/conflict?release={{ result.release_project|urlencode }}&module={{ c.module|urlencode }}&name={{ c.procedure|urlencode }}">{{ c.target }}</a>
+                    {% else %}
+                    <span class="result-name">{{ c.target }}</span>
+                    {% endif %}
+                </div>
+                {% if c.note %}<div class="result-place">{{ c.note }}</div>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </details>
+    {% endfor %}
+    {% endfor %}
+    <p class="text-muted" id="conflict-empty" hidden>Под фильтр ничего не попало.</p>
 </div>
-{% endfor %}
+<script>
+(function () {
+    const input = document.getElementById('conflict-filter');
+    const rows = document.querySelectorAll('.conflict-row');
+    const empty = document.getElementById('conflict-empty');
+    input.addEventListener('input', function () {
+        const q = input.value.trim().toLowerCase();
+        let shown = 0;
+        rows.forEach(function (r) { const ok = !q || r.dataset.name.includes(q); r.hidden = !ok; if (ok) shown++; });
+        document.querySelectorAll('.conflict-section').forEach(function (sec) {
+            sec.hidden = !sec.querySelector('.conflict-row:not([hidden])');
+        });
+        empty.hidden = shown > 0;
+    });
+})();
+</script>
+{% endif %}
 {% endif %}
 
+{{ diff_help() }}
 {% endblock %}

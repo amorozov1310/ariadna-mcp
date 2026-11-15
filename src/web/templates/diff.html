@@ -59,7 +59,7 @@
 </div>
 <details class="disclosure diff-all-numbers">
     <summary>Все цифры</summary>
-    <table class="detail-table disclosure-body">
+    <div class="disclosure-body table-scroll"><table class="detail-table">
         <tbody>
         <tr><td>Изменено типовых модулей</td><td class="num">{{ totals.modules_changed|num }} из {{ diff.modules_total|num }}</td></tr>
         <tr><td>Новых модулей / удалено модулей</td><td class="num">{{ totals.modules_added|num }} / {{ totals.modules_removed|num }}</td></tr>
@@ -68,7 +68,7 @@
         <tr><td>Реквизиты типовых: удалено / тип изменён</td><td class="num">{{ totals.attributes_removed|num }} / {{ totals.attributes_retyped|num }}</td></tr>
         <tr><td>Форм добавлено</td><td class="num">{{ totals.forms_added|num }}</td></tr>
         </tbody>
-    </table>
+    </table></div>
 </details>
 
 <div class="card">
@@ -109,14 +109,14 @@
                 <p>Синоним: «{{ o.synonym_was }}» → «{{ o.synonym }}»</p>
                 {% endif %}
                 {% if o.attrs_added or o.attrs_removed or o.attrs_retyped %}
-                <table class="detail-table">
+                <div class="table-scroll"><table class="detail-table">
                     <thead><tr><th scope="col">Реквизит</th><th scope="col">Тип</th><th scope="col">Изменение</th></tr></thead>
                     <tbody>
                     {% for n, t in o.attrs_added %}<tr><td class="mono">{{ n }}</td><td>{{ t }}</td><td>добавлен</td></tr>{% endfor %}
                     {% for n, t in o.attrs_removed %}<tr><td class="mono">{{ n }}</td><td>{{ t }}</td><td class="diff-warn">удалён</td></tr>{% endfor %}
                     {% for n, was, now in o.attrs_retyped %}<tr><td class="mono">{{ n }}</td><td>{{ was or '—' }} → {{ now or '—' }}</td><td class="diff-warn">тип изменён</td></tr>{% endfor %}
                     </tbody>
-                </table>
+                </table></div>
                 {% endif %}
                 {% if o.forms_added %}<p>Формы добавлены: {{ o.forms_added|join(', ') }}</p>{% endif %}
                 {% if o.forms_removed %}<p class="diff-warn">Формы удалены: {{ o.forms_removed|join(', ') }}</p>{% endif %}

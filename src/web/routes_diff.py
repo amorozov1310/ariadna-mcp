@@ -83,6 +83,7 @@ async def procedure_diff_page(request: Request, project_id: str, module: str, na
         result = {'status': 'error', 'error': str(e), 'name': f"{module}.{name}", 'diff': ''}
     return templates.TemplateResponse(name="diff_procedure.html", request=request, context={
         "project": project, "result": result, "lines": _diff_lines(result), "module": module,
+        "proc_name": name,
     })
 
 
@@ -199,6 +200,7 @@ async def conflict_page(request: Request, project_id: str, release: str, module:
         raise HTTPException(400, str(e))
     return templates.TemplateResponse(name="diff_conflict.html", request=request, context={
         "project": project, "release": release, "name": ours['name'], "intercepts": intercepts,
+        "module": module, "proc_name": name,
         "sides": [(f"Ваша правка: {base_id} → {project_id}", ours, _diff_lines(ours), project_id),
                   (f"Изменение релиза: {base_id} → {release}", theirs, _diff_lines(theirs), release)],
     })

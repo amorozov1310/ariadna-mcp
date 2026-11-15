@@ -9,9 +9,18 @@
     <span class="mono">{{ result.name }}</span>
 </div>
 
+<div class="page-header">
+    <h1 class="page-title mono proc-title">{{ result.name }}</h1>
+    {% if result.status not in ('removed', 'error', 'missing') %}
+    <div class="btn-row">
+        <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/procedure?module={{ module|urlencode }}&name={{ proc_name|urlencode }}">Открыть процедуру</a>
+        <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/procedure?module={{ module|urlencode }}&name={{ proc_name|urlencode }}&tab=callers">Кто вызывает</a>
+    </div>
+    {% endif %}
+</div>
 <div class="card">
     <div class="card-header">
-        <h2 class="mono" style="font-size:var(--fs-md)">{{ result.name }}</h2>
+        <span class="text-muted">Сравнение с типовой «{{ result.base_project }}»</span>
         {{ status_badge(result) }}
     </div>
     {{ diff_body(result, lines, result.base_project, project.id) }}

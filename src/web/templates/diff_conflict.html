@@ -10,6 +10,13 @@
     <span class="mono">{{ name }}</span>
 </div>
 
+<div class="page-header">
+    <h1 class="page-title mono proc-title">{{ name }}</h1>
+    <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/procedure?module={{ module|urlencode }}&name={{ proc_name|urlencode }}">Открыть процедуру в проекте</a>
+</div>
+
+{# Две правки рядом: ваша и релиза — на широком экране колонками. #}
+<div class="conflict-sides">
 {% for title, result, lines, current in sides %}
 <div class="card">
     <div class="card-header">
@@ -19,6 +26,7 @@
     {{ diff_body(result, lines, result.base_project, current) }}
 </div>
 {% endfor %}
+</div>
 
 {% for x in intercepts %}
 <div class="card">

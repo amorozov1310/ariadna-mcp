@@ -875,3 +875,18 @@ main .appsearch-field { height: var(--control-h-lg); }
 .diff-item > summary:hover { background: var(--bg); }
 .diff-warn { color: var(--danger); font-weight: 600; }
 @media (max-width: 720px) { .diff-grid { grid-template-columns: minmax(0, 1fr) repeat(4, 3.5em); font-size: var(--fs-sm); } }
+
+/* «Обновление на новый релиз»: категории по тяжести, секции, две колонки правок. */
+.conflict-cats { list-style: none; margin: var(--space-3) 0; padding: 0; display: grid; gap: 2px; }
+.conflict-cat { display: grid; grid-template-columns: 11em minmax(0, 1fr) minmax(80px, 30%) 4em; align-items: center; gap: var(--space-3); padding: 6px var(--space-2); border-radius: var(--radius-sm); color: var(--text); }
+.conflict-cat:hover { background: var(--bg); text-decoration: none; }
+.conflict-cat .num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.conflict-sev { font-size: var(--fs-sm); font-weight: 600; }
+.conflict-sev-must { color: var(--danger); }
+.conflict-sev-merge { color: var(--warning); }
+.conflict-sev-info { color: var(--text2); }
+.conflict-section { margin-bottom: var(--space-3); }
+.conflict-section > summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+.conflict-sides { display: grid; gap: var(--space-4); }
+@media (min-width: 1100px) { .conflict-sides { grid-template-columns: 1fr 1fr; } .conflict-sides .card { min-width: 0; } }
+@media (max-width: 720px) { .conflict-cat { grid-template-columns: minmax(0, 1fr) 4em; } .conflict-cat .conflict-sev, .conflict-cat .kind-bar { display: none; } }

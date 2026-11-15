@@ -531,3 +531,36 @@ def test_no_diff_while_a_project_is_indexing(pm):
     pm._warm_related('custom')
     pm._warming['custom'].join(10)
     assert pm.warm_diffs('custom') is True
+
+
+def test_diff_pages_layout(release_pm):
+    """Шаг 10 плана UI: строка сравнения вместо схемы, таблица объектов без
+    бейджей, категории обновления по тяжести, две колонки на пересечении."""
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    previous = app_module._pm
+    app_module.set_pm(release_pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        release_pm.set_comparison('custom', 'typical', 'release')
+        release_pm.get_base_diff('custom')
+        release_pm.get_update_conflicts('custom')
+        page = client.get('/projects/custom/diff').text
+        main = page[page.index('<main'):page.index('</main>')]
+        assert 'diff-compare-line' in main and 'diff-chip' not in main
+        assert 'class="diff-grid diff-grid-head"' in main and 'data-sort="procs"' in main
+        assert main.count('class="badge') == 0                     # числа в колонках, не бейджи
+        assert 'Таблица для Excel (CSV)' in main and 'Все цифры' in main
+        update = client.get('/projects/custom/diff/update').text
+        assert 'conflict-cat' in update and 'Слить вручную' in update
+        assert 'id="conflict-filter"' in update and 'Нет пересечений:' in update
+        conflict = client.get('/projects/custom/diff/conflict', params={
+            'release': 'release', 'module': 'ОбщийМодуль.ЦеныСервер.Модуль', 'name': 'РассчитатьЦену'}).text
+        assert 'class="conflict-sides"' in conflict and 'Открыть процедуру в проекте' in conflict
+        proc = client.get('/projects/custom/diff/procedure', params={
+            'module': 'ОбщийМодуль.ЦеныСервер.Модуль', 'name': 'РассчитатьЦену'}).text
+        assert '&tab=callers' in proc
+        # Без типовой — мастер из двух шагов.
+        assert 'Создайте проект с типовой того же релиза' in client.get('/projects/typical/diff').text
+    finally:
+        app_module.set_pm(previous)

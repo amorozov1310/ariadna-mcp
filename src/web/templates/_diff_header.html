@@ -80,8 +80,8 @@
 <details class="menu">
     <summary class="menu-button">Скачать <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#chevron-down"/></svg></summary>
     <div class="menu-list menu-list-right">
-        <a class="menu-item" href="{{ csv_url }}" title="{{ csv_hint }}">Таблица для Excel (CSV)</a>
-        <a class="menu-item" href="{{ md_url }}" title="{{ md_hint }}">Отчёт Markdown</a>
+        <a class="menu-item" href="{{ csv_url|safe }}" title="{{ csv_hint }}">Таблица для Excel (CSV)</a>
+        <a class="menu-item" href="{{ md_url|safe }}" title="{{ md_hint }}">Отчёт Markdown</a>
     </div>
 </details>
 {% endmacro %}
@@ -122,7 +122,7 @@
             <div class="diff-pending-title">Идёт сравнение… <span class="text-muted" id="diff-elapsed"></span></div>
             <div class="text-muted" style="font-size:var(--fs-sm)">
                 Индексы крупных конфигураций читаются с диска; когда расчёт закончится, страница
-                обновится сама. Её можно закрыть — результат сохранится до следующего изменения.
+                обновится сама.
             </div>
         </div>
     </div>
