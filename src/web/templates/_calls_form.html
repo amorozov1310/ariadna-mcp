@@ -1,0 +1,108 @@
+{# «Вызовы»: одна форма и переключатель вида «Дерево / Схема» для обеих
+   страниц (/calltree — дерево, /graph — схема). Параметры при смене вида
+   сохраняются. #}
+
+{% macro params(procedure, module, direction, depth, source_id) -%}
+procedure={{ procedure|urlencode }}{% if module %}&module={{ module|urlencode }}{% endif %}&direction={{ direction }}&depth={{ depth }}{% if source_id %}&source_id={{ source_id|urlencode }}{% endif %}
+{%- endmacro %}
+
+{% macro calls_header(project, view, procedure, module, direction, depth, source_id, sources) %}
+{% set q = params(procedure, module, direction, depth, source_id) %}
+<div class="page-header">
+    <h1 class="page-title">Вызовы</h1>
+    <nav class="segmented" aria-label="Вид">
+        <a href="/projects/{{ project.id }}/calltree{% if procedure %}?{{ q }}{% endif %}" {% if view == 'tree' %}aria-current="page"{% endif %}>Дерево</a>
+        <a href="/projects/{{ project.id }}/graph{% if procedure %}?{{ q }}{% endif %}" {% if view == 'graph' %}aria-current="page"{% endif %}>Схема</a>
+    </nav>
+</div>
+
+<div class="card">
+    <form method="get" action="/projects/{{ project.id }}/{{ 'graph' if view == 'graph' else 'calltree' }}" class="calls-form">
+        <div class="calls-row">
+            <label class="calls-proc">
+                <span>Процедура</span>
+                <input name="procedure" value="{{ procedure }}" required autocomplete="off"
+                       list="proc-suggest" placeholder="напр. ОбработкаПроведения" id="calls-procedure">
+                <datalist id="proc-suggest"></datalist>
+            </label>
+            <fieldset class="segmented-radio">
+                <legend class="visually-hidden">Направление</legend>
+                <label><input type="radio" name="direction" value="up" {% if direction == 'up' %}checked{% endif %}> Кто вызывает</label>
+                <label><input type="radio" name="direction" value="down" {% if direction != 'up' %}checked{% endif %}> Что вызывает</label>
+            </fieldset>
+            <label class="calls-depth">
+                <span>Глубина</span>
+                <select name="depth">
+                    {% for d in range(1, 11) %}<option value="{{ d }}" {% if d == depth %}selected{% endif %}>{{ d }}</option>{% endfor %}
+                </select>
+            </label>
+            <button type="submit" class="btn btn-primary">Показать</button>
+        </div>
+        <details class="disclosure calls-more" {% if module or source_id %}open{% endif %}>
+            <summary>Уточнить: модуль{% if sources and sources|length > 1 %}, часть проекта{% endif %}</summary>
+            <div class="disclosure-body calls-row">
+                <label class="calls-proc">
+                    <span>Модуль</span>
+                    <input name="module" value="{{ module }}" id="calls-module" placeholder="нужен, если имя есть в нескольких модулях">
+                </label>
+                {% if sources and sources|length > 1 %}
+                <label>
+                    <span>Часть проекта</span>
+                    <select name="source_id">
+                        <option value="">Весь проект</option>
+                        {% for s in sources %}<option value="{{ s.id }}" {% if source_id == s.id %}selected{% endif %}>{{ s.label }}{% if s.source_type == 'extension' %} — расширение{% endif %}</option>{% endfor %}
+                    </select>
+                </label>
+                {% endif %}
+            </div>
+        </details>
+    </form>
+</div>
+<script>
+// Подсказка имени процедуры: «Имя — Модуль»; выбор подставляет и модуль.
+(function () {
+    const input = document.getElementById('calls-procedure');
+    const moduleInput = document.getElementById('calls-module');
+    const list = document.getElementById('proc-suggest');
+    let timer = null, last = '', found = [];
+    input.addEventListener('input', function () {
+        const pick = found.find(function (f) { return input.value === f.name + ' — ' + f.module; });
+        if (pick) { input.value = pick.name; moduleInput.value = pick.module; return; }
+        clearTimeout(timer);
+        timer = setTimeout(async function () {
+            const q = input.value.trim();
+            if (q.length < 2 || q === last) return;
+            last = q;
+            try {
+                const r = await fetch('/api/projects/{{ project.id|urlencode }}/procedures/suggest?q=' + encodeURIComponent(q));
+                found = await r.json();
+                list.innerHTML = '';
+                found.forEach(function (f) {
+                    const o = document.createElement('option');
+                    o.value = f.name + ' — ' + f.module;
+                    list.appendChild(o);
+                });
+            } catch (e) { /* без подсказки форма всё равно работает */ }
+        }, 200);
+    });
+})();
+</script>
+{% endmacro %}
+
+{# Одноимённые процедуры в разных модулях — выбрать нужную. #}
+{% macro choices_list(project, view, choices, direction, depth, many_parts) %}
+<div class="card">
+    <h2 class="results-title">Процедур с таким именем несколько — выберите нужную</h2>
+    <ul class="results">
+        {% for c in choices %}
+        <li class="result">
+            <div class="result-line">
+                <a class="result-name" href="/projects/{{ project.id }}/{{ 'graph' if view == 'graph' else 'calltree' }}?{{ params(c.name, c.module_name, direction, depth, c.source_id if many_parts else '') }}">{{ c.module_name }}</a>
+                {% if many_parts and c.source_type == 'extension' %}<span class="badge badge-accent">расширение «{{ c.source_label }}»</span>{% endif %}
+            </div>
+            <div class="result-place">{{ c.name }}() · стр. {{ c.start_line }}</div>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endmacro %}

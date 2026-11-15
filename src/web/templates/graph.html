@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_calls_form.html" import calls_header, choices_list with context %}
 {% block title %}Вызовы — {{ project.name }}{% endblock %}
 
 {% block active_nav %}graph{% endblock %}
@@ -8,99 +9,27 @@
 <script src="/static/vendor/vis-network/vis-network.min.js?v={{ asset_v }}"></script>
 <link rel="stylesheet" href="/static/vendor/vis-network/vis-network.min.css?v={{ asset_v }}">
 
-{# Этап U0/U6: один раздел «Граф», переключатель текст/визуал внутри. #}
-<h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
-    Вызовы
-</h1>
-<div class="view-switch">
-    <span class="view-tab active">Схема</span>
-    <a class="view-tab" href="/projects/{{ project.id }}/calltree{% if procedure %}?procedure={{ procedure }}&module={{ module }}&direction={{ direction }}&depth={{ depth }}{% if source_id %}&source_id={{ source_id }}{% endif %}{% endif %}">Дерево</a>
+{% set many_parts = sources and sources|length > 1 %}
+{% if object %}
+<div class="page-header">
+    <h1 class="page-title">Ссылки на объект</h1>
+    <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/object/{{ object }}?tab=refs">Списком в карточке объекта</a>
 </div>
+<p class="text-muted">Стрелка A → B: у объекта A есть реквизит со ссылкой на B.</p>
+{% else %}
+{{ calls_header(project, view, procedure, module, direction, depth, source_id, sources) }}
+{% endif %}
 
-<div class="card">
-    <div class="graph-tabs">
-        <button class="graph-tab active" id="tab-calltree" onclick="switchTab('calltree')">Вызовы процедуры</button>
-        <button class="graph-tab" id="tab-references" onclick="switchTab('references')">Ссылки на объект</button>
-    </div>
-
-    <!-- Call tree form -->
-    <div id="form-calltree" class="graph-form">
-        <div class="form-row">
-            <div class="form-group" style="flex:2">
-                <label>Имя процедуры</label>
-                <input id="ct-procedure" placeholder="напр. ОбработкаПроведения" value="{{ procedure }}">
-                <div class="form-hint">Точное имя процедуры или функции, без скобок.</div>
-            </div>
-            <div class="form-group" style="flex:2">
-                <label>Модуль — необязательно</label>
-                <input id="ct-module" placeholder="напр. ОбщегоНазначения" value="{{ module }}">
-                <div class="form-hint">Нужен, только если имя встречается в нескольких модулях.</div>
-            </div>
-            <div class="form-group" style="flex:1">
-                <label>Направление</label>
-                <select id="ct-direction">
-                    <option value="down" {% if direction != 'up' %}selected{% endif %}>Что вызывает</option>
-                    <option value="up" {% if direction == 'up' %}selected{% endif %}>Кто вызывает</option>
-                </select>
-                <div class="form-hint">«Что вызывает» — что делает процедура, «Кто вызывает» — кто на неё завязан.</div>
-            </div>
-            <div class="form-group" style="flex:0.5">
-                <label>Глубина</label>
-                <input type="number" id="ct-depth" value="{{ depth or 3 }}" min="1" max="10">
-                <div class="form-hint">Уровней вызовов, 1–10.</div>
-            </div>
-            {% if sources and sources|length > 1 %}
-            <div class="form-group" style="flex:1">
-                <label>Источник</label>
-                <select id="ct-source">
-                    <option value="">Все</option>
-                    {% for s in sources %}
-                    <option value="{{ s.id }}" {% if source_id == s.id %}selected{% endif %}>
-                        {{ s.label }}{% if s.source_type == 'extension' %} — расширение{% endif %}
-                    </option>
-                    {% endfor %}
-                </select>
-            </div>
-            {% endif %}
-        </div>
-        <div style="margin-top:8px">
-            <button class="btn btn-primary" onclick="loadCalltreeGraph()">Построить граф</button>
-        </div>
-    </div>
-
-    <!-- References form -->
-    <div id="form-references" class="graph-form" style="display:none">
-        <div class="form-row">
-            <div class="form-group" style="flex:3">
-                <label>Имя объекта конфигурации</label>
-                <input id="ref-object" placeholder="напр. Справочник.Номенклатура">
-                <div class="form-hint">Можно и короткое имя — «Контрагенты».</div>
-            </div>
-            <div class="form-group" style="flex:0.5">
-                <label>Глубина</label>
-                <input type="number" id="ref-depth" value="1" min="1" max="3">
-                <div class="form-hint">Уровней связей, 1–3.</div>
-            </div>
-            {% if sources and sources|length > 1 %}
-            <div class="form-group" style="flex:1">
-                <label>Источник</label>
-                <select id="ref-source">
-                    <option value="">Все</option>
-                    {% for s in sources %}
-                    <option value="{{ s.id }}">{{ s.label }}{% if s.source_type == 'extension' %} — расширение{% endif %}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            {% endif %}
-        </div>
-        <div style="margin-top:8px">
-            <button class="btn btn-primary" onclick="loadReferencesGraph()">Построить граф</button>
-            <span class="text-muted" style="margin-left:12px;font-size:12px">Стрелка: A → B значит «A ссылается на B через реквизит»</span>
-        </div>
-    </div>
+{% if error %}
+<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-3)">
+    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>{{ error }} <a href="/projects/{{ project.id }}/search?mode=procedures&q={{ procedure|urlencode }}">Найти в поиске</a></div>
 </div>
+{% elif choices %}
+{{ choices_list(project, view, choices, direction, depth, many_parts) }}
+{% endif %}
 
+{% if not error and not choices %}
 <div class="card">
     <div class="flex-between mb-8">
         <div>
@@ -108,13 +37,12 @@
             <div id="graph-stats" class="text-muted" style="font-size:12px"></div>
         </div>
         <div>
-            <button class="btn btn-secondary btn-sm" onclick="fitGraph()">По размеру</button>
-            <button class="btn btn-secondary btn-sm" onclick="togglePhysics()">Физика: <span id="physics-state">вкл</span></button>
-            <label class="text-muted" style="font-size:12px;margin-left:8px">
-                Раскладка:
-                <select id="layout-select" onchange="setLayout(this.value)" style="padding:4px 6px">
-                    <option value="hierarchical">Иерархия</option>
-                    <option value="physics">Сила</option>
+            <button class="btn btn-secondary btn-sm" onclick="fitGraph()">Вписать в окно</button>
+            <label class="text-muted" style="font-size:var(--fs-sm);margin-left:8px">
+                Вид:
+                <select id="layout-select" onchange="setLayout(this.value)">
+                    <option value="hierarchical">Дерево</option>
+                    <option value="physics">Свободно</option>
                 </select>
             </label>
         </div>
@@ -128,29 +56,20 @@
     <div id="legend" style="display:none;margin-bottom:8px;padding:8px;background:var(--bg2);border-radius:4px;font-size:12px"></div>
 
     <div id="graph-wrap" style="position:relative">
-        <div id="graph-container" style="width:100%;height:650px;border:1px solid var(--border);border-radius:6px;background:var(--bg-inset);position:relative"></div>
+        <div id="graph-container" style="width:100%;height:min(70vh, 720px);border:1px solid var(--border);border-radius:6px;background:var(--bg-inset);position:relative"></div>
         <div id="graph-empty" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);text-align:center;pointer-events:none">
             <svg class="icon" style="width:40px;height:40px;opacity:.3;margin-bottom:var(--space-2)"><use href="/static/icons.svg?v={{ asset_v }}#graph"/></svg>
-            <div>Введите параметры и нажмите «Построить граф»</div>
+            <div>Укажите процедуру и нажмите «Показать»</div>
         </div>
         <div id="graph-loader" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text2);pointer-events:none">
-            Загрузка...
+            Строю схему…
         </div>
     </div>
 </div>
 
+{% endif %}
+
 <style>
-.view-switch { display:flex; gap:0; margin-bottom:var(--space-4); border-bottom:2px solid var(--border); }
-.view-tab { padding:8px var(--space-4); font-size:var(--fs-base); font-weight:500; color:var(--text2);
-            border-bottom:2px solid transparent; margin-bottom:-2px; }
-.view-tab:hover { color:var(--text); text-decoration:none; }
-.view-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
-.graph-tabs { display:flex; gap:0; margin-bottom:var(--space-3); border-bottom:2px solid var(--border); }
-.graph-tab { background:none; border:none; padding:8px var(--space-4); font-size:var(--fs-base); font-weight:500;
-             color:var(--text2); cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px;
-             font-family:var(--font); }
-.graph-tab:hover { color:var(--text); }
-.graph-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
 .legend-item { display:inline-flex; align-items:center; gap:6px; margin-right:14px; }
 .legend-swatch { width:14px; height:14px; border-radius:3px; display:inline-block; }
 </style>
@@ -176,15 +95,8 @@ function themeColors() {
         highlight: v('--accent-2-soft', '#fdf3e3'),
     };
 }
-let physicsEnabled = true;
+let physicsEnabled = true;     // для вида «Свободно»; «Дерево» — без физики
 let currentData = null;
-
-function switchTab(tab) {
-    document.querySelectorAll('.graph-tab').forEach(t => t.classList.remove('active'));
-    document.getElementById('tab-' + tab).classList.add('active');
-    document.getElementById('form-calltree').style.display = tab === 'calltree' ? 'block' : 'none';
-    document.getElementById('form-references').style.display = tab === 'references' ? 'block' : 'none';
-}
 
 // Ошибка — сообщением над графом, а не окном браузера.
 function showGraphError(text) {
@@ -198,62 +110,35 @@ function showLoader(show) {
     document.getElementById('graph-loader').style.display = show ? 'block' : 'none';
 }
 
-async function loadCalltreeGraph() {
-    const params = new URLSearchParams({
-        procedure: document.getElementById('ct-procedure').value,
-        module: document.getElementById('ct-module').value,
-        direction: document.getElementById('ct-direction').value,
-        depth: document.getElementById('ct-depth').value,
-        _: Date.now(),  // cache-buster
-    });
-    const src = document.getElementById('ct-source');
-    if (src && src.value) params.append('source_id', src.value);
+const CALLS = {{ {'procedure': procedure, 'module': module, 'direction': direction,
+                 'depth': depth, 'source_id': source_id, 'object': object}|tojson }};
 
-    if (!params.get('procedure')) {
-        showGraphError('Укажите имя процедуры');
-        return;
-    }
-
+async function loadGraph(url, title) {
     showGraphError('');
     showLoader(true);
     try {
-        const resp = await fetch(`/api/projects/${PROJECT_ID}/graph/calltree?${params}`,
-                                 { cache: 'no-store' });
+        const resp = await fetch(url, { cache: 'no-store' });
         const data = await resp.json();
         if (data.error) { showGraphError(data.error); showLoader(false); return; }
-        renderGraph(data, `${data.direction === 'up' ? 'Кто вызывает' : 'Что вызывает'} ${data.root_procedure}`);
+        renderGraph(data, title(data));
     } catch (e) {
-        showGraphError('Не удалось построить граф: ' + e);
+        showGraphError('Не удалось построить схему: ' + e);
     }
     showLoader(false);
 }
 
-async function loadReferencesGraph() {
-    const params = new URLSearchParams({
-        object_name: document.getElementById('ref-object').value,
-        depth: document.getElementById('ref-depth').value,
-        _: Date.now(),  // cache-buster
-    });
-    const src = document.getElementById('ref-source');
-    if (src && src.value) params.append('source_id', src.value);
+function loadCalltreeGraph() {
+    const params = new URLSearchParams({procedure: CALLS.procedure, module: CALLS.module,
+        direction: CALLS.direction, depth: CALLS.depth, _: Date.now()});
+    if (CALLS.source_id) params.append('source_id', CALLS.source_id);
+    return loadGraph(`/api/projects/${PROJECT_ID}/graph/calltree?${params}`,
+        d => `${d.direction === 'up' ? 'Кто вызывает' : 'Что вызывает'} ${d.root_procedure}`);
+}
 
-    if (!params.get('object_name')) {
-        showGraphError('Укажите имя объекта');
-        return;
-    }
-
-    showGraphError('');
-    showLoader(true);
-    try {
-        const resp = await fetch(`/api/projects/${PROJECT_ID}/graph/references?${params}`,
-                                 { cache: 'no-store' });
-        const data = await resp.json();
-        if (data.error) { showGraphError(data.error); showLoader(false); return; }
-        renderGraph(data, `Ссылки на ${data.root_object}`);
-    } catch (e) {
-        showGraphError('Не удалось построить граф: ' + e);
-    }
-    showLoader(false);
+function loadReferencesGraph() {
+    const params = new URLSearchParams({object_name: CALLS.object, depth: 1, _: Date.now()});
+    return loadGraph(`/api/projects/${PROJECT_ID}/graph/references?${params}`,
+        d => `Ссылки на ${d.root_object}`);
 }
 
 function renderGraph(data, title) {
@@ -390,19 +275,16 @@ new MutationObserver(() => {
 
 function fitGraph() { if (network) network.fit({ animation: true }); }
 
-function togglePhysics() {
-    physicsEnabled = !physicsEnabled;
-    document.getElementById('physics-state').textContent = physicsEnabled ? 'вкл' : 'выкл';
-    if (network) network.setOptions({ physics: { enabled: physicsEnabled } });
-}
-
 function setLayout(value) {
     if (currentData) renderGraph(currentData, document.getElementById('graph-title').textContent);
 }
 
-// Auto-load if procedure was passed in URL
-{% if procedure %}
-window.addEventListener('load', () => loadCalltreeGraph());
+// Схема строится сразу по параметрам страницы.
+{% if object %}
+window.addEventListener('load', loadReferencesGraph);
+{% elif procedure and not error and not choices %}
+window.addEventListener('load', loadCalltreeGraph);
 {% endif %}
+// На узком экране по умолчанию — вид «Дерево» (страница списком).
 </script>
 {% endblock %}
