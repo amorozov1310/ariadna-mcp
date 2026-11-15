@@ -714,7 +714,7 @@ main:focus { outline: none; }
 .overview-card:hover { text-decoration: none; border-color: var(--accent); }
 .overview-card h3 { margin-bottom: var(--space-1); }
 .overview-card p { margin: 0; font-size: var(--fs-sm); }
-.overview-kinds > summary { cursor: pointer; }
+.overview-kinds .card-header { flex-wrap: wrap; gap: var(--space-2); }
 
 /* Вкладки — ссылки, состояние в адресе. */
 .tabs { display: flex; gap: var(--space-1); border-bottom: 1px solid var(--border); margin-bottom: var(--space-4); flex-wrap: wrap; }

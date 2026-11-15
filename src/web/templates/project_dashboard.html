@@ -101,15 +101,26 @@
     <span class="kind-share">{{ k.share_str }}</span>
 </a>
 {% endmacro %}
-<details class="card disclosure overview-kinds">
-    <summary>
-        Состав конфигурации по видам:
-        {% for k in kinds_breakdown[:4] %}{{ k.kind }} {{ k.count|num }}{% if not loop.last %} · {% endif %}{% endfor %}{% if kinds_breakdown|length > 4 %} · …{% endif %}
-    </summary>
-    <div class="kinds disclosure-body">
-        {% for k in kinds_breakdown %}{{ kind_row(k) }}{% endfor %}
+<section class="card overview-kinds" aria-labelledby="kinds-title">
+    <div class="card-header">
+        <h2 class="section-title" id="kinds-title">Состав конфигурации</h2>
+        <span class="text-muted" style="font-size:var(--fs-sm)">
+            {{ stats.objects|plural('объект', 'объекта', 'объектов') }} ·
+            {{ kinds_breakdown|length|plural('вид', 'вида', 'видов') }} · щелчок по строке — список объектов вида
+        </span>
     </div>
-</details>
+    <div class="kinds">
+        {% for k in kinds_breakdown[:6] %}{{ kind_row(k) }}{% endfor %}
+    </div>
+    {% if kinds_breakdown|length > 6 %}
+    <details class="disclosure" style="margin-top:var(--space-2)">
+        <summary>Ещё {{ (kinds_breakdown|length - 6)|plural('вид', 'вида', 'видов') }}</summary>
+        <div class="kinds disclosure-body">
+            {% for k in kinds_breakdown[6:] %}{{ kind_row(k) }}{% endfor %}
+        </div>
+    </details>
+    {% endif %}
+</section>
 {% endif %}
 
 {% if can_admin %}
