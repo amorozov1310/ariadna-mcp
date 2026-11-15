@@ -18,17 +18,32 @@ async def checks_page(request: Request, project_id: str, source: str = '', modul
         project = pm.get_project(project_id)
     except KeyError:
         raise HTTPException(404, f"Проект «{project_id}» не найден")
-    result, error = None, ''
+    result, error, pending = None, '', False
     if project.status == 'ready':
         try:
-            result = await run_in_threadpool(pm.broken_calls, project_id, source, module)
+            # Не посчитано — страница открывается сразу, проверка идёт в фоне.
+            pending = not await run_in_threadpool(pm.warm_broken_calls, project_id)
+            if not pending:
+                result = await run_in_threadpool(pm.broken_calls, project_id, source, module)
         except Exception as e:          # индекс удалён/пересоздаётся — показать, а не 500
             error = str(e)
     return templates.TemplateResponse(name="checks.html", request=request, context={
         "project": project,
         "result": result,
+        "pending": pending,
         "error": error,
         "source": source,
         "module": module,
         "sources": project.sources,
     })
+
+
+@router.get("/api/projects/{project_id}/checks/warming")
+def checks_warming(project_id: str):
+    """Опрос страницы «Проверка вызовов», пока проверка считается в фоне."""
+    pm = get_pm()
+    try:
+        pm.get_project(project_id)
+    except KeyError:
+        raise HTTPException(404)
+    return {'warming': pm.checks_warming(project_id), 'ready': pm.broken_calls_ready(project_id)}

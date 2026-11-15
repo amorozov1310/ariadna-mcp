@@ -110,8 +110,8 @@
                 <input type="checkbox" name="auto_reindex" checked> Сразу обновить индекс
             </label>
             <div class="btn-row">
-                <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
-                <a href="{{ base }}?tab=data" class="btn btn-secondary btn-sm">Отмена</a>
+                <button type="submit" class="btn btn-primary">Сохранить</button>
+                <a href="{{ base }}?tab=data" class="btn btn-secondary">Отмена</a>
             </div>
         </form>
     </div>
@@ -154,7 +154,7 @@
             <label style="display:block;margin:var(--space-2) 0">
                 <input type="checkbox" name="auto_reindex" checked> Сразу обновить индекс
             </label>
-            <button type="submit" class="btn btn-primary btn-sm">Добавить</button>
+            <button type="submit" class="btn btn-primary">Добавить</button>
         </form>
     </details>
     {% endif %}
@@ -187,7 +187,7 @@
                 <label>Код проекта</label>
                 <div class="code-copy">
                     <span class="mono" id="p-code">{{ project.id }}</span>
-                    <button type="button" class="btn btn-secondary btn-sm"
+                    <button type="button" class="btn btn-secondary"
                             onclick="navigator.clipboard.writeText(document.getElementById('p-code').textContent); this.textContent='Скопировано'">Копировать</button>
                 </div>
                 <div class="form-hint">Этим кодом проект называют в запросах агента; не меняется.</div>
@@ -197,7 +197,7 @@
             <label for="p-desc">Описание</label>
             <input id="p-desc" name="description" value="{{ project.description }}">
         </div>
-        <button type="submit" class="btn btn-primary btn-sm">Сохранить</button>
+        <button type="submit" class="btn btn-primary">Сохранить</button>
     </form>
     {% else %}
     <dl class="kv">
