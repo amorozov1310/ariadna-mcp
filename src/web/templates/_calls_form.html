@@ -12,12 +12,14 @@ procedure={{ procedure|urlencode }}{% if module %}&module={{ module|urlencode }}
     <h1 class="page-title">Вызовы</h1>
     <nav class="segmented" aria-label="Вид">
         <a href="/projects/{{ project.id }}/calltree{% if procedure %}?{{ q }}{% endif %}" {% if view == 'tree' %}aria-current="page"{% endif %}>Дерево</a>
-        <a href="/projects/{{ project.id }}/graph{% if procedure %}?{{ q }}{% endif %}" {% if view == 'graph' %}aria-current="page"{% endif %}>Схема</a>
+        <a href="/projects/{{ project.id }}/graph?view=schema{% if procedure %}&{{ q }}{% endif %}" {% if view == 'graph' %}aria-current="page"{% endif %}>Схема</a>
     </nav>
 </div>
 
 <div class="card">
     <form method="get" action="/projects/{{ project.id }}/{{ 'graph' if view == 'graph' else 'calltree' }}" class="calls-form">
+        {# Схема выбрана явно — на узком экране не переключать на дерево. #}
+        {% if view == 'graph' %}<input type="hidden" name="view" value="schema">{% endif %}
         <div class="calls-row">
             <label class="calls-proc">
                 <span>Процедура</span>

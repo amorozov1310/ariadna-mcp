@@ -92,7 +92,8 @@ def test_actions_return_to_settings(web):
 def test_general_and_danger_tabs(web):
     _, client = web
     general = _main(client.get('/projects/p1/settings?tab=general').text)
-    assert 'action="/api/projects/p1/update"' in general and 'name="base_project"' in general
+    assert 'action="/api/projects/p1/update"' in general and 'name="base_project"' not in general
+    assert general.count('type="submit"') == 1                       # одна форма на вкладке
     assert 'disabled>' not in general.split('Код проекта')[1][:200]    # код — текст, не поле
     danger = _main(client.get('/projects/p1/settings?tab=danger').text)
     assert 'action="/api/projects/p1/delete"' in danger and 'data-expect="p1"' in danger
@@ -118,7 +119,7 @@ def test_member_sees_no_changing_actions(web, monkeypatch):
     assert 'Обновить индекс' in data                              # участнику можно
     assert '/delete' not in data and 'Добавить расширение' not in data and 'edit=main' not in data
     general = _main(client.get('/projects/p1/settings?tab=general', headers=h).text)
-    assert 'action="/api/projects/p1/update"' not in general and 'name="base_project"' not in general
+    assert 'action="/api/projects/p1/update"' not in general and 'diff#comparison' not in general
     page = client.get('/projects/p1/settings?tab=danger', headers=h).text
     assert 'Опасная зона' not in page and '/api/projects/p1/delete' not in page
 

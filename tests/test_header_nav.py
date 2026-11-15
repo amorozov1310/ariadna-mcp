@@ -121,3 +121,15 @@ def test_switcher_shows_state_and_filters_long_lists(web):
         pm.create_project(f'x{i}', f'Проект {i}')
     header = _header(client.get('/projects/p1').text)
     assert 'switcher-filter' in header and header.count('class="switcher-item"') == 11
+
+
+def test_slash_hotkey_and_schema_marker(web):
+    """«/» — фокус в поиск (подсказка у поля); «Схема» выбрана явно — метка view=schema,
+    чтобы на узком экране не переключать на дерево."""
+    pm, client = web
+    page = client.get('/projects/p1').text
+    assert 'aria-keyshortcuts="/"' in page and "e.key !== '/'" in page
+    graph = client.get('/projects/p1/graph').text
+    assert "matchMedia('(max-width: 820px)')" in graph and 'prefers-reduced-motion' in graph
+    tree = client.get('/projects/p1/calltree').text
+    assert '/projects/p1/graph?view=schema' in tree

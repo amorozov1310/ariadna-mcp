@@ -43,6 +43,8 @@
             <summary>Изменить сравнение</summary>
             <div class="disclosure-body">{{ comparison_fields(candidates, next_url) }}</div>
         </details>
+        {# Пришли по ссылке «Изменить в «Доработках»» из настроек — сразу раскрыть. #}
+        <script>if (location.hash === '#comparison') document.getElementById('comparison').open = true;</script>
         {% endif %}
     </div>
     {% if scheme.versions_differ %}

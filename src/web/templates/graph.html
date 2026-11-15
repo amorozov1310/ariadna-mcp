@@ -5,6 +5,17 @@
 {% block active_nav %}graph{% endblock %}
 
 {% block content %}
+{# Узкий экран: схемой там почти не пользуются — по умолчанию дерево (H8).
+   view=schema — человек сам выбрал «Схему»; object= — схема ссылок на объект,
+   у неё дерева нет. #}
+<script>
+(function () {
+    var p = new URLSearchParams(location.search);
+    if (window.matchMedia('(max-width: 820px)').matches && !p.has('view') && !p.has('object')) {
+        location.replace('/projects/{{ project.id|urlencode }}/calltree' + location.search + location.hash);
+    }
+})();
+</script>
 {# Библиотека графа — локальная копия (static/vendor), Web UI работает без интернета. #}
 <script src="/static/vendor/vis-network/vis-network.min.js?v={{ asset_v }}"></script>
 <link rel="stylesheet" href="/static/vendor/vis-network/vis-network.min.css?v={{ asset_v }}">
@@ -91,6 +102,7 @@ function themeColors() {
         highlight: v('--accent-2-soft', '#fdf3e3'),
     };
 }
+const REDUCE_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 let physicsEnabled = true;     // для вида «Свободно»; «Дерево» — без физики
 let currentData = null;
 
@@ -248,7 +260,16 @@ function renderGraph(data, title) {
         options.physics.enabled = false;
     }
 
+    // «Уменьшить движение» в системе: раскладка считается до показа (узлы не
+    // разлетаются на глазах), после неё физика выключается; без анимации
+    // вписывания.
+    if (REDUCE_MOTION && options.physics.enabled) {
+        options.physics.stabilization = { iterations: 300, updateInterval: 1000 };
+    }
     network = new vis.Network(container, { nodes, edges }, options);
+    if (REDUCE_MOTION && options.physics.enabled) {
+        network.once('stabilizationIterationsDone', function () { network.setOptions({ physics: false }); });
+    }
 
     // Click opens object detail page where possible
     network.on('click', function(params) {
@@ -268,7 +289,7 @@ new MutationObserver(() => {
     if (currentData) renderGraph(currentData, document.getElementById('graph-title').textContent);
 }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-function fitGraph() { if (network) network.fit({ animation: true }); }
+function fitGraph() { if (network) network.fit({ animation: !REDUCE_MOTION }); }
 
 function setLayout(value) {
     if (currentData) renderGraph(currentData, document.getElementById('graph-title').textContent);
@@ -280,6 +301,5 @@ window.addEventListener('load', loadReferencesGraph);
 {% elif procedure and not error and not choices %}
 window.addEventListener('load', loadCalltreeGraph);
 {% endif %}
-// На узком экране по умолчанию — вид «Дерево» (страница списком).
 </script>
 {% endblock %}

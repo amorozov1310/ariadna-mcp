@@ -270,10 +270,12 @@ def test_web_scheme_and_comparison_form(release_pm):
         for text in ('Сравнение:', 'ДемоКонфигурация 1.2.3.4', 'Что доработано',
                      'Обновление на новый релиз', 'Как это работает'):
             assert text in page
-        # Выбор базы и релиза — у схемы, один раз на странице; и в настройках проекта.
+        # Выбор базы и релиза — только у строки сравнения, один раз на странице;
+        # в настройках проекта — текущие значения и ссылка сюда.
         assert 'Изменить сравнение' in page and page.count('name="release_project"') == 1
         settings = client.get('/projects/custom/settings?tab=general').text
-        assert 'Сравнение с типовой' in settings and 'name="base_project"' in settings
+        assert 'Сравнение с типовой' in settings and 'name="base_project"' not in settings
+        assert 'href="/projects/custom/diff#comparison"' in settings and 'href="/projects/typical"' in settings
         update = client.get('/projects/custom/diff/update').text
         assert 'ОбщийМодуль.ЦеныСервер.Модуль.РассчитатьЦену' in update
         assert client.post('/api/projects/custom/comparison', data={

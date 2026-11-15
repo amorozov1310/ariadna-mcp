@@ -158,7 +158,6 @@ def project_settings(request: Request, project_id: str, tab: str = 'data', edit:
         "tab": tab if tab in SETTINGS_TABS and (tab != 'danger' or is_admin(request)) else 'data',
         "edit_source": next((s for s in project.sources if s.id == edit), None),
         "index_error": pm.index_error(project_id) if project.status == 'error' else '',
-        "candidates": [p for p in pm.list_projects() if p.id != project_id],
     })
 
 

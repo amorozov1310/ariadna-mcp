@@ -180,7 +180,8 @@
             <label class="appsearch-field">
                 {{ icon('search') }}
                 <input type="search" name="q" placeholder="Поиск по конфигурации"
-                       aria-label="Поиск по конфигурации" value="{{ query|default('', true) }}">
+                       aria-label="Поиск по конфигурации" aria-keyshortcuts="/"
+                       title="Поиск по конфигурации — клавиша /" value="{{ query|default('', true) }}">
             </label>
         </form>
         {% endif %}
@@ -237,6 +238,20 @@ function setTheme(mode) {
     markTheme();
 }
 markTheme();
+
+// «/» — фокус в поиск (как в GitHub и Jira): на странице поиска — её поле,
+// иначе — поле в шапке. В поле ввода «/» печатается как обычно.
+document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    var field = [document.getElementById('search-q')].concat([].slice.call(document.querySelectorAll('.appsearch-field input')))
+        .filter(function (el) { return el && el.offsetParent !== null; })[0];
+    if (!field) return;
+    e.preventDefault();
+    field.focus();
+    field.select();
+});
 
 // Фильтр в переключателе проекта (больше 10 проектов).
 document.querySelectorAll('.switcher-filter').forEach(function (input) {
