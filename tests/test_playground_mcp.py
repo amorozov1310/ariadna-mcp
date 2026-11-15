@@ -284,3 +284,21 @@ def test_malformed_body_is_400_not_500(web, content, body):
     r = client.post('/api/projects/p1/playground', content=body, headers={'Content-Type': content})
     assert r.status_code == 400, r.text
     assert 'JSON' in r.json()['detail']
+
+
+def test_console_groups_keep_every_tool_once(web):
+    """Группы списка — только раскладка: каждый инструмент MCP ровно один раз,
+    меняющие данные помечены, история и копирование — после первого вызова."""
+    import json
+    import re
+    from html import unescape
+    from src.web.routes_playground import tool_groups
+    _, client = web
+    page = client.get('/projects/p1/playground').text
+    names = [t['name'] for t in json.loads(unescape(re.search(r'const TOOLS_META = (.*?);\n', page).group(1)))]
+    grouped = [n for _, items in tool_groups(names) for n in items]
+    assert sorted(grouped) == sorted(names) and len(grouped) == len(set(grouped))
+    assert tool_groups(names + ['new_tool'])[-1] == ('Прочее', ['new_tool'])
+    assert page.count('<optgroup') >= 5 and 'reindex — меняет данные' in page
+    assert 'id="history" hidden' in page and 'id="copy-result" disabled' in page
+    assert '>Ответ<' in page and 'Результат' not in page

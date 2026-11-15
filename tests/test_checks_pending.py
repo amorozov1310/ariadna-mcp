@@ -65,7 +65,7 @@ def test_page_opens_at_once_then_shows_result(web, monkeypatch):
     pm._checks_warming['p1'].join(10)
     assert client.get('/api/projects/p1/checks/warming').json()['ready'] is True
     page = client.get('/projects/p1/checks').text
-    assert 'Идёт проверка' not in page and 'Метода в модуле нет' in page
+    assert 'Идёт проверка' not in page and ('Найдено вызовов' in page or 'Ошибок в вызовах не найдено' in page)
 
 
 def test_failure_is_shown_not_retried_forever(web, monkeypatch):
