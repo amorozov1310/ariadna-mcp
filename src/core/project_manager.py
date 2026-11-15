@@ -1204,6 +1204,40 @@ class ProjectManager:
                                         f'&{keyword}:{target} {FORM_EVENT_MARK}'))
         return result
 
+    def overview_counts(self, project_id: str) -> dict:
+        """Числа для карточек «Обзора» — только из уже посчитанного: ни
+        сравнение, ни проверка вызовов здесь не запускаются (на крупной
+        конфигурации это десятки секунд). Нет в кэше — ключа нет, карточка
+        показывает описание вместо числа.
+
+        diff — итоги сравнения с типовой (BaseDiff.totals); broken — число
+        вызовов несуществующих и неэкспортных методов; glossary — записей словаря."""
+        out: dict = {}
+        try:
+            out['glossary'] = len(self.get_glossary(project_id).entries())
+        except Exception:
+            pass
+        project = self.get_project(project_id)
+        if project.status != 'ready':
+            return out
+        base_id = project.base_project
+        if base_id:
+            try:
+                if self.get_project(base_id).status == 'ready':
+                    diff = self._cached_diff(project_id, base_id)
+                    if diff is not None:
+                        out['diff'] = diff.totals()
+            except Exception:       # база удалена, индекс пересоздаётся — просто без чисел
+                pass
+        try:
+            if self.broken_calls_ready(project_id):
+                with self._base_diff_lock:
+                    result = self._broken_calls[project_id][1]
+                out['broken'] = len(result['missing']) + len(result['not_export'])
+        except Exception:
+            pass
+        return out
+
     def broken_calls_ready(self, project_id: str) -> bool:
         """Посчитана ли проверка вызовов для текущего индекса (есть в кэше)."""
         key = self._diff_key(self.get_db(project_id))

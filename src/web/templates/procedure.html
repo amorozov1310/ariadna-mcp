@@ -45,7 +45,7 @@
         </div>
     </div>
     <div class="btn-row">
-        <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/graph?procedure={{ proc.name|urlencode }}&module={{ mod.name|urlencode }}&direction=up&depth=3">Открыть на схеме</a>
+        <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/graph?view=schema&procedure={{ proc.name|urlencode }}&module={{ mod.name|urlencode }}&direction=up&depth=3">Открыть на схеме</a>
         {% if project.base_project %}
         <a class="btn btn-secondary btn-sm" href="/projects/{{ project.id }}/diff/procedure?module={{ mod.name|urlencode }}&name={{ proc.name|urlencode }}">Сравнить с типовой</a>
         {% endif %}

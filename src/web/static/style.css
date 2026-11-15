@@ -243,14 +243,9 @@ a:hover { text-decoration: underline; }
 .menu-list .navlink[aria-current="page"] { background: var(--accent-soft); color: var(--accent-strong); font-weight: 500; }
 .menu-list hr { border: 0; border-top: 1px solid var(--border); margin: var(--space-1) 0; }
 .menu-note { padding: var(--space-2) var(--space-3); color: var(--text2); font-size: var(--fs-sm); }
-.menu-item .icon-to-dark { display: inline-block; }
-.menu-item .icon-to-light { display: none; }
-:root[data-theme="dark"] .menu-item .icon-to-dark { display: none; }
-:root[data-theme="dark"] .menu-item .icon-to-light { display: inline-block; }
-@media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) .menu-item .icon-to-dark { display: none; }
-    :root:not([data-theme="light"]) .menu-item .icon-to-light { display: inline-block; }
-}
+/* Выбор темы: текущий вариант — с отметкой справа. */
+.theme-choice .menu-item[aria-pressed="true"] { color: var(--accent-strong); font-weight: 500; }
+.theme-choice .menu-item[aria-pressed="true"]::after { content: "✓"; margin-left: auto; padding-left: var(--space-3); }
 .mobile-menu { display: none; }
 
 /* Пропуск шапки для клавиатуры: виден только в фокусе. */
@@ -917,3 +912,16 @@ main .appsearch-field input:not([type="radio"]):not([type="checkbox"]):not([type
     .calls-row label input, .calls-row label select { width: 100%; }
 }
 .code-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--space-2); }
+
+/* Число на карточке «Обзора» — ответ на вопрос раздела. */
+.overview-card .overview-num { font-size: var(--fs-lg); font-weight: 600; color: var(--text); margin-bottom: var(--space-1); font-variant-numeric: tabular-nums; }
+.overview-card .overview-num-bad { color: var(--danger); }
+
+/* Переключатель проекта: точка состояния и фильтр (A7). */
+.switcher-menu a.switcher-item { display: flex; align-items: center; gap: var(--space-2); }
+.switcher-filter { width: 100%; margin-bottom: var(--space-1); height: var(--control-h-sm); padding: 0 var(--space-2);
+                   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg2); color: var(--text); font: inherit; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text3); }
+.status-dot-ready { background: var(--success); }
+.status-dot-indexing { background: var(--warning); }
+.status-dot-error { background: var(--danger); }
