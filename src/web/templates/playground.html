@@ -7,16 +7,19 @@
     <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#flask"/></svg>
     Консоль MCP
 </h1>
-<p class="muted">Проект: <strong>{{ project.id }}</strong> — {{ project.name }}.
-    Инструменты, параметры и ответы — те же, что видит агент через MCP
-    (project_id подставляется сам).</p>
+<p class="muted">Те же инструменты, параметры и ответы, что видит агент; проект
+    <span class="mono">{{ project.id }}</span> подставляется сам.</p>
 
 <div class="playground-layout">
     <div class="playground-form">
         <label for="tool-select">Инструмент</label>
         <select id="tool-select" onchange="onToolChange()">
-            {% for tool in tools_meta %}
-            <option value="{{ tool.name }}">{{ tool.name }}</option>
+            {% for title, names in tool_groups %}
+            <optgroup label="{{ title }}">
+                {% for name in names %}
+                <option value="{{ name }}">{{ name }}{% if name in changing_tools %} — меняет данные{% endif %}</option>
+                {% endfor %}
+            </optgroup>
             {% endfor %}
         </select>
 
@@ -29,19 +32,28 @@
     </div>
 
     <div class="playground-result">
-        <h3>Результат</h3>
-        <div id="result-box" class="result-box">
+        <div class="playground-result-head">
+            <h2>Ответ</h2>
+            <div class="btn-row">
+                <button type="button" class="btn btn-secondary btn-sm" id="copy-result" disabled>
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#copy"/></svg>
+                    Копировать ответ</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="copy-call" disabled
+                        title="Вызов в формате MCP tools/call: имя инструмента и аргументы">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#copy"/></svg>
+                    Копировать как вызов</button>
+            </div>
+        </div>
+        <div id="result-box" class="result-box" aria-live="polite">
             <p class="muted">Выберите инструмент и нажмите «Выполнить»</p>
         </div>
         <div id="result-meta" class="muted" style="margin-top:8px"></div>
     </div>
 </div>
 
-<div class="playground-history">
-    <h3>История (последние 6)</h3>
-    <div id="history-list">
-        <p class="muted">Пока пусто</p>
-    </div>
+<div class="playground-history" id="history" hidden>
+    <h2>Последние вызовы</h2>
+    <div id="history-list"></div>
 </div>
 
 <script>
@@ -50,6 +62,24 @@ const TOOLS_META = {{ tools_meta | tojson }};
 const RUN_BTN_HTML = document.getElementById('run-btn').innerHTML;
 const PROJECT_ID = {{ project.id | tojson }};
 let history = [];
+// Последний выполненный вызов — для кнопок копирования.
+let lastCall = null;
+
+function copyText(btn, text) {
+    const label = btn.innerHTML;
+    navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = 'Скопировано';
+        setTimeout(function () { btn.innerHTML = label; }, 1500);
+    });
+}
+document.getElementById('copy-result').addEventListener('click', function () {
+    if (lastCall) copyText(this, lastCall.result);
+});
+document.getElementById('copy-call').addEventListener('click', function () {
+    if (!lastCall) return;
+    const args = Object.assign({project_id: PROJECT_ID}, lastCall.params);
+    copyText(this, JSON.stringify({name: lastCall.tool, arguments: args}, null, 2));
+});
 
 function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => (
@@ -62,13 +92,13 @@ function onToolChange() {
     if (!tool) return;
 
     document.getElementById('tool-description').textContent = tool.description;
-    document.getElementById('result-box').innerHTML = '<p class="muted">Нажмите "Выполнить"</p>';
+    document.getElementById('result-box').innerHTML = '<p class="muted">Нажмите «Выполнить»</p>';
     document.getElementById('result-box').classList.remove('result-error');
     document.getElementById('result-meta').textContent = '';
 
     // Поля — по схеме MCP: тип, умолчание, обязательность и описание те же,
     // что видит агент. Описание — строкой под полем.
-    let html = '';
+    let html = tool.params.length ? '<div class="params-title">Параметры</div>' : '';
     for (const p of tool.params) {
         const id = 'param-' + p.name;
         let input;
@@ -126,7 +156,7 @@ async function executeTool() {
     const resultBox = document.getElementById('result-box');
     btn.disabled = true;
     btn.textContent = 'Выполняется…';
-    resultBox.innerHTML = '<p class="muted">Загрузка...</p>';
+    resultBox.innerHTML = '<p class="muted">Выполняется…</p>';
     resultBox.classList.remove('result-error');
 
     try {
@@ -148,9 +178,12 @@ async function executeTool() {
         resultBox.innerHTML = '';
         if (data.is_error) resultBox.classList.add('result-error');
         resultBox.appendChild(pre);
+        lastCall = {tool: toolName, params: params, result: data.result || ''};
+        document.getElementById('copy-result').disabled = false;
+        document.getElementById('copy-call').disabled = false;
 
         document.getElementById('result-meta').textContent =
-            `${data.elapsed_ms} мс · project: ${PROJECT_ID} · ${data.timestamp}` +
+            `${data.elapsed_ms} мс · проект ${PROJECT_ID} · ${data.timestamp}` +
             (data.is_error ? ' · ошибка инструмента' : '');
 
         const paramStr = Object.entries(params).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
@@ -172,16 +205,13 @@ async function executeTool() {
 
 function renderHistory() {
     const div = document.getElementById('history-list');
-    if (history.length === 0) {
-        div.innerHTML = '<p class="muted">Пока пусто</p>';
-        return;
-    }
+    document.getElementById('history').hidden = history.length === 0;
     div.innerHTML = history.map(h => `
         <div class="history-item" data-tool="${esc(h.tool)}">
             <span class="history-time">${esc(h.time)}</span>
             <span class="history-tool">${esc(h.tool)}</span>(${esc(h.params)})
             → <span class="history-summary${h.error ? ' result-error-text' : ''}">${esc(h.summary)}</span>
-            <span class="muted">${h.ms}ms</span>
+            <span class="muted">${h.ms} мс</span>
         </div>
     `).join('');
     for (const item of div.querySelectorAll('.history-item')) {

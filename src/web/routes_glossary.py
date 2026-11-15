@@ -24,6 +24,17 @@ def _project(project_id: str):
         raise HTTPException(404, f"Проект «{project_id}» не найден")
 
 
+def target_link(project_id: str, target: str, kind: str) -> str:
+    """Ссылка на то, что называет запись: карточка объекта (у реквизита — его
+    объекта) или страница процедуры."""
+    if kind == 'procedure' and '.' in target:
+        module, name = target.rsplit('.', 1)
+        return f"/projects/{project_id}/procedure?module={quote(module)}&name={quote(name)}"
+    obj = '.'.join(target.split('.')[:2])
+    tab = '?tab=attributes' if kind == 'attribute' else ''
+    return f"/projects/{project_id}/object/{quote(obj)}{tab}"
+
+
 @router.get("/projects/{project_id}/glossary", response_class=HTMLResponse)
 def glossary_page(request: Request, project_id: str, error: str = '', saved: str = '',
                   target: str = ''):
@@ -32,6 +43,7 @@ def glossary_page(request: Request, project_id: str, error: str = '', saved: str
     return templates.TemplateResponse(name="glossary.html", request=request, context={
         "project": project,
         "entries": entries,
+        "links": {e.id: target_link(project_id, e.target, e.target_kind) for e in entries},
         "kind_label": _KIND_LABEL,
         "error": error,
         "saved": saved,
@@ -77,3 +89,27 @@ def glossary_delete(project_id: str, entry_id: str):
     _project(project_id)
     get_pm().get_glossary(project_id).remove(entry_id)
     return RedirectResponse(f"/projects/{project_id}/glossary", status_code=303)
+
+
+@router.get("/api/projects/{project_id}/glossary/suggest")
+def glossary_suggest(project_id: str, q: str = ''):
+    """Подсказка поля «Объект конфигурации»: объекты, реквизиты и процедуры
+    по началу имени — полные имена, как их принимает словарь."""
+    _project(project_id)
+    q = q.strip()
+    if len(q) < 2:
+        return []
+    search = get_pm().get_search(project_id)
+    out: list[dict] = []
+    for r in search.search_metadata(q, limit=8):
+        out.append({'value': r['full_name'], 'label': r.get('synonym') or 'объект'})
+    for r in search.search_attributes(q, limit=5):
+        out.append({'value': f"{r['object_full_name']}.{r['name']}", 'label': 'реквизит'})
+    for r in search.search_procedures(q, limit=5):
+        out.append({'value': f"{r['module_name']}.{r['name']}", 'label': 'процедура'})
+    seen, uniq = set(), []
+    for item in out:
+        if item['value'].casefold() not in seen:
+            seen.add(item['value'].casefold())
+            uniq.append(item)
+    return uniq

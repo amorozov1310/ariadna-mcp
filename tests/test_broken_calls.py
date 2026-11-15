@@ -2,6 +2,7 @@
 страница «Проверка»): методов, которых нет в модуле, неэкспортных методов из
 другого модуля и модулей, которых нет в выгрузке."""
 
+import re
 import shutil
 import sys
 import tempfile
@@ -111,9 +112,28 @@ def test_find_broken_calls_tool_and_page(pm):
         client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
         page = client.get('/projects/p/checks')
         assert page.status_code == 200
-        assert 'Метода в модуле нет (3)' in page.text and 'ВнутренняяЗаказа' in page.text
-        assert 'ЮТест' in page.text and 'aria-current="page"' in page.text
+        # Итог одной строкой, вкладки-счётчики; открыта первая непустая.
+        assert 'несуществующих методов — <b>3</b>' in page.text and 'неэкспортных — <b>1</b>' in page.text
+        assert '<h1 class="page-title">Проверка вызовов</h1>' in page.text
+        assert re.search(r'view=missing#checks-tabs" aria-current="page">Метода нет', page.text)
+        assert 'НетТакогоМетода' in page.text and 'ВнутренняяЗаказа' not in page.text
+        not_export = client.get('/projects/p/checks', params={'view': 'not_export'}).text
+        assert 'ВнутренняяЗаказа' in not_export
+        external = client.get('/projects/p/checks', params={'view': 'external'}).text
+        assert 'ЮТест' in external and 'Чаще всего это не ошибка' in external
+        # Фильтр сохраняется в ссылках вкладок.
         filtered = client.get('/projects/p/checks', params={'module': 'Склады'}).text
         assert 'НетВМенеджере' in filtered and 'НетТакогоМетода' not in filtered
+        assert 'view=not_export&module=%D0%A1' in filtered
+        # «Показать ещё»: страница — 100 строк.
+        from src.web import routes_checks
+        old_page = routes_checks.EXTERNAL_PAGE
+        routes_checks.EXTERNAL_PAGE = 1
+        try:
+            first = client.get('/projects/p/checks', params={'n': 0}).text
+            assert 'Показано 1 из 3' in first and 'n=2' in first
+            assert 'Показано' not in client.get('/projects/p/checks', params={'n': 3}).text
+        finally:
+            routes_checks.EXTERNAL_PAGE = old_page
     finally:
         app_module.set_pm(previous)

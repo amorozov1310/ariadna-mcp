@@ -137,7 +137,21 @@ def test_web_ui_page_save_and_delete(pm):
         r = client.post('/api/projects/p1/glossary', data={'target': 'Справочник.Склады', 'terms': 'места хранения'},
                         follow_redirects=False)
         assert r.status_code == 303 and 'saved=' in r.headers['location']
-        assert 'места хранения' in client.get('/projects/p1/glossary').text
+        page = client.get('/projects/p1/glossary').text
+        assert 'места хранения' in page
+        # Сначала список: форма скрыта до «Добавить слово»; объект — ссылка;
+        # у кнопок-значков есть aria-label.
+        assert 'id="glossary-form-card" hidden' in page
+        assert 'href="/projects/p1/object/%D0%A1%D0%BF%D1%80%D0%B0%D0%B2%D0%BE%D1%87%D0%BD%D0%B8%D0%BA.%D0%A1%D0%BA%D0%BB%D0%B0%D0%B4%D1%8B"' in page
+        assert 'aria-label="Изменить: Справочник.Склады"' in page and 'aria-label="Удалить: Справочник.Склады"' in page
+        assert 'notice notice-success' in client.get('/projects/p1/glossary?saved=x').text
+        # С ошибкой или с готовым объектом — форма открыта.
+        assert 'id="glossary-form-card" hidden' not in client.get('/projects/p1/glossary?error=x').text
+        assert 'id="glossary-form-card" hidden' not in client.get('/projects/p1/glossary?target=x').text
+        # Подсказка полного имени.
+        found = client.get('/api/projects/p1/glossary/suggest', params={'q': 'Склады'}).json()
+        assert any(f['value'] == 'Справочник.Склады' for f in found)
+        assert client.get('/api/projects/p1/glossary/suggest', params={'q': 'С'}).json() == []
         entry = pm.get_glossary('p1').for_target('Справочник.Склады')
         # правка: термины заменяются
         client.post('/api/projects/p1/glossary', data={'target': 'Справочник.Склады', 'terms': 'склады хранения',
@@ -151,3 +165,12 @@ def test_web_ui_page_save_and_delete(pm):
         assert client.get('/projects/нет/glossary').status_code == 404
     finally:
         app_module._pm = previous
+
+
+def test_target_link():
+    from src.web.routes_glossary import target_link
+    assert target_link('p', 'Справочник.X', 'object') == '/projects/p/object/%D0%A1%D0%BF%D1%80%D0%B0%D0%B2%D0%BE%D1%87%D0%BD%D0%B8%D0%BA.X'
+    assert target_link('p', 'Справочник.X.Цена', 'attribute').endswith('.X?tab=attributes')
+    assert target_link('p', 'ОбщегоНазначения.Сообщить', 'procedure') == (
+        '/projects/p/procedure?module=%D0%9E%D0%B1%D1%89%D0%B5%D0%B3%D0%BE%D0%9D%D0%B0%D0%B7%D0%BD%D0%B0%D1%87%D0%B5%D0%BD%D0%B8%D1%8F'
+        '&name=%D0%A1%D0%BE%D0%BE%D0%B1%D1%89%D0%B8%D1%82%D1%8C')

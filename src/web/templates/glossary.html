@@ -3,113 +3,190 @@
 {% block active_nav %}glossary{% endblock %}
 
 {% block content %}
-<h1 class="page-title">
-    <svg class="icon icon-lg"><use href="/static/icons.svg?v={{ asset_v }}#file-text"/></svg>
-    Словарь проекта
-</h1>
+{# Форма открыта сразу, если пришли с ошибкой или с готовым объектом (?target=). #}
+{% set form_open = error or target %}
+<div class="page-header">
+    <h1 class="page-title">Словарь проекта</h1>
+    <button type="button" class="btn btn-primary" id="glossary-add" {% if form_open %}hidden{% endif %}>
+        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#plus"/></svg>
+        Добавить слово
+    </button>
+</div>
 
-<p class="text-muted">
-    Какими словами пользователи называют объекты, реквизиты и процедуры конфигурации:
-    «пайщики» → регистр взаиморасчётов по аренде. Поиск (и агент через MCP) находит цель по этим
-    словам первой. Записи добавляют здесь или агент инструментом <span class="mono">add_glossary_term</span>;
-    словарь хранится вне индекса и переживает переиндексацию.
-</p>
+<p class="text-muted glossary-lead">Слова, которыми пользователи называют объекты. Поиск и агент находят
+    по ним объект сразу.</p>
+<details class="disclosure glossary-about">
+    <summary>Подробнее</summary>
+    <div class="disclosure-body text-muted">
+        Например, «пайщики» → регистр взаиморасчётов по аренде. Запись может вести к объекту, реквизиту
+        (в том числе реквизиту формы) или процедуре. Записи добавляют здесь или агент инструментом
+        <span class="mono">add_glossary_term</span>. Словарь хранится отдельно от индекса и после
+        переиндексации не теряется.
+    </div>
+</details>
 
 {% if error %}
-<div class="card" style="border-color:var(--danger)">
-    <svg class="icon icon-sm" style="color:var(--danger)"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
-    {{ error }}
+<div class="notice notice-warning" role="alert" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#alert"/></svg>
+    <div>{{ error }}</div>
 </div>
 {% elif saved %}
-<div class="card" style="border-color:var(--success)">
-    <svg class="icon icon-sm" style="color:var(--success)"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
-    Сохранено: <span class="mono">{{ saved }}</span>
+<div class="notice notice-success" role="status" style="margin-bottom:var(--space-4)">
+    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#check"/></svg>
+    <div>Сохранено: <span class="mono">{{ saved }}</span></div>
 </div>
 {% endif %}
 
-<div class="card">
-    <h3 class="section-title" id="glossary-form-title">Новая запись</h3>
-    <form id="glossary-form" action="/api/projects/{{ project.id }}/glossary" method="post"
-          style="margin-top:var(--space-3)">
+<div class="card" id="glossary-form-card" {% if not form_open %}hidden{% endif %}>
+    <h2 class="section-title" id="glossary-form-title">Новое слово</h2>
+    <form id="glossary-form" action="/api/projects/{{ project.id }}/glossary" method="post">
         <input type="hidden" name="entry_id" value="">
         <div class="form-group">
-            <label>Цель — полное имя</label>
-            <input name="target" required class="mono" value="{{ target|default('', true) }}"
-                   placeholder="РегистрНакопления.ВзаиморасчетыПоАренде, Справочник.Поля.Площадь, ОбщийМодуль.X.Модуль.Процедура">
-            <div class="form-hint">Объект, реквизит («Объект.Реквизит», в том числе реквизит формы) или
-                процедура («Модуль.Процедура»). Имя берите из поиска.</div>
+            <label for="g-target">Объект конфигурации</label>
+            <input id="g-target" name="target" required class="mono" autocomplete="off"
+                   list="g-target-list" value="{{ target|default('', true) }}"
+                   placeholder="начните вводить имя, например Склады">
+            <datalist id="g-target-list"></datalist>
+            <div class="form-hint">Полное имя из подсказки или из поиска:
+                объект — <span class="mono">Справочник.Склады</span>;
+                реквизит — <span class="mono">Справочник.Склады.Ответственный</span>;
+                процедура — <span class="mono">ОбщегоНазначения.СообщитьПользователю</span>.</div>
         </div>
         <div class="form-group">
-            <label>Термины — через запятую</label>
-            <input name="terms" required placeholder="пайщики, долги пайщикам">
+            <label for="g-terms">Как называют пользователи</label>
+            <input id="g-terms" name="terms" required placeholder="пайщики, долги пайщикам">
+            <div class="form-hint">Несколько вариантов — через запятую.</div>
         </div>
         <div class="form-group">
-            <label>Примечание</label>
-            <input name="note" placeholder="Что это и когда так говорят (необязательно)">
+            <label for="g-note">Примечание — необязательно</label>
+            <input id="g-note" name="note" placeholder="Что это и когда так говорят">
         </div>
-        <button type="submit" class="btn btn-primary">Сохранить</button>
-        {# display, а не hidden: у .btn свой display, он перебивает атрибут hidden #}
-        <button type="button" class="btn btn-secondary" id="glossary-cancel" style="display:none">Отменить правку</button>
+        <div class="btn-row">
+            <button type="submit" class="btn btn-primary">Сохранить</button>
+            <button type="button" class="btn btn-secondary" id="glossary-cancel">Отмена</button>
+        </div>
     </form>
 </div>
 
 <div class="card">
-    <h3 class="section-title">Записи ({{ entries|length }})</h3>
+    <div class="card-header">
+        <h2 class="section-title">Записи · {{ entries|length|num }}</h2>
+        {% if entries|length > 5 %}
+        <input type="search" id="glossary-filter" placeholder="Фильтр" aria-label="Фильтр записей словаря" style="max-width:260px">
+        {% endif %}
+    </div>
     {% if entries %}
     <div class="table-scroll">
-    <table class="detail-table" style="width:100%">
-        <tr><th>Цель</th><th>Термины</th><th>Примечание</th><th>Кто, когда</th><th></th></tr>
+    <table class="detail-table glossary-table">
+        <thead><tr>
+            <th scope="col">Объект</th><th scope="col">Как называют</th><th scope="col" class="col-minor">Примечание</th>
+            <th scope="col" class="col-minor">Кто, когда</th><th scope="col"><span class="visually-hidden">Действия</span></th>
+        </tr></thead>
+        <tbody>
         {% for e in entries %}
-        <tr>
-            <td><span class="mono">{{ e.target }}</span>
+        <tr class="glossary-row" data-text="{{ (e.target ~ ' ' ~ e.terms|join(' ') ~ ' ' ~ e.note)|lower }}">
+            <td><a class="mono" href="{{ links[e.id] }}">{{ e.target }}</a>
                 <span class="result-kind">{{ kind_label.get(e.target_kind, e.target_kind) }}</span></td>
             <td>{{ e.terms|join(', ') }}</td>
-            <td class="text-muted">{{ e.note }}</td>
-            <td class="text-muted">{{ e.author }}{% if e.updated_at %}, {{ e.updated_at|dt }}{% endif %}</td>
-            <td style="white-space:nowrap">
-                <button type="button" class="btn btn-secondary btn-sm btn-icon glossary-edit" title="Изменить"
+            <td class="text-muted col-minor">{{ e.note }}</td>
+            <td class="text-muted col-minor">{{ e.author }}{% if e.updated_at %}, {{ e.updated_at|dt }}{% endif %}</td>
+            <td class="row-actions">
+                <button type="button" class="btn btn-secondary btn-sm btn-icon glossary-edit"
+                        title="Изменить" aria-label="Изменить: {{ e.target }}"
                         data-id="{{ e.id }}" data-target="{{ e.target }}"
                         data-terms="{{ e.terms|join(', ') }}" data-note="{{ e.note }}">
-                    <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#pencil"/></svg>
                 </button>
                 <form action="/api/projects/{{ project.id }}/glossary/{{ e.id }}/delete" method="post"
-                      style="display:inline" onsubmit="return confirm('Удалить запись словаря?')">
-                    <button type="submit" class="btn btn-danger btn-sm btn-icon" title="Удалить">
-                        <svg class="icon icon-sm"><use href="/static/icons.svg?v={{ asset_v }}#trash"/></svg>
+                      style="display:inline" data-confirm="Удалить запись словаря «{{ e.target }}»?"
+                      data-confirm-action="Удалить">
+                    <button type="submit" class="btn btn-danger btn-sm btn-icon"
+                            title="Удалить" aria-label="Удалить: {{ e.target }}">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/icons.svg?v={{ asset_v }}#trash"/></svg>
                     </button>
                 </form>
             </td>
         </tr>
         {% endfor %}
+        </tbody>
     </table>
     </div>
+    <p class="text-muted" id="glossary-empty" hidden>Под фильтр ничего не попало.</p>
     {% else %}
-    <p class="text-muted" style="margin-top:var(--space-2)">Словарь пуст.</p>
+    <div class="empty-state">
+        <p>Словарь пуст.</p>
+        <p class="text-muted">Добавьте первое слово — или попросите агента: он сам записывает сюда
+            названия, по которым искал объект.</p>
+    </div>
     {% endif %}
 </div>
 
 <script>
 (function () {
+    const card = document.getElementById('glossary-form-card');
     const form = document.getElementById('glossary-form');
     const title = document.getElementById('glossary-form-title');
-    const cancel = document.getElementById('glossary-cancel');
+    const add = document.getElementById('glossary-add');
+
+    function open(editing) {
+        card.hidden = false;
+        add.hidden = true;
+        title.textContent = editing ? 'Правка записи' : 'Новое слово';
+        card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+        (editing ? form.terms : form.target).focus();
+    }
+    add.addEventListener('click', function () { form.reset(); form.entry_id.value = ''; open(false); });
+    document.getElementById('glossary-cancel').addEventListener('click', function () {
+        form.reset();
+        form.entry_id.value = '';
+        card.hidden = true;
+        add.hidden = false;
+    });
     document.querySelectorAll('.glossary-edit').forEach(function (btn) {
         btn.addEventListener('click', function () {
             form.entry_id.value = btn.dataset.id;
             form.target.value = btn.dataset.target;
             form.terms.value = btn.dataset.terms;
             form.note.value = btn.dataset.note;
-            title.textContent = 'Правка записи';
-            cancel.style.display = '';
-            form.scrollIntoView({behavior: 'smooth'});
+            open(true);
         });
     });
-    cancel.addEventListener('click', function () {
-        form.reset();
-        form.entry_id.value = '';
-        title.textContent = 'Новая запись';
-        cancel.style.display = 'none';
+
+    // Подсказка полного имени: объекты, реквизиты, процедуры.
+    const input = form.target;
+    const list = document.getElementById('g-target-list');
+    let timer = null, last = '';
+    input.addEventListener('input', function () {
+        clearTimeout(timer);
+        timer = setTimeout(async function () {
+            const q = input.value.trim();
+            if (q.length < 2 || q === last) return;
+            last = q;
+            try {
+                const r = await fetch('/api/projects/{{ project.id|urlencode }}/glossary/suggest?q=' + encodeURIComponent(q));
+                const found = await r.json();
+                list.innerHTML = '';
+                found.forEach(function (f) {
+                    const o = document.createElement('option');
+                    o.value = f.value;
+                    o.label = f.label;
+                    list.appendChild(o);
+                });
+            } catch (e) { /* без подсказки форма всё равно работает */ }
+        }, 200);
     });
+
+    const filter = document.getElementById('glossary-filter');
+    if (filter) {
+        const rows = document.querySelectorAll('.glossary-row');
+        const empty = document.getElementById('glossary-empty');
+        filter.addEventListener('input', function () {
+            const q = filter.value.trim().toLowerCase();
+            let shown = 0;
+            rows.forEach(function (r) { const ok = !q || r.dataset.text.includes(q); r.hidden = !ok; if (ok) shown++; });
+            empty.hidden = shown > 0;
+        });
+    }
 })();
 </script>
 {% endblock %}

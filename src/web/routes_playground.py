@@ -38,6 +38,38 @@ _PAGE_PARAM = 'project_id'
 
 _tool_schemas: list[dict] | None = None
 
+# Группы списка инструментов консоли. Состав инструментов — из схемы MCP:
+# не попавший сюда новый инструмент окажется в «Прочее», а не пропадёт.
+TOOL_GROUPS = (
+    ('Поиск', ('search_metadata', 'search_attributes', 'search_procedures', 'search_code',
+               'semantic_search_code', 'list_objects')),
+    ('Объект', ('get_object_details', 'find_references')),
+    ('Процедуры и вызовы', ('get_procedure_context', 'get_procedure_code', 'get_module_outline',
+                           'get_call_tree', 'find_broken_calls')),
+    ('Сравнение с типовой', ('diff_from_base', 'update_conflicts')),
+    ('Словарь и знания', ('list_glossary', 'add_glossary_term', 'remove_glossary_term',
+                          'knowledge_sources')),
+    ('Обслуживание', ('list_projects', 'list_sources', 'get_index_status', 'diagnose_index',
+                      'reindex', 'remove_source')),
+)
+# Меняют данные: в списке — с пометкой.
+CHANGING_TOOLS = {'reindex', 'remove_source', 'add_glossary_term', 'remove_glossary_term'}
+
+
+def tool_groups(names: list[str]) -> list[tuple[str, list[str]]]:
+    """[(группа, [инструменты])] в порядке TOOL_GROUPS; остальные — «Прочее»."""
+    known = set(names)
+    groups, placed = [], set()
+    for title, members in TOOL_GROUPS:
+        items = [n for n in members if n in known]
+        placed.update(items)
+        if items:
+            groups.append((title, items))
+    rest = [n for n in names if n not in placed]
+    if rest:
+        groups.append(('Прочее', rest))
+    return groups
+
 
 async def mcp_tool_schemas() -> list[dict]:
     """Инструменты MCP-сервера в том виде, в каком их видит агент:
@@ -155,9 +187,12 @@ async def playground_page(request: Request, project_id: str):
         return {'source_id': sources, 'kind': kinds}
 
     suggestions = await run_in_threadpool(project_values)
+    forms = tool_forms(await mcp_tool_schemas(), suggestions)
     return templates.TemplateResponse(name="playground.html", request=request, context={
         "project": project,
-        "tools_meta": tool_forms(await mcp_tool_schemas(), suggestions),
+        "tools_meta": forms,
+        "tool_groups": tool_groups([t['name'] for t in forms]),
+        "changing_tools": CHANGING_TOOLS,
     })
 
 
