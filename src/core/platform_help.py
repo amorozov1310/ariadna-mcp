@@ -1149,7 +1149,7 @@ class PlatformHelpStore:
                 except (sqlite3.Error, KeyError, IndexError, TypeError, ValueError, RecursionError) as e:
                     raise HbkError(f'повреждён индекс справки: {e}') from e
                 replace_with_retry(tmp, target)
-        return {'entries': sum(counts.values())}
+        return {'entries': sum(counts.values()), 'version': version}
 
     @contextmanager
     def _operation(self, version: str, stage: str, *, skip_if: Callable[[], bool] | None = None):

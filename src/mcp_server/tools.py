@@ -11,9 +11,11 @@ project_id anyway; a single-project registry now just defaults to it).
 
 import sqlite3
 
+from ..core.parser_fingerprint import index_uses_old_parser
+from ..core.platform_check import (LEVELS, ReportUnavailable, check_calls, check_index,
+                                   old_index_message)
 from ..core.platform_help import KINDS, KIND_ALIASES, format_entry
 from ..core.project_manager import ProjectManager, ReindexInProgressError
-from ..core.platform_check import LEVELS, ReportIndexChanged, check_calls
 from ..core.search import format_search_results, format_object_details
 from . import semantic_search
 
@@ -457,7 +459,7 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
 
 def _project_help(pm: ProjectManager, project, version: str = ''):
     store = pm.platform_help
-    version = version or (project.platform_version if project else '') or store.newest()
+    version = version or pm.platform_help_version(project.id if project else None)
     try:
         help_index = store.get(version) if version else None
     except ValueError as e:
@@ -968,13 +970,20 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             return data if isinstance(data, str) else semantic_search.format_text(data)
 
         case 'find_broken_calls':
+            old_index = index_uses_old_parser(engine.db.read_conn())
             result = pm.broken_calls(project_id, source_id or '',
                                      (args.get('module_name') or '').strip())
-            return format_broken_calls(project_id, result, offset, max(1, int(limit_arg or 50)))
+            text = format_broken_calls(project_id, result, offset, max(1, int(limit_arg or 50)))
+            return f'{old_index_message(project_id)}\n{text}' if old_index else text
 
         case 'check_platform_calls':
             if source_id and (error := _unknown_source_error(pm, project_id, source_id)):
                 return error
+            conn = engine.db.read_conn()
+            try:
+                revision = check_index(conn, project_id)
+            except ReportUnavailable as e:
+                return str(e)
             levels = args.get('level')
             if levels is not None:
                 if isinstance(levels, str):
@@ -984,7 +993,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     return 'Error: level принимает error, warning, unchecked или список этих значений.'
                 levels = frozenset(levels)
             where = " AND source_id=?" if source_id else ""
-            modules = engine.db.read_conn().execute(
+            modules = conn.execute(
                 "SELECT 1 FROM modules WHERE file_path != ''" + where + " LIMIT 1",
                 (source_id,) if source_id else ())
             if not modules.fetchone():
@@ -999,9 +1008,9 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             limit = max(1, int(args.get('limit', 50)))
             offset = max(0, offset)
             try:
-                page, more, counts, modules = check_calls(engine, index, mode, source_id,
-                                                          limit, offset, levels)
-            except ReportIndexChanged as e:
+                page, more, counts, modules, changed = check_calls(
+                    engine, index, mode, source_id, limit, offset, levels, project_id, revision)
+            except ReportUnavailable as e:
                 return str(e)
             except (FileNotFoundError, sqlite3.OperationalError):
                 if index.path.exists():
@@ -1011,7 +1020,9 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             heading += f'Режим совместимости {mode}.' if mode else 'Числовой режим совместимости не задан.'
             summary = (f"Модулей — {modules}. Ошибки — {counts['error']}, "
                        f"предупреждения — {counts['warning']}, не проверено — {counts['unchecked']}.")
-            if not page:
+            notes = ['Файлы изменились или пропали после подготовки отчёта, счётчики могут быть устаревшими. '
+                     'Обновите индекс (reindex).', *changed] if changed else []
+            if not page and not changed:
                 if offset:
                     page.append(f'При offset={offset} записей больше нет.')
                 else:
@@ -1019,7 +1030,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                                 else 'Замечаний нет.')
             if more:
                 page.append(f'Следующая страница: offset={offset + limit}.')
-            return '\n'.join([heading, summary, *page])
+            return '\n'.join([heading, summary, *notes, *page])
 
         case 'diagnose_index':
             from ..core.search import diagnose_index

@@ -574,6 +574,15 @@ class Database:
         self._local.conn = conn
         return conn
 
+    def close_thread_reader(self) -> None:
+        """Освободить читающее соединение завершающегося фонового потока."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            conn.close()
+            with self._readers_lock:
+                self._readers.discard(conn)
+            self._local.conn = None
+
     def _closed_reader_error(self) -> sqlite3.Error:
         if self._retired:
             return IndexRemovedError(self.db_path)

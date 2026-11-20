@@ -31,7 +31,7 @@ _PUBLIC = re.compile(r'^/(health$|login$|logout$|static/|favicon)')
 # выгрузки, docs/update.md) — не админское: проекты и источники не меняются.
 _ADMIN_POST = re.compile(r'^/api/(projects$|projects/[^/]+/(update|delete|comparison|base)$'
                          r'|projects/[^/]+/sources(/[^/]+/(update|delete))?$|admin/)')
-_ADMIN_GET = re.compile(r'^/(projects/new$|admin(/|$))')
+_ADMIN_GET = re.compile(r'^/(projects/new$|(?:api/)?admin(/|$))')
 
 _stores: dict[str, TokenStore] = {}
 

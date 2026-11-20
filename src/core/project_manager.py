@@ -15,6 +15,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import BinaryIO
 
@@ -22,7 +23,7 @@ from . import parser_fingerprint
 from .archives import extract_archive
 from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
-from .platform_help import PlatformHelpStore
+from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
 from .xml_metadata import compatibility_version
 
@@ -215,6 +216,8 @@ class ProjectManager:
         self._broken_calls: dict[str, tuple] = {}
         # Фоновые переиндексации (reindex_async) — close_all их дожидается.
         self._reindexing: set[threading.Thread] = set()
+        self._platform_workers: set[threading.Thread] = set()
+        self._closing_platform_workers = False
         # Причина последней упавшей индексации проекта (для Web UI); в памяти —
         # после перезапуска её нет, статус 'error' остаётся в реестре.
         self._index_errors: dict[str, str] = {}
@@ -603,8 +606,9 @@ class ProjectManager:
                 # только закончится запрос, начатый до закрытия (Database.close
                 # ждёт его), а ещё его может ненадолго открыть антивирус.
                 if path == self.platform_help.root:
-                    from .platform_check import CACHE_FILE
-                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal', CACHE_FILE):
+                    from .platform_check import prune_report_archives
+                    prune_report_archives(index_files)
+                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'):
                         (path / name).unlink(missing_ok=True)
                 else:
                     rmtree_with_retry(path)
@@ -997,6 +1001,63 @@ class ProjectManager:
 
     def platform_mode(self, project_id: str) -> str:
         return compatibility_version(self.get_source_xml_path(project_id, self.main_source(project_id)))
+
+    def platform_help_version(self, project_id: str | None = None) -> str:
+        version = self.get_project(project_id).platform_version if project_id else ''
+        return version or self.platform_help.newest()
+
+    def sync_platform_help(self) -> None:
+        """Запустить поиск и построение справки установленной платформы."""
+        sync = partial(self.platform_help.sync_installed, default_search_roots(), background=False)
+        self._start_platform_worker(sync, 'platform-help')
+
+    def warm_platform_checks(self, version: str = '', *, project_id: str | None = None) -> None:
+        """Прогреть отчёты после изменения справки или выбора версии в проекте."""
+        from .platform_check import warm_ready_report
+
+        def run():
+            newest = self.platform_help.newest()
+            projects = (self.get_project(project_id),) if project_id else self.list_projects()
+            target = (projects[0].platform_version if project_id else version) or newest
+            index = self.platform_help.get(target) if target else None
+            if index is None:
+                return
+            for project in projects:
+                if project.status != 'ready' or (not project_id and not version and project.platform_version):
+                    continue
+                if (project.platform_version or newest) != target:
+                    continue
+                try:
+                    engine = self.get_search(project.id)
+                    try:
+                        warm_ready_report(engine, index, self.platform_mode(project.id), project.id)
+                    finally:
+                        engine.db.close_thread_reader()
+                except Exception:
+                    logger.exception('Проект %s: не удалось запустить проверку платформы', project.id)
+
+        self._start_platform_worker(run, f'platform-check-warm-{project_id or version or "auto"}')
+
+    def _start_platform_worker(self, target, name: str) -> None:
+        def run():
+            try:
+                target()
+            except Exception:
+                logger.exception('Фоновая задача справки платформы завершилась с ошибкой (%s)', name)
+            finally:
+                with self._base_diff_lock:
+                    self._platform_workers.discard(threading.current_thread())
+
+        thread = threading.Thread(target=run, daemon=True, name=name)
+        with self._base_diff_lock:
+            if self._closing_platform_workers:
+                return
+            self._platform_workers.add(thread)
+            try:
+                thread.start()
+            except RuntimeError:
+                self._platform_workers.discard(thread)
+                logger.exception('Не удалось запустить фоновую задачу справки платформы (%s)', name)
 
     def _diff_sources(self, project_id: str, base_id: str, source_id: str | None) -> tuple[str, str]:
         """(источник проекта, источник базы) для сравнения: по умолчанию — их
@@ -1540,18 +1601,36 @@ class ProjectManager:
             except Exception:
                 logger.exception('Проект %s: карточки процедур не построены', project_id)
 
-            # Снимок должен быть доступен уже при первом статусе ready.
+            # Если справка сменилась во время прогрева, повторим подготовку
+            # перед ready. Изменение в самом конце подхватит сверка после ready.
+            from .platform_check import ReportUnavailable, prune_report_archives, warm_ready_report, warm_report
             ready_at = datetime.now().isoformat()
+            warmed_key = None
+            warmed_keys = set()
+            for attempt in range(2):
+                try:
+                    version = self.platform_help_version(project_id)
+                    index = self.platform_help.get(version) if version else None
+                    if index is None:
+                        break
+                    if attempt == 0:
+                        db.update_state(progress_phase='platform_check')
+                    key = warm_report(self.get_search(project_id), index, self.platform_mode(project_id),
+                                      ready_at, warmed_key)
+                    if key is None or key == warmed_key:
+                        break
+                    warmed_key = key
+                    warmed_keys.add(key)
+                except (ReportUnavailable, FileNotFoundError):
+                    continue
+                except Exception:
+                    logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
+                    break
+
             try:
-                version = project.platform_version or self.platform_help.newest()
-                index = self.platform_help.get(version) if version else None
-                if index:
-                    from .platform_check import warm_report
-                    db.update_state(progress_phase='platform_check')
-                    warm_report(self.get_search(project_id), index, self.platform_mode(project_id), ready_at)
-            except Exception:
-                # Без снимка первый запрос посчитает его из готового индекса.
-                logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
+                prune_report_archives(db.db_path, keep=warmed_keys)
+            except OSError:
+                logger.exception('Проект %s: не удалось удалить архивы предыдущего индекса', project_id)
 
             total_stats.last_indexed = datetime.now().isoformat()
             total_stats.duration_sec = round(total_stats.duration_sec, 2)
@@ -1560,6 +1639,16 @@ class ProjectManager:
             db.update_state(status='ready', progress_phase='', progress_current=0,
                              progress_total=0, index_duration_sec=total_stats.duration_sec, updated_at=ready_at)
             self._save_project_to_disk(project_id, project)
+            try:
+                version = self.platform_help_version(project_id)
+                index = self.platform_help.get(version) if version else None
+                if index is not None:
+                    warm_ready_report(self.get_search(project_id), index, self.platform_mode(project_id),
+                                      project_id, warmed_key)
+            except FileNotFoundError:
+                pass  # Удаление справки запускает свой прогрев после смены версии.
+            except Exception:
+                logger.exception('Проект %s: не удалось запустить проверку платформы', project_id)
             self._warm_related(project_id)
 
             return total_stats
@@ -1960,6 +2049,7 @@ class ProjectManager:
 
     def close_all(self):
         """Close all open database connections."""
+        from .platform_check import wait_report_jobs
         # Фоновые переиндексации и сравнения (warm_diffs) работают с индексами —
         # дождаться их. Переиндексация пишет status='ready' чуть раньше, чем
         # отпускает соединение: закрыть его под ней — на Windows access
@@ -1967,14 +2057,24 @@ class ProjectManager:
         # конце они сами запускают прогрев сравнений.
         with self._base_diff_lock:
             reindexing = list(self._reindexing)
-        for thread in reindexing:
-            thread.join(timeout=120)
-        with self._base_diff_lock:
-            warming = list(self._warming.values())
-        for thread in warming:
-            thread.join(timeout=60)
-        with self._db_lock:
-            pool = list(self._db_pool.values())
-            self._db_pool.clear()
-        for db in pool:
-            db.close()
+            platform_workers = list(self._platform_workers)
+            self._closing_platform_workers = True
+        try:
+            for thread in reindexing:
+                thread.join(timeout=120)
+            with self._base_diff_lock:
+                warming = list(self._warming.values())
+            for thread in warming:
+                thread.join(timeout=60)
+            for thread in platform_workers:
+                thread.join()
+            with self._db_lock:
+                pool = list(self._db_pool.values())
+                # Задачи уже держат свой Database и не обращаются к пулу.
+                wait_report_jobs(pool)
+                self._db_pool.clear()
+            for db in pool:
+                db.retire()
+        finally:
+            with self._base_diff_lock:
+                self._closing_platform_workers = False

@@ -7,6 +7,7 @@
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -14,25 +15,29 @@ import zlib
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 from functools import cache, lru_cache
 from heapq import merge
-from itertools import groupby
+from itertools import groupby, islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Lock
+from threading import Lock, Thread
+from weakref import WeakKeyDictionary, WeakSet, WeakValueDictionary
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .bsl_parser import (_BSL_TOKEN, _RE_MODULE_VAR_DECL, _form_context_vars,
                          _parse_param_names, read_bsl_text, without_deletions)
 from .bsl_reference import module_context_vars
-from .fsretry import replace_with_retry
+from .db import IndexRemovedError
+from .fsretry import replace_with_retry, retry_on_permission_error
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
 from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, indexed_manager_objects
-from .parser_fingerprint import parser_fingerprint
+from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
 from .platform_help import (compatibility_warning, fingerprint as help_fingerprint,
                             minimum_compatibility_mode, read_meta, version_key)
+from .xml_walker import IO_THREADS
 
 
 logger = logging.getLogger('ariadna')
@@ -478,12 +483,77 @@ LEVELS = {'error': 'Ошибка', 'warning': 'Предупреждение', 'u
 _LEVEL_BY_LABEL = {label: key for key, label in LEVELS.items()}
 _REPORTS = OrderedDict()
 _REPORTS_LOCK = Lock()
+_REPORT_JOBS = {}
+_REPORT_ERRORS = WeakKeyDictionary()
+_CLOSING_DATABASES = WeakSet()
+_RESTORE_LOCKS = WeakValueDictionary()
+_PUBLISH_LOCKS = WeakValueDictionary()
 _MAX_REPORTS = 3
-CACHE_FILE = 'platform-check.zip'
+_MAX_ARCHIVES = 3
+_CHANGED_FILES_SHOWN = 5
+_CACHE_ARCHIVE = re.compile(r'platform-check(?:-[0-9a-f]{64})?\.zip')
 
 
-class ReportIndexChanged(ValueError):
-    """Во время запроса началась переиндексация или изменился индекс."""
+class ReportUnavailable(ValueError):
+    """Снимок пока нельзя выдать. Текст исключения предназначен пользователю."""
+
+
+def _archive_path(db_path, key):
+    return Path(db_path).with_name(f'platform-check-{key}.zip')
+
+
+def _publish_lock(directory):
+    directory = directory.resolve()
+    with _REPORTS_LOCK:
+        return _PUBLISH_LOCKS.setdefault(directory, Lock())
+
+
+def _unlink_archive(path):
+    """Удалить архив; занятый (на Windows его может держать читатель) оставить
+    до следующего прохода, не прерывая очистку остальных."""
+    try:
+        retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+    except OSError:
+        logger.info('Архив проверки платформы занят и не удалён: %s', path.name)
+
+
+def prune_report_archives(db_path, keep=()):
+    """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
+    directory = Path(db_path).parent
+    keep = {_archive_path(db_path, key).name for key in keep}
+    with _publish_lock(directory):
+        for path in directory.glob('platform-check*.zip'):
+            if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
+                _unlink_archive(path)
+
+
+def _trim_archives(published):
+    """После публикации оставить только _MAX_ARCHIVES самых свежих архивов индекса.
+
+    Каждая смена справки (в том числе повторная загрузка той же версии) даёт
+    новый ключ и новый архив; без этого их число росло бы до следующего reindex.
+    Свежие по времени записи сохраняются, чтобы откат на предыдущую справку не
+    требовал полной сборки. Вызывается под блокировкой публикации."""
+    archives = []
+    for path in published.parent.glob('platform-check*.zip'):
+        if path != published and _CACHE_ARCHIVE.fullmatch(path.name):
+            try:
+                archives.append((path.stat().st_mtime_ns, path))
+            except OSError:
+                pass
+    archives.sort(reverse=True)
+    for _, path in archives[_MAX_ARCHIVES - 1:]:
+        _unlink_archive(path)
+
+
+def wait_report_jobs(databases):
+    """Не запускать новых задач для закрываемых индексов и дождаться текущих."""
+    databases = set(databases)
+    with _REPORTS_LOCK:
+        _CLOSING_DATABASES.update(databases)
+        jobs = [job for (db, _), job in _REPORT_JOBS.items() if db in databases]
+    for job in jobs:
+        job.join()
 
 
 def _module_input(engine, mod):
@@ -498,6 +568,7 @@ class _Report:
     def __init__(self):
         self.lock = Lock()
         self.inputs = None
+        self.archive_stamp = None
         self.selections = {}
 
     def _load_modules(self, conn):
@@ -598,7 +669,7 @@ class _Report:
 
     def restore(self, path, key, conn):
         try:
-            with ZipFile(path) as archive:
+            with path.open('rb') as stream, ZipFile(stream) as archive:
                 saved_key, count, starts, inputs = json.loads(archive.read('report.json'))
                 if saved_key != key:
                     return
@@ -609,14 +680,16 @@ class _Report:
                 if sum(map(len, positions.values())) != count:
                     return
                 blocks = [archive.read(f'blocks/{i}') for i in range((count + _BLOCK_SIZE - 1) // _BLOCK_SIZE)]
+                stamp = _stat_signature(os.fstat(stream.fileno()))
             self.count, self.starts, self.positions, self.blocks = count, starts, positions, blocks
             self.inputs = [tuple(item) for item in inputs]
+            self.archive_stamp = stamp
         except FileNotFoundError:
             pass
-        except (OSError, BadZipFile, KeyError, ValueError, TypeError, RuntimeError):
+        except (OSError, BadZipFile, KeyError, ValueError, TypeError, RuntimeError, zlib.error):
             logger.warning('Не удалось прочитать кэш диагностики %s', path, exc_info=True)
 
-    def save(self, path, key):
+    def save(self, path, key, before_replace):
         try:
             # Соседний временный каталог: замена целого архива атомарна
             # и при одновременной записи из разных процессов.
@@ -629,9 +702,22 @@ class _Report:
                         archive.writestr(level, positions.tobytes(), compress_type=ZIP_DEFLATED, compresslevel=1)
                     for i, block in enumerate(self.blocks):
                         archive.writestr(f'blocks/{i}', block)
-                replace_with_retry(temp, path)
+                # Очистка при reindex ждёт замену файлов прошлого индекса.
+                with _publish_lock(path.parent):
+                    before_replace()
+                    replace_with_retry(temp, path)
+                    self.archive_stamp = _stat_signature(path.stat())
+                    _trim_archives(path)
         except OSError:
             logger.warning('Не удалось сохранить кэш диагностики %s', path, exc_info=True)
+            return False
+        return True
+
+    def has_archive(self, path):
+        try:
+            return self.archive_stamp is not None and self.archive_stamp == _stat_signature(path.stat())
+        except OSError:
+            return False
 
     def _select(self, levels):
         if levels is None or len(levels) == len(LEVELS):
@@ -651,18 +737,14 @@ class _Report:
         stop = bisect_left(selection, upper, lo=first)
         return lo, hi, lower, upper, selection[first + offset:min(first + offset + limit, stop)], stop - first
 
-    def page(self, engine, source_id, limit, offset, levels, verify_files):
-        lo, hi, lower, upper, positions, count = self._page_selection(source_id, limit, offset, levels)
-        if verify_files:
-            window = {bisect_right(self.starts, pos) - 1 for pos in positions}
-            if lower == upper and not offset and levels is None:
-                window = range(lo, hi)
-            # Как и для снимка в памяти, сверяем исходники запрошенной страницы.
-            if any(_module_input(engine, self.modules[i]) != self.inputs[i] for i in window):
-                return None
-
+    def page(self, engine, source_id, limit, offset, levels):
+        with self.lock:
+            lo, hi, lower, upper, positions, count = self._page_selection(source_id, limit, offset, levels)
+        changed = self._changed_modules(engine, lo, hi)
         items, prev = [], -1
         for pos in positions:
+            if changed and bisect_right(self.starts, pos) - 1 in changed:
+                continue
             block, index = divmod(pos, _BLOCK_SIZE)
             if block != prev:
                 values = json.loads(zlib.decompress(self.blocks[block]))
@@ -670,7 +752,28 @@ class _Report:
             items.append(values[index])
         counts = {level: bisect_left(rows, upper) - bisect_left(rows, lower)
                   for level, rows in self.positions.items()}
-        return items, offset + limit < count, counts, hi - lo
+        changed_files = []
+        for i, path in islice(changed.items(), _CHANGED_FILES_SHOWN):
+            mod = self.modules[i]
+            reason = 'файл изменился' if path else 'нет исходного текста'
+            changed_files.append(f"@{mod['source_id']} {mod['file_path']} — {reason}")
+        if len(changed) > _CHANGED_FILES_SHOWN:
+            changed_files.append(f'Других изменённых или отсутствующих файлов — {len(changed) - _CHANGED_FILES_SHOWN}.')
+        return items, offset + limit < count, counts, hi - lo, changed_files
+
+    def _changed_modules(self, engine, lo, hi):
+        def snapshot(mod):
+            return _module_input(engine, mod)
+
+        def changes(current):
+            return {i: actual[0] for i, (actual, previous) in enumerate(zip(current, self.inputs[lo:hi]), lo)
+                    if actual != previous}
+
+        modules = self.modules[lo:hi]
+        if len(modules) < IO_THREADS:
+            return changes(map(snapshot, modules))
+        with ThreadPoolExecutor(IO_THREADS) as pool:
+            return changes(pool.map(snapshot, modules))
 
 
 @cache
@@ -684,8 +787,7 @@ def _file_identity(path):
     return stat.st_dev, stat.st_ino
 
 
-def _help_stamp(path):
-    stat = path.stat()
+def _stat_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
 
 
@@ -698,7 +800,7 @@ def _help_revision(path, stamp):
 def _cache_key(engine, index, mode, revision):
     parts = (_report_fingerprint(), sys.byteorder, _file_identity(engine.db.db_path), revision,
              sorted(engine.source_roots.items()), index.version,
-             _help_revision(index.path, _help_stamp(index.path)), mode)
+             _help_revision(index.path, _stat_signature(index.path.stat())), mode)
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
@@ -707,55 +809,161 @@ def _index_revision(conn):
     return tuple(state) if state else ('', 'empty')
 
 
-def _cached_report(db, key):
-    with _REPORTS_LOCK:
-        report = _REPORTS.get((db, key))
-        if report is None:
-            report = _REPORTS[db, key] = _Report()
-        _REPORTS.move_to_end((db, key))
-        if len(_REPORTS) > _MAX_REPORTS:
-            _REPORTS.popitem(last=False)
-        return report
-
-
-def warm_report(engine, index, mode, ready_at):
-    """Подготовить снимок для состояния, которое reindex опубликует последним."""
-    conn = engine.db.read_conn()
-    if not conn.execute("SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
-        return
-    key = _cache_key(engine, index, mode, (ready_at, 'ready'))
-    report = _Report()
-    report._build(engine, conn, index, mode)
-    if key == _cache_key(engine, index, mode, (ready_at, 'ready')):
-        report.save(Path(engine.db.db_path).with_name(CACHE_FILE), key)
-
-
-def check_calls(engine, index, mode, source_id, limit, offset, levels=None):
-    """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
-    conn = engine.db.read_conn()
+def check_index(conn, project_id):
     revision = _index_revision(conn)
     if revision[1] == 'indexing':
-        raise ReportIndexChanged('Дождитесь окончания переиндексации и повторите проверку.')
+        raise ReportUnavailable('Дождитесь окончания переиндексации и повторите проверку.')
+    if index_uses_old_parser(conn):
+        raise ReportUnavailable(old_index_message(project_id))
+    return revision
+
+
+def old_index_message(project_id):
+    return (f'Индекс проекта «{project_id}» построен старой версией Ариадны. '
+            'Переиндексируйте проект целиком (reindex).')
+
+
+def _remember(cache_id, report):
+    _REPORTS[cache_id] = report
+    _REPORTS.move_to_end(cache_id)
+    if len(_REPORTS) > _MAX_REPORTS:
+        _REPORTS.popitem(last=False)
+
+
+def _known_report(cache_id, *, warm):
+    report = _REPORTS.get(cache_id)
+    if cache_id in _REPORT_JOBS and (warm or report is None):
+        raise ReportUnavailable('Отчёт уже готовится. Повторите вызов через минуту-две.')
+    if report is not None:
+        _REPORTS.move_to_end(cache_id)
+        return report
+    db, key = cache_id
+    errors = _REPORT_ERRORS.get(db, {})
+    if key in errors:
+        error = errors[key] if warm else errors.pop(key)
+        raise ReportUnavailable(f'Error: не удалось подготовить отчёт проверки платформы. {error}')
+
+
+def _check_revision(engine, conn, index, mode, key, project_id):
+    revision = check_index(conn, project_id)
+    if engine.db.file_replaced() or key != _cache_key(engine, index, mode, revision):
+        raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
+
+
+def _request_report(engine, index, mode, revision, project_id, *, warm=False, invalid=None):
+    db = engine.db
+    conn = db.read_conn()
     key = _cache_key(engine, index, mode, revision)
-    report = _cached_report(engine.db, key)
-    path = Path(engine.db.db_path).with_name(CACHE_FILE)
-    with report.lock:
-        if report.inputs is None and revision[1] == 'ready':
-            report.restore(path, key, conn)
-        if report.inputs is not None:
+    cache_id = db, key
+    path = _archive_path(db.db_path, key)
+    with _REPORTS_LOCK:
+        report = _known_report(cache_id, warm=warm)
+        if not warm and report is not None and report is not invalid:
+            return key, report
+        restore_lock = _RESTORE_LOCKS.setdefault(cache_id, Lock())
+
+    def prepare(report):
+        try:
+            reader = db.read_conn()
+
+            def verify():
+                _check_revision(engine, reader, index, mode, key, project_id)
+
+            verify()
+            if report is None:
+                report = _Report()
+                report._build(engine, reader, index, mode)
+            if revision[1] == 'ready':
+                report.save(path, key, before_replace=verify)
+            verify()
+            with _REPORTS_LOCK:
+                _remember(cache_id, report)
+        except IndexRemovedError:
+            logger.info('Проект %s: индекс закрыт во время подготовки отчёта', project_id)
+        except (ReportUnavailable, FileNotFoundError) as exc:
+            logger.info('Проект %s: подготовка отчёта прервана (%s)', project_id, exc)
+        except Exception as exc:
+            logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
+            with _REPORTS_LOCK:
+                _REPORT_ERRORS.setdefault(db, {})[key] = str(exc) or type(exc).__name__
+        finally:
             try:
-                page = report.page(engine, source_id, limit, offset, levels, verify_files=True)
-            except (IndexError, ValueError, zlib.error):
-                page = None
-            if page is not None:
-                if key != _cache_key(engine, index, mode, _index_revision(conn)):
-                    raise ReportIndexChanged('Индекс или справка изменились. Повторите проверку.')
-                return page
-        report.inputs = None
-        report._build(engine, conn, index, mode)
-        if key != _cache_key(engine, index, mode, _index_revision(conn)):
-            report.inputs = None
-            raise ReportIndexChanged('Индекс или справка изменились. Повторите проверку.')
-        if revision[1] == 'ready':
-            report.save(path, key)
-        return report.page(engine, source_id, limit, offset, levels, verify_files=False)
+                db.close_thread_reader()
+            finally:
+                with _REPORTS_LOCK:
+                    del _REPORT_JOBS[cache_id]
+
+    with restore_lock:
+        with _REPORTS_LOCK:
+            if invalid is not None and _REPORTS.get(cache_id) is invalid:
+                del _REPORTS[cache_id]
+            report = _known_report(cache_id, warm=warm)
+        if report is not None:
+            if not warm or report.has_archive(path):
+                return key, report
+        elif invalid is None and revision[1] == 'ready':
+            restored = _Report()
+            restored.restore(path, key, conn)
+            if restored.inputs is not None:
+                with _REPORTS_LOCK:
+                    _remember(cache_id, restored)
+                return key, restored
+        with _REPORTS_LOCK:
+            if db in _CLOSING_DATABASES:
+                raise ReportUnavailable('Индекс закрывается. Повторите проверку.')
+            thread = Thread(target=prepare, args=(report,), daemon=True, name=f'platform-check-{project_id}')
+            _REPORT_JOBS[cache_id] = thread
+            try:
+                thread.start()
+            except RuntimeError:
+                del _REPORT_JOBS[cache_id]
+                raise
+    raise ReportUnavailable('Отчёт готовится. Повторите вызов через минуту-две.')
+
+
+def warm_report(engine, index, mode, ready_at, warmed_key=None):
+    """Подготовить снимок для состояния, которое reindex опубликует последним."""
+    conn = engine.db.read_conn()
+    if index_uses_old_parser(conn) or not conn.execute(
+            "SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
+        return
+    revision = _index_revision(conn)
+    key = _cache_key(engine, index, mode, (ready_at, 'ready'))
+    if key == warmed_key:
+        return key
+    report = _Report()
+    report._build(engine, conn, index, mode)
+
+    def verify():
+        if (engine.db.file_replaced() or revision != _index_revision(conn)
+                or key != _cache_key(engine, index, mode, (ready_at, 'ready'))):
+            raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
+
+    if report.save(_archive_path(engine.db.db_path, key), key, before_replace=verify):
+        return key
+
+
+def warm_ready_report(engine, index, mode, project_id, warmed_key=None):
+    conn = engine.db.read_conn()
+    try:
+        revision = check_index(conn, project_id)
+        if revision[1] == 'ready' and conn.execute(
+                "SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
+            if warmed_key is not None and warmed_key == _cache_key(engine, index, mode, revision):
+                return
+            _request_report(engine, index, mode, revision, project_id, warm=True)
+    except ReportUnavailable:
+        pass  # Уже готовится либо сообщение будет выдано при запросе отчёта.
+
+
+def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision):
+    """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
+    key, report = _request_report(engine, index, mode, revision, project_id)
+    try:
+        page = report.page(engine, source_id, limit, offset, levels)
+    except (IndexError, ValueError, zlib.error):
+        key, report = _request_report(engine, index, mode, revision, project_id, invalid=report)
+        page = report.page(engine, source_id, limit, offset, levels)
+    conn = engine.db.read_conn()
+    _check_revision(engine, conn, index, mode, key, project_id)
+    return page

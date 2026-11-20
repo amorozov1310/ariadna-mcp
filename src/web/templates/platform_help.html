@@ -28,10 +28,14 @@
             <td>{% if item.corrupt %}<span class="badge badge-warning">Индекс повреждён</span>
                 {% elif item.stale %}<span class="badge badge-warning">Индекс устарел</span>
                 {% else %}Готов{% endif %}</td>
-            <td><form method="post" action="/api/admin/platform-help/{{ item.version }}/delete"
+            <td><div class="btn-row">
+                <a class="btn btn-ghost" href="/api/admin/platform-help/{{ item.version }}/download"
+                   aria-label="Скачать справку {{ item.version }}">Скачать</a>
+                <form method="post" action="/api/admin/platform-help/{{ item.version }}/delete"
                       data-confirm="Удалить справку {{ item.version }} для всех проектов?" data-confirm-action="Удалить">
-                <button class="btn btn-ghost" type="submit" aria-label="Удалить справку {{ item.version }}">Удалить</button>
-            </form></td></tr>
+                    <button class="btn btn-ghost" type="submit" aria-label="Удалить справку {{ item.version }}">Удалить</button>
+                </form>
+            </div></td></tr>
         {% endfor %}</tbody>
     </table></div>
     {% else %}<p class="text-muted">Загруженных версий пока нет.</p>{% endif %}
@@ -54,7 +58,8 @@
     <form method="post" action="/api/admin/platform-help" enctype="multipart/form-data" data-stage="Проверка индекса">
         <div class="form-group"><label for="index">Файл help.db</label>
             <input id="index" type="file" name="index" accept=".db" required>
-            <div class="form-hint">Ариадна прочитает версию платформы из файла.</div></div>
+            <div class="form-hint">Ариадна прочитает версию платформы из файла.
+                Файл help.db можно скачать в таблице версий на другой установке Ариадны.</div></div>
         <button type="submit" class="btn btn-secondary">Загрузить индекс</button>
         <span role="status"></span>
     </form>
