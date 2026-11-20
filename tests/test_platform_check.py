@@ -57,6 +57,11 @@ def _join_workers(workers):
         assert not worker.is_alive()
 
 
+def _join_help_warm(pm, version):
+    _join_workers([t for t in running_threads() if t.name == f'platform-check-warm-{version}'])
+    _join_workers(_report_workers(pm))
+
+
 def _ready_check(pm, **args):
     result = execute_tool(pm, 'check_platform_calls', args)
     if 'Отчёт готовится.' in result or 'Отчёт уже готовится.' in result:
@@ -1015,6 +1020,124 @@ def test_deleting_newest_help_warms_the_automatic_fallback(project, monkeypatch)
     assert built == [('demo', older)]
     result = execute_tool(pm, 'check_platform_calls', {'project_id': 'demo'})
     assert f'по справке {older}' in result and 'НесуществующийВызов()' in result
+
+
+def test_overlapping_deletions_warm_the_last_help_version(project, monkeypatch):
+    pm, _ = project
+    older, middle = '8.3.9.1', '8.3.24.1'
+    store = pm.platform_help
+    for version in (older, middle):
+        store.build_from_bytes(version, context_book(version))
+    pm.reindex('demo')
+    monkeypatch.setattr(web, '_pm', pm)
+    reached, release = Event(), Event()
+    remove = store.remove
+
+    def delay_remove(version):
+        if version == middle:
+            reached.set()
+            assert release.wait(timeout=10)
+        return remove(version)
+
+    monkeypatch.setattr(store, 'remove', delay_remove)
+    with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client, ThreadPoolExecutor(1) as pool:
+        pending = pool.submit(client.post, f'/api/admin/platform-help/{middle}/delete')
+        try:
+            assert reached.wait(timeout=5)
+            assert client.post(f'/api/admin/platform-help/{VERSION}/delete').status_code == 200
+            _join_help_warm(pm, 'auto')
+            assert f'по справке {middle}' in execute_tool(pm, 'check_platform_calls', {})
+        finally:
+            release.set()
+        assert pending.result(timeout=5).status_code == 200
+
+    _join_help_warm(pm, 'auto')
+    pm.close_all()
+    assert f'по справке {older}' in execute_tool(pm, 'check_platform_calls', {})
+
+
+def test_old_help_build_cannot_overwrite_the_current_version_archive(project, monkeypatch):
+    pm, _ = project
+    newest = '8.3.28.1'
+    monkeypatch.setattr(web, '_pm', pm)
+    old_started, release_old = Event(), Event()
+    original = platform_check._Report._build
+    cache = pm._index_path('demo').with_name(platform_check.CACHE_FILE)
+
+    def delay_build(report, engine, conn, index, mode):
+        if index.version == VERSION:
+            old_started.set()
+            assert release_old.wait(timeout=10)
+        return original(report, engine, conn, index, mode)
+
+    monkeypatch.setattr(platform_check._Report, '_build', delay_build)
+    try:
+        assert 'Отчёт готовится' in execute_tool(pm, 'check_platform_calls', {})
+        assert old_started.wait(timeout=5)
+        old_job, = _report_workers(pm)
+        with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+            response = client.post('/api/admin/platform-help', data={'version': newest},
+                                   files={'context': ('shcntx_ru.hbk', context_book(newest))})
+        assert 'Справка загружена' in response.text
+        _join_workers([t for t in running_threads() if t.name == f'platform-check-warm-{newest}'])
+        _join_workers([t for t in _report_workers(pm) if t is not old_job])
+        new_archive = cache.read_bytes()
+    finally:
+        workers = _report_workers(pm)
+        release_old.set()
+        _join_workers(workers)
+    assert cache.read_bytes() == new_archive
+    pm.close_all()
+    assert f'по справке {newest}' in execute_tool(pm, 'check_platform_calls', {})
+
+
+def test_help_rollback_republishes_the_memory_snapshot(project, monkeypatch):
+    pm, _ = project
+    newest = '8.3.28.1'
+    monkeypatch.setattr(web, '_pm', pm)
+    expected = _ready_check(pm)
+    assert f'по справке {VERSION}' in expected
+    cache = pm._index_path('demo').with_name(platform_check.CACHE_FILE)
+    with ZipFile(cache) as archive:
+        old_header = archive.read('report.json')
+    with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+        response = client.post('/api/admin/platform-help', data={'version': newest},
+                               files={'context': ('shcntx_ru.hbk', context_book(newest))})
+        assert 'Справка загружена' in response.text
+        _join_help_warm(pm, newest)
+        with ZipFile(cache) as archive:
+            assert archive.read('report.json') != old_header
+
+        def fail(*args):
+            pytest.fail('готовый снимок из памяти нужно записать без пересчёта')
+
+        monkeypatch.setattr(platform_check._Report, '_build', fail)
+        assert client.post(f'/api/admin/platform-help/{newest}/delete').status_code == 200
+        _join_help_warm(pm, 'auto')
+    with ZipFile(cache) as archive:
+        assert archive.read('report.json') == old_header
+    pm.close_all()
+    assert execute_tool(pm, 'check_platform_calls', {}) == expected
+
+
+def test_failed_reindex_archive_write_is_retried_after_ready(project, monkeypatch, caplog):
+    pm, _ = project
+    replacement = platform_check.replace_with_retry
+    attempts = []
+
+    def fail_once(temp, path):
+        attempts.append(pm.get_db('demo').get_stats()['status'])
+        if len(attempts) == 1:
+            raise PermissionError('Пробная блокировка архива')
+        replacement(temp, path)
+
+    monkeypatch.setattr(platform_check, 'replace_with_retry', fail_once)
+    pm.reindex('demo')
+    _join_workers(_report_workers(pm))
+    assert attempts == ['indexing', 'ready']
+    assert 'Пробная блокировка архива' in caplog.text
+    pm.close_all()
+    assert 'НесуществующийВызов()' in execute_tool(pm, 'check_platform_calls', {})
 
 
 def test_upload_during_final_reindex_warms_the_new_help(project, monkeypatch):

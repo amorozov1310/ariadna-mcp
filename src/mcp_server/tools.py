@@ -10,6 +10,7 @@ project_id anyway; a single-project registry now just defaults to it).
 """
 
 import sqlite3
+from functools import partial
 
 from ..core.parser_fingerprint import index_uses_old_parser
 from ..core.platform_check import (LEVELS, ReportUnavailable, check_calls, check_index,
@@ -459,7 +460,7 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
 
 def _project_help(pm: ProjectManager, project, version: str = ''):
     store = pm.platform_help
-    version = version or (project.platform_version if project else '') or store.newest()
+    version = version or pm.platform_help_version(project.id if project else None)
     try:
         help_index = store.get(version) if version else None
     except ValueError as e:
@@ -1009,7 +1010,8 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             offset = max(0, offset)
             try:
                 page, more, counts, modules, changed = check_calls(
-                    engine, index, mode, source_id, limit, offset, levels, project_id, revision)
+                    engine, index, mode, source_id, limit, offset, levels, project_id, revision,
+                    partial(pm.platform_help_version, project_id))
             except ReportUnavailable as e:
                 return str(e)
             except (FileNotFoundError, sqlite3.OperationalError):

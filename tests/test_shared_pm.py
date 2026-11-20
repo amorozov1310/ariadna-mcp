@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -114,6 +115,54 @@ def test_get_pm_without_set_pm_creates_its_own(monkeypatch):
             assert pm.data_dir == Path(tmpdir) and app_module.get_pm() is pm
         finally:
             pm.close_all()
+
+
+def test_close_all_waits_for_startup_help_sync(tmp_path, monkeypatch):
+    from src import main
+    from src.core import platform_help
+    from tests.fixtures.generate_platform_help import context_book
+
+    version = '8.3.27.1'
+    platform = tmp_path / 'platform' / version / 'bin'
+    platform.mkdir(parents=True)
+    (platform / 'shcntx_ru.hbk').write_bytes(context_book(version))
+    monkeypatch.setenv('ARIADNA_PLATFORM', str(platform))
+    monkeypatch.setenv('INDEX_DIR', str(tmp_path / 'index'))
+    started, release, joining = threading.Event(), threading.Event(), threading.Event()
+    find_installed = platform_help.find_installed
+
+    def find(roots):
+        started.set()
+        assert release.wait(timeout=10)
+        return find_installed(roots)
+
+    monkeypatch.setattr(platform_help, 'find_installed', find)
+    pm = main.build_shared_state(str(tmp_path / 'data'))
+    try:
+        assert started.wait(timeout=5)
+        monkeypatch.setenv('ARIADNA_PLATFORM', str(tmp_path / 'other'))
+        with pm._base_diff_lock:
+            worker, = pm._platform_workers
+        join_thread = worker.join
+
+        def join(*args, **kwargs):
+            joining.set()
+            return join_thread(*args, **kwargs)
+
+        monkeypatch.setattr(worker, 'join', join)
+        with ThreadPoolExecutor(1) as pool:
+            closing = pool.submit(pm.close_all)
+            try:
+                assert joining.wait(timeout=5)
+                assert not closing.done()
+            finally:
+                release.set()
+            closing.result(timeout=5)
+        assert not worker.is_alive()
+        assert pm.platform_help.newest() == version
+    finally:
+        release.set()
+        pm.close_all()
 
 
 def test_project_created_in_web_ui_is_visible_to_mcp(shared):

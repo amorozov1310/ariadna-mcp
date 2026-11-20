@@ -7,6 +7,7 @@
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -507,6 +508,7 @@ class _Report:
     def __init__(self):
         self.lock = Lock()
         self.inputs = None
+        self.archive_stamp = None
         self.selections = {}
 
     def _load_modules(self, conn):
@@ -607,7 +609,7 @@ class _Report:
 
     def restore(self, path, key, conn):
         try:
-            with ZipFile(path) as archive:
+            with path.open('rb') as stream, ZipFile(stream) as archive:
                 saved_key, count, starts, inputs = json.loads(archive.read('report.json'))
                 if saved_key != key:
                     return
@@ -618,8 +620,10 @@ class _Report:
                 if sum(map(len, positions.values())) != count:
                     return
                 blocks = [archive.read(f'blocks/{i}') for i in range((count + _BLOCK_SIZE - 1) // _BLOCK_SIZE)]
+                stamp = _stat_signature(os.fstat(stream.fileno()))
             self.count, self.starts, self.positions, self.blocks = count, starts, positions, blocks
             self.inputs = [tuple(item) for item in inputs]
+            self.archive_stamp = stamp
         except FileNotFoundError:
             pass
         except (OSError, BadZipFile, KeyError, ValueError, TypeError, RuntimeError, zlib.error):
@@ -646,8 +650,17 @@ class _Report:
                 with publish_lock:
                     before_replace()
                     replace_with_retry(temp, path)
+                    self.archive_stamp = _stat_signature(path.stat())
         except OSError:
             logger.warning('Не удалось сохранить кэш диагностики %s', path, exc_info=True)
+            return False
+        return True
+
+    def has_archive(self, path):
+        try:
+            return self.archive_stamp is not None and self.archive_stamp == _stat_signature(path.stat())
+        except OSError:
+            return False
 
     def _select(self, levels):
         if levels is None or len(levels) == len(LEVELS):
@@ -717,8 +730,7 @@ def _file_identity(path):
     return stat.st_dev, stat.st_ino
 
 
-def _help_stamp(path):
-    stat = path.stat()
+def _stat_signature(stat):
     return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
 
 
@@ -731,7 +743,7 @@ def _help_revision(path, stamp):
 def _cache_key(engine, index, mode, revision):
     parts = (_report_fingerprint(), sys.byteorder, _file_identity(engine.db.db_path), revision,
              sorted(engine.source_roots.items()), index.version,
-             _help_revision(index.path, _help_stamp(index.path)), mode)
+             _help_revision(index.path, _stat_signature(index.path.stat())), mode)
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
@@ -762,11 +774,12 @@ def _remember(cache_id, report):
 
 
 def _known_report(cache_id, *, warm):
-    if report := _REPORTS.get(cache_id):
+    report = _REPORTS.get(cache_id)
+    if cache_id in _REPORT_JOBS and (warm or report is None):
+        raise ReportUnavailable('Отчёт уже готовится. Повторите вызов через минуту-две.')
+    if report is not None:
         _REPORTS.move_to_end(cache_id)
         return report
-    if cache_id in _REPORT_JOBS:
-        raise ReportUnavailable('Отчёт уже готовится. Повторите вызов через минуту-две.')
     db, key = cache_id
     errors = _REPORT_ERRORS.get(db, {})
     if key in errors:
@@ -780,7 +793,12 @@ def _check_revision(engine, conn, index, mode, key, project_id):
         raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
 
-def _request_report(engine, index, mode, revision, project_id, *, warm=False, invalid=None):
+def _check_help_selection(index, resolve_version):
+    if index.version != resolve_version():
+        raise ReportUnavailable('Выбранная справка изменилась. Повторите проверку.')
+
+
+def _request_report(engine, index, mode, revision, project_id, resolve_version, *, warm=False, invalid=None):
     db = engine.db
     conn = db.read_conn()
     key = _cache_key(engine, index, mode, revision)
@@ -788,20 +806,22 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
     path = Path(db.db_path).with_name(CACHE_FILE)
     with _REPORTS_LOCK:
         report = _known_report(cache_id, warm=warm)
-        if report is not None and report is not invalid:
+        if not warm and report is not None and report is not invalid:
             return key, report
         restore_lock = _RESTORE_LOCKS.setdefault(cache_id, Lock())
 
-    def build():
+    def prepare(report):
         try:
             reader = db.read_conn()
 
             def verify():
+                _check_help_selection(index, resolve_version)
                 _check_revision(engine, reader, index, mode, key, project_id)
 
             verify()
-            report = _Report()
-            report._build(engine, reader, index, mode)
+            if report is None:
+                report = _Report()
+                report._build(engine, reader, index, mode)
             if revision[1] == 'ready':
                 report.save(path, key, before_replace=verify)
             verify()
@@ -809,6 +829,8 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
                 _remember(cache_id, report)
         except IndexRemovedError:
             logger.info('Проект %s: индекс закрыт во время подготовки отчёта', project_id)
+        except ReportUnavailable as exc:
+            logger.info('Проект %s: подготовка отчёта прервана (%s)', project_id, exc)
         except Exception as exc:
             logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
             with _REPORTS_LOCK:
@@ -824,9 +846,11 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
         with _REPORTS_LOCK:
             if invalid is not None and _REPORTS.get(cache_id) is invalid:
                 del _REPORTS[cache_id]
-            if report := _known_report(cache_id, warm=warm):
+            report = _known_report(cache_id, warm=warm)
+        if report is not None:
+            if not warm or report.has_archive(path):
                 return key, report
-        if invalid is None and revision[1] == 'ready':
+        elif invalid is None and revision[1] == 'ready':
             restored = _Report()
             restored.restore(path, key, conn)
             if restored.inputs is not None:
@@ -834,7 +858,7 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
                     _remember(cache_id, restored)
                 return key, restored
         with _REPORTS_LOCK:
-            thread = Thread(target=build, daemon=True, name=f'platform-check-{project_id}')
+            thread = Thread(target=prepare, args=(report,), daemon=True, name=f'platform-check-{project_id}')
             _REPORT_JOBS[cache_id] = thread
             try:
                 thread.start()
@@ -844,7 +868,7 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
     raise ReportUnavailable('Отчёт готовится. Повторите вызов через минуту-две.')
 
 
-def warm_report(engine, index, mode, ready_at, warmed_key=None):
+def warm_report(engine, index, mode, ready_at, resolve_version, warmed_key=None):
     """Подготовить снимок для состояния, которое reindex опубликует последним."""
     conn = engine.db.read_conn()
     if index_uses_old_parser(conn) or not conn.execute(
@@ -858,15 +882,16 @@ def warm_report(engine, index, mode, ready_at, warmed_key=None):
     report._build(engine, conn, index, mode)
 
     def verify():
+        _check_help_selection(index, resolve_version)
         if (engine.db.file_replaced() or revision != _index_revision(conn)
                 or key != _cache_key(engine, index, mode, (ready_at, 'ready'))):
             raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
-    report.save(Path(engine.db.db_path).with_name(CACHE_FILE), key, before_replace=verify)
-    return key
+    if report.save(Path(engine.db.db_path).with_name(CACHE_FILE), key, before_replace=verify):
+        return key
 
 
-def warm_ready_report(engine, index, mode, project_id, warmed_key=None):
+def warm_ready_report(engine, index, mode, project_id, resolve_version, warmed_key=None):
     conn = engine.db.read_conn()
     try:
         revision = check_index(conn, project_id)
@@ -874,18 +899,18 @@ def warm_ready_report(engine, index, mode, project_id, warmed_key=None):
                 "SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
             if warmed_key is not None and warmed_key == _cache_key(engine, index, mode, revision):
                 return
-            _request_report(engine, index, mode, revision, project_id, warm=True)
+            _request_report(engine, index, mode, revision, project_id, resolve_version, warm=True)
     except ReportUnavailable:
         pass  # Уже готовится либо сообщение будет выдано при запросе отчёта.
 
 
-def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision):
+def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision, resolve_version):
     """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
-    key, report = _request_report(engine, index, mode, revision, project_id)
+    key, report = _request_report(engine, index, mode, revision, project_id, resolve_version)
     try:
         page = report.page(engine, source_id, limit, offset, levels)
     except (IndexError, ValueError, zlib.error):
-        key, report = _request_report(engine, index, mode, revision, project_id, invalid=report)
+        key, report = _request_report(engine, index, mode, revision, project_id, resolve_version, invalid=report)
         page = report.page(engine, source_id, limit, offset, levels)
     conn = engine.db.read_conn()
     _check_revision(engine, conn, index, mode, key, project_id)

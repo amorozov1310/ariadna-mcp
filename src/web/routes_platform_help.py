@@ -170,8 +170,7 @@ def remove_help(version: str):
     pm = get_pm()
     store = pm.platform_help
     try:
-        was_newest = version == store.newest()
-        if store.remove(version) and was_newest:
+        if store.remove(version):
             pm.warm_platform_checks()
     except (ValueError, OSError) as e:
         return _back(error=str(e))
