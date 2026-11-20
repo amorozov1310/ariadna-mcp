@@ -14,11 +14,20 @@
     <p class="notice notice-warning" role="alert">{{ version }} · {{ reason }}</p>
     {% endfor %}
     {% if versions %}
-    <div class="table-wrap"><table>
-        <thead><tr><th>Версия</th><th>Записей</th><th>Размер</th><th>Состояние</th><th></th></tr></thead>
+    <div class="table-scroll">
+    <table class="detail-table">
+        <thead><tr>
+            <th scope="col">Версия</th><th scope="col" class="num">Записей</th>
+            <th scope="col" class="num">Размер</th><th scope="col">Состояние</th>
+            <th scope="col"><span class="visually-hidden">Действия</span></th>
+        </tr></thead>
         <tbody>{% for item in versions %}
-        <tr><td>{{ item.version }}</td><td>{{ item.entries }}</td><td>{{ "%.2f"|format(item.size / 1048576) }} МБ</td>
-            <td>{% if item.corrupt %}Индекс повреждён{% elif item.stale %}Индекс устарел{% else %}Готов{% endif %}</td>
+        <tr><td class="mono">{{ item.version }}</td>
+            <td class="num">{{ item.entries }}</td>
+            <td class="num">{{ "%.2f"|format(item.size / 1048576) }} МБ</td>
+            <td>{% if item.corrupt %}<span class="badge badge-warning">Индекс повреждён</span>
+                {% elif item.stale %}<span class="badge badge-warning">Индекс устарел</span>
+                {% else %}Готов{% endif %}</td>
             <td><form method="post" action="/api/admin/platform-help/{{ item.version }}/delete"
                       data-confirm="Удалить справку {{ item.version }} для всех проектов?" data-confirm-action="Удалить">
                 <button class="btn btn-ghost" type="submit" aria-label="Удалить справку {{ item.version }}">Удалить</button>
