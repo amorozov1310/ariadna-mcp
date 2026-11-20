@@ -156,6 +156,7 @@ def project_settings(request: Request, project_id: str, tab: str = 'data', edit:
         "project": project,
         # «Опасная зона» — только администратору; участнику по такой ссылке — «Данные».
         "tab": tab if tab in SETTINGS_TABS and (tab != 'danger' or is_admin(request)) else 'data',
+        "platform_versions": [v["version"] for v in pm.platform_help.versions()] if tab == "general" else [],
         "edit_source": next((s for s in project.sources if s.id == edit), None),
         "index_error": pm.index_error(project_id) if project.status == 'error' else '',
     })
@@ -163,13 +164,23 @@ def project_settings(request: Request, project_id: str, tab: str = 'data', edit:
 
 @router.post("/api/projects/{project_id}/update")
 async def update_project_meta(
+    request: Request,
     project_id: str,
     name: str = Form(...),
     description: str = Form(''),
+    platform_version: str = Form(''),
 ):
     pm = get_pm()
     try:
-        pm.update_project(project_id, name=name, description=description)
+        changes = {'name': name, 'description': description}
+        if 'platform_version' in await request.form():
+            if platform_version and platform_version != pm.get_project(project_id).platform_version:
+                if not pm.platform_help.get(platform_version):
+                    raise HTTPException(400, 'Справка выбранной версии ещё не загружена')
+            changes['platform_version'] = platform_version
+        pm.update_project(project_id, **changes)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     except KeyError:
         raise HTTPException(404, f"Проект «{project_id}» не найден")
     return RedirectResponse(f"/projects/{project_id}/settings?tab=general", status_code=303)

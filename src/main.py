@@ -81,6 +81,8 @@ def build_shared_state(data_dir: str):
         pm.reset_stale_indexing()
     except Exception:
         logger.exception("Не удалось проверить незавершённые индексации")
+    threading.Thread(target=pm.platform_help.sync_installed, kwargs={'background': False},
+                     name='platform-help', daemon=True).start()
     return pm
 
 

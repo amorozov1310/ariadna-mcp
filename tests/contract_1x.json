@@ -466,6 +466,45 @@
       "result": "string"
     }
   },
+  "platform_help": {
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "default": "<нет умолчания>"
+      },
+      "kind": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "version": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "project_id": {
+        "type": "null|string",
+        "required": false,
+        "default": null
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 10
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
+    },
+    "read_only": true,
+    "destructive": false,
+    "output": {
+      "result": "string"
+    }
+  },
   "reindex": {
     "params": {
       "project_id": {

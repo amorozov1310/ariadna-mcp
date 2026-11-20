@@ -48,7 +48,7 @@ TOOL_GROUPS = (
                            'get_call_tree', 'find_broken_calls')),
     ('Сравнение с типовой', ('diff_from_base', 'update_conflicts')),
     ('Словарь и знания', ('list_glossary', 'add_glossary_term', 'remove_glossary_term',
-                          'knowledge_sources')),
+                          'knowledge_sources', 'platform_help')),
     ('Обслуживание', ('list_projects', 'list_sources', 'get_index_status', 'diagnose_index',
                       'reindex', 'remove_source')),
 )

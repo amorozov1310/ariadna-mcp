@@ -197,10 +197,24 @@
             <label for="p-desc">Описание</label>
             <input id="p-desc" name="description" value="{{ project.description }}">
         </div>
+        <div class="form-group">
+            <label for="p-platform">Версия платформы</label>
+            <select id="p-platform" name="platform_version">
+                <option value="">Новейшая загруженная</option>
+                {% if project.platform_version and project.platform_version not in platform_versions %}
+                <option selected>{{ project.platform_version }}</option>
+                {% endif %}
+                {% for version in platform_versions %}
+                <option {% if version == project.platform_version %}selected{% endif %}>{{ version }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-hint"><a href="/admin/platform-help">Справка платформы</a> для запросов агента.</div>
+        </div>
         <button type="submit" class="btn btn-primary">Сохранить</button>
     </form>
     {% else %}
     <dl class="kv">
+        <dt>Версия платформы</dt><dd>{{ project.platform_version or "Новейшая загруженная" }}</dd>
         <dt>Название</dt><dd>{{ project.name }}</dd>
         <dt>Код проекта</dt><dd><span class="mono">{{ project.id }}</span></dd>
         {% if project.description %}<dt>Описание</dt><dd>{{ project.description }}</dd>{% endif %}

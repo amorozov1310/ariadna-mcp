@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Справка платформы — Ариадна{% endblock %}
+{% block content %}
+<h1 class="page-title">Справка платформы</h1>
+{% if message %}<p class="notice notice-success" role="status">{{ message }}</p>{% endif %}
+{% if error %}<p class="notice notice-warning" role="alert">{{ error }}</p>{% endif %}
+<div class="card">
+    <h2 class="section-title">Версии платформы</h2>
+    {% for version, stage in status.building.items() %}
+    <p role="status">{{ version }} · {{ stage }}… <a href="/admin/platform-help">Обновить</a></p>
+    {% endfor %}
+    {% for version, reason in status.errors.items() %}
+    <p class="notice notice-warning" role="alert">{{ version }} · {{ reason }}</p>
+    {% endfor %}
+    {% if versions %}
+    <div class="table-wrap"><table>
+        <thead><tr><th>Версия</th><th>Записей</th><th>Размер</th><th>Состояние</th><th></th></tr></thead>
+        <tbody>{% for item in versions %}
+        <tr><td>{{ item.version }}</td><td>{{ item.entries }}</td><td>{{ "%.2f"|format(item.size / 1048576) }} МБ</td>
+            <td>{% if item.stale %}Индекс устарел{% else %}Готов{% endif %}</td>
+            <td><form method="post" action="/api/admin/platform-help/{{ item.version }}/delete"
+                      data-confirm="Удалить справку {{ item.version }} для всех проектов?" data-confirm-action="Удалить">
+                <button class="btn btn-ghost" type="submit" aria-label="Удалить справку {{ item.version }}">Удалить</button>
+            </form></td></tr>
+        {% endfor %}</tbody>
+    </table></div>
+    {% else %}<p class="text-muted">Загруженных версий пока нет.</p>{% endif %}
+</div>
+<div class="card">
+    <h2 class="section-title">Добавить справку из файлов платформы</h2>
+    <form method="post" action="/api/admin/platform-help" enctype="multipart/form-data" data-stage="Построение индекса">
+        <div class="form-group"><label for="version">Версия платформы</label>
+            <input id="version" name="version" placeholder="8.3.27.2170" required></div>
+        <div class="form-group"><label for="context">Синтакс-помощник · shcntx_ru.hbk</label>
+            <input id="context" type="file" name="context" accept=".hbk" required></div>
+        <div class="form-group"><label for="query">Язык запросов · shquery_ru.hbk (необязательно)</label>
+            <input id="query" type="file" name="query" accept=".hbk"></div>
+        <button type="submit" class="btn btn-primary">Построить индекс</button>
+        <span role="status"></span>
+    </form>
+</div>
+<div class="card">
+    <h2 class="section-title">Загрузить готовый индекс</h2>
+    <form method="post" action="/api/admin/platform-help" enctype="multipart/form-data" data-stage="Проверка индекса">
+        <div class="form-group"><label for="index">Файл help.db</label>
+            <input id="index" type="file" name="index" accept=".db" required>
+            <div class="form-hint">Ариадна прочитает версию платформы из файла.</div></div>
+        <button type="submit" class="btn btn-secondary">Загрузить индекс</button>
+        <span role="status"></span>
+    </form>
+</div>
+<script>
+for (const form of document.querySelectorAll('form[data-stage]')) {
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const button = form.querySelector('button');
+        const status = form.querySelector('[role=status]');
+        const data = new FormData(form);
+        button.disabled = true;
+        status.textContent = 'Загрузка файла…';
+        const timer = setInterval(async () => {
+            try {
+                const response = await fetch('/admin/platform-help/status');
+                const state = await response.json();
+                if (button.disabled) status.textContent = state.building[data.get('version')] || form.dataset.stage + '…';
+            } catch {
+                // Основной запрос сообщит об ошибке загрузки или построения.
+            }
+        }, 1000);
+        try {
+            const response = await fetch(form.action, {method: 'POST', body: data});
+            if (!response.ok) throw new Error('Сервер вернул ' + response.status);
+            window.location.assign(response.url);
+        } catch (error) {
+            status.textContent = 'Загрузка не завершена. ' + error.message;
+            button.disabled = false;
+        } finally {
+            clearInterval(timer);
+        }
+    });
+}
+</script>
+{% endblock %}

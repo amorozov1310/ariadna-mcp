@@ -22,6 +22,7 @@ from . import parser_fingerprint
 from .archives import extract_archive
 from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
+from .platform_help import PlatformHelpStore
 from .search import SearchEngine
 
 logger = logging.getLogger('ariadna')
@@ -160,6 +161,7 @@ class ProjectInfo:
     # Новый релиз той же типовой — проект с его выгрузкой: с ним
     # get_update_conflicts пересекает доработки проекта. '' — не задан.
     release_project: str = ''
+    platform_version: str = ''  # пусто — новейшая загруженная справка
 
 
 class ProjectManager:
@@ -188,6 +190,7 @@ class ProjectManager:
     def __init__(self, data_dir: str = '/data', index_dir: str | None = None):
         self.data_dir = Path(data_dir)
         self.index_dir = Path(index_dir) if index_dir else None
+        self.platform_help = PlatformHelpStore((self.index_dir or self.data_dir) / 'platform-help')
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
         self._db_pool: dict[str, Database] = {}
@@ -404,6 +407,7 @@ class ProjectManager:
             'index_stats': asdict(proj.index_stats),
             'base_project': proj.base_project,
             'release_project': proj.release_project,
+            'platform_version': proj.platform_version,
         }
 
     def _save_registry(self):
@@ -577,11 +581,15 @@ class ProjectManager:
         их; KeyError — только если нет ни записи, ни каталогов."""
         project_dir = self.projects_dir / project_id
         index_parent = self._index_path(project_id).parent
+        # На томе INDEX_DIR проект с id «platform-help» делит каталог
+        # с версиями справки. Ему принадлежат только файлы index.db.
+        shared_dir = index_parent == self.platform_help.root
+        index_files = index_parent / 'index.db' if shared_dir else index_parent
         with self._registry_lock():
             registry = self._load_registry()
             if registry.pop(project_id, None) is not None:
                 self._save_registry()
-            elif not project_dir.exists() and not index_parent.exists():
+            elif not project_dir.exists() and not index_files.exists():
                 raise KeyError(f"Project '{project_id}' not found")
 
         self._retire_project_db(project_id)
@@ -593,7 +601,11 @@ class ProjectManager:
                 # Повторы при PermissionError: файл индекса освобождается, как
                 # только закончится запрос, начатый до закрытия (Database.close
                 # ждёт его), а ещё его может ненадолго открыть антивирус.
-                rmtree_with_retry(path)
+                if path == self.platform_help.root:
+                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'):
+                        (path / name).unlink(missing_ok=True)
+                else:
+                    rmtree_with_retry(path)
             except OSError as e:
                 logger.error("Проект %s убран из реестра, но каталог %s удалить не удалось: %s. "
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)

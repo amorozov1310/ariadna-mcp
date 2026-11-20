@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixtures.generate_platform_help import context_book, query_book
+
 ROOT = Path(__file__).resolve().parent.parent
 
 pytestmark = pytest.mark.live
@@ -46,6 +48,11 @@ def native_server():
         env = {**os.environ, 'DATA_DIR': os.path.join(tmpdir, 'data'), 'WEB_PORT': str(web_port),
                'MCP_HTTP_PORT': str(mcp_port), 'LISTEN_ADDR': '127.0.0.1',
                'PYTHONIOENCODING': 'utf-8'}
+        platform = Path(tmpdir) / 'platform' / '8.3.27.1' / 'bin'
+        platform.mkdir(parents=True)
+        (platform / 'shcntx_ru.hbk').write_bytes(context_book())
+        (platform / 'shquery_ru.hbk').write_bytes(query_book())
+        env['ARIADNA_PLATFORM'] = str(platform)
         env.pop('INDEX_DIR', None)
         log_path = os.path.join(tmpdir, 'server.log')
         with open(log_path, 'w', encoding='utf-8') as log:
@@ -91,6 +98,8 @@ def test_live_check_passes_and_cleans_up(native_server, capsys):
 
     # Временные проекты удалены, чужой остался.
     assert ctx.project_ids() == ['owner']
+    answer, is_error = ctx.call('platform_help', {'query': 'СтрНайти', 'kind': 'query'})
+    assert not is_error and '8.3.27.1' in answer and 'СтрНайти(А, Б)' in answer
     log = Path(log_path).read_text(encoding='utf-8')
     assert 'Traceback' not in log, log[-3000:]
 
