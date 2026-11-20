@@ -52,22 +52,29 @@ def _book(pages):
 def context_book(description='Учебное описание.'):
     pages = []
 
-    def page(path, ru, en, owner='', owner_en=''):
+    def page(path, ru, en, owner='', owner_en='', version='', availability='Сервер', value_type=''):
         name = f'{ru} ({en})'
         title = f'{owner} ({owner_en})' if owner else name
+        type_line = f'Тип: {escape(value_type)}.<br>' if value_type else ''
         html = (f'<h1>{escape(name)}</h1><p class="V8SH_title">{escape(title)}</p>'
                 f'<p class="V8SH_heading">{escape(name)}</p>'
                 f'<p class="V8SH_chapter">Синтаксис:</p>{ru}(&lt;Аргумент&gt;)'
                 '<p class="V8SH_chapter">Параметры:</p>'
                 '<div class="V8SH_rubric">&lt;Аргумент&gt; (обязательный)</div>'
                 'Тип: Строка.<br>Учебный параметр.'
-                f'<p class="V8SH_chapter">Описание:</p>{escape(description)}'
-                '<p class="V8SH_chapter">Доступность:</p>Сервер.')
+                f'<p class="V8SH_chapter">Описание:</p>{type_line}{escape(description)}'
+                f'<p class="V8SH_chapter">Доступность:</p>{availability}.')
+        if version:
+            html += f'<p class="V8SH_chapter">Использование в версии:</p>{escape(version)}'
         pages.append((path, ru, html))
 
     for ru, en in [('СтрНайти', 'StrFind'), ('СтрНайтиПример', 'StrFindExample')]:
         page(f'objects/Global context/methods/{en}.html', ru, en)
     page('objects/ValueTable.html', 'ТаблицаЗначений', 'ValueTable')
+    page('objects/ValueTable/methods/Count.html', 'Количество', 'Count', 'ТаблицаЗначений',
+         'ValueTable', 'Доступен начиная с версии 8.3.25.', 'Тонкий клиент, сервер')
+    page('objects/Global context/methods/ModeExample.html', 'ПримерРежима', 'ModeExample',
+         version='Доступен в режиме совместимости с версией 8.3.26 и последующими.')
     for ru, en in [('Пустая', 'Empty'), ('ИзСтрок', 'FromRows')]:
         page(f'objects/ValueTable/ctors/{en}.html', ru, en, 'ТаблицаЗначений', 'ValueTable')
     for ru, en in [('СправочникМенеджер', 'CatalogManager'), ('СправочникОбъект', 'CatalogObject'),
@@ -79,6 +86,8 @@ def context_book(description='Учебное описание.'):
     page('objects/ValueTable/events/Changed.html', 'Изменение', 'Changed', 'ТаблицаЗначений', 'ValueTable')
     page('objects/ValueTable/properties/Rows.html', 'Строки', 'Rows', 'ТаблицаЗначений', 'ValueTable')
     page('objects/Global context/properties/Example.html', 'Пример', 'Example')
+    page('objects/Global context/properties/ExampleTable.html', 'ПримерТаблицы', 'ExampleTable',
+         version='Доступен начиная с версии 8.3.27.', value_type='ТаблицаЗначений')
     return _book(pages)
 
 

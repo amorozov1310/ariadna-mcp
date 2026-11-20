@@ -45,7 +45,7 @@ TOOL_GROUPS = (
                'semantic_search_code', 'list_objects')),
     ('Объект', ('get_object_details', 'find_references')),
     ('Процедуры и вызовы', ('get_procedure_context', 'get_procedure_code', 'get_module_outline',
-                           'get_call_tree', 'find_broken_calls')),
+                           'get_call_tree', 'find_broken_calls', 'check_platform_calls')),
     ('Сравнение с типовой', ('diff_from_base', 'update_conflicts')),
     ('Словарь и знания', ('list_glossary', 'add_glossary_term', 'remove_glossary_term',
                           'knowledge_sources', 'platform_help')),

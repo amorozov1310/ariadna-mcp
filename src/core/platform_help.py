@@ -301,7 +301,7 @@ _BR = re.compile(r'<\s*(br|/p|/div|/li|/h\d|/tr)\b[^>]*>', re.I)
 _NAME_PAIR = re.compile(r'^(.*?)\s*\(([^()]*)\)\s*$')
 _RUBRIC = re.compile(r'<div class="V8SH_rubric">(.*?)</div>', re.S | re.I)
 _SINCE = re.compile(r'начиная с версии\s+(\d+(?:\.\d+)+)', re.I)
-_COMPAT = re.compile(r'совместимости с версией\s+(\d+(?:\.\d+)+)', re.I)
+_COMPAT = re.compile(r'совместимости с верси(?:ей|и)\s+(\d+(?:\.\d+)+)', re.I)
 
 
 def html_text(fragment: str) -> str:
@@ -789,10 +789,27 @@ def _cut(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n].rstrip() + '…'
 
 
-def format_entry(e: HelpEntry, full: bool = True) -> str:
+def compatibility_warning(since: str, compat: str, mode: str) -> str:
+    """Ограничения из раздела «Использование в версии» для режима проекта."""
+    if not mode:
+        return ''
+    limits = []
+    if since and version_key(since) > version_key(mode):
+        limits.append(f'появился в {since}')
+    if compat and compat != since and version_key(compat) > version_key(mode):
+        limits.append(f'требует режима совместимости {compat} или новее')
+    if not limits:
+        return ''
+    return ', '.join(limits) + f', а у конфигурации режим совместимости {mode}'
+
+
+def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:
     """Карточка записи справки для агента: сжато, длинное описание обрезано."""
     head = e.full_ru + (f' ({e.full_en})' if e.full_en and e.full_en != e.full_ru else '')
     lines = [f'{head} — {KINDS.get(e.kind, e.kind)}']
+    warning = compatibility_warning(e.since, e.compat, mode)
+    if warning:
+        lines.append(f'Недоступно в режиме проекта: элемент {warning}.')
     if not full:
         syntax = next((v['syntax'] for v in e.variants if v.get('syntax')), '')
         if syntax:
@@ -824,6 +841,8 @@ def format_entry(e: HelpEntry, full: bool = True) -> str:
         lines.append(f'Доступность: {e.availability}')
     if e.since:
         lines.append(f'С версии {e.since}' + (f' (режим совместимости {e.compat} и новее)' if e.compat else ''))
+    elif e.compat:
+        lines.append(f'Режим совместимости {e.compat} и новее')
     if e.description:
         lines.append(f'Описание: {_cut(e.description, 600)}')
     if e.note:

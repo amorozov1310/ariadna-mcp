@@ -360,6 +360,19 @@ def is_russian_dump(xml_root: str | Path) -> bool:
     return True
 
 
+def compatibility_version(xml_root: Path | None) -> str:
+    """Числовой режим основной конфигурации. Для DontUse и выгрузки без XML — ''."""
+    if xml_root is None:
+        return ''
+    try:
+        props = _child(_object_element(xml_root / 'Configuration.xml'), 'Properties')
+    except (OSError, ET.ParseError):
+        return ''
+    mode = _text(props, 'CompatibilityMode')
+    match = re.fullmatch(r'Version(\d+(?:_\d+)+)', mode)
+    return match[1].replace('_', '.') if match else ''
+
+
 HELP_MAX_CHARS = 20000   # справка длиннее — обрезается: назначение объекта в начале
 
 

@@ -13,6 +13,8 @@ import sqlite3
 
 from ..core.platform_help import KINDS, KIND_ALIASES, format_entry
 from ..core.project_manager import ProjectManager, ReindexInProgressError
+from ..core.platform_check import check_calls
+from ..core.xml_metadata import compatibility_version
 from ..core.search import format_search_results, format_object_details
 from . import semantic_search
 
@@ -260,7 +262,7 @@ def format_procedure_context(ctx: dict) -> str:
 MAX_LIMIT = 500
 _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
                 'search_procedures', 'search_code', 'diff_from_base', 'update_conflicts',
-                'find_broken_calls', 'knowledge_sources', 'platform_help')
+                'find_broken_calls', 'knowledge_sources', 'platform_help', 'check_platform_calls')
 
 # Сколько процедур «Missing from index» показывает diagnose_index: на большой
 # конфигурации их тысячи, а для диагностики хватает первых.
@@ -452,21 +454,9 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             f"выдаётся; остальное — через offset)")
 
 
-def _platform_help(pm: ProjectManager, args: dict) -> str:
+def _project_help(pm: ProjectManager, project, version: str = ''):
     store = pm.platform_help
-    version = (args.get('version') or '').strip()
-    if not version:
-        project_id = args.get('project_id')
-        if project_id:
-            try:
-                version = pm.get_project(project_id).platform_version
-            except KeyError:
-                return f'Error: проект «{project_id}» не найден'
-        else:
-            projects = pm.list_projects()
-            if len(projects) == 1:
-                version = projects[0].platform_version
-    version = version or store.newest()
+    version = version or (project.platform_version if project else '') or store.newest()
     try:
         help_index = store.get(version) if version else None
     except ValueError as e:
@@ -475,6 +465,27 @@ def _platform_help(pm: ProjectManager, args: dict) -> str:
         label = f' {version}' if version else ''
         return (f'Справка платформы{label} не загружена. Добавьте её в Web UI → Настройки → '
                 'Справка платформы. При запуске Ариадна сама находит установленную платформу.')
+    return help_index
+
+
+def _project_mode(pm, project_id):
+    return compatibility_version(pm.get_source_xml_path(project_id, pm.main_source(project_id)))
+
+
+def _platform_help(pm: ProjectManager, args: dict) -> str:
+    project_id = (args.get('project_id') or '').strip()
+    if project_id:
+        try:
+            project = pm.get_project(project_id)
+        except KeyError:
+            return f'Error: проект «{project_id}» не найден'
+    else:
+        projects = pm.list_projects()
+        project = projects[0] if len(projects) == 1 else None
+    help_index = _project_help(pm, project, (args.get('version') or '').strip())
+    if isinstance(help_index, str):
+        return help_index
+    version = help_index.version
     query = args.get('query', '').strip()
     if not query:
         return 'Error: укажите имя или слова для поиска в справке платформы'
@@ -496,7 +507,8 @@ def _platform_help(pm: ProjectManager, args: dict) -> str:
         if all(part.isidentifier() for part in query.removesuffix('()').split('.')):
             msg += ' Вероятно, это метод конфигурации. Ищите через search_procedures или search_code.'
         return msg
-    parts = [f'Справка платформы {version}', *(format_entry(e) for e in entries)]
+    mode = _project_mode(pm, project.id) if project else ''
+    parts = [f'Справка платформы {version}', *(format_entry(e, mode=mode) for e in entries)]
     if more:
         parts.append(f'Следующая страница: offset={offset + limit}.')
     return '\n\n'.join(parts)
@@ -959,6 +971,31 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             result = pm.broken_calls(project_id, source_id or '',
                                      (args.get('module_name') or '').strip())
             return format_broken_calls(project_id, result, offset, max(1, int(limit_arg or 50)))
+
+        case 'check_platform_calls':
+            index = _project_help(pm, pm.get_project(project_id))
+            if isinstance(index, str):
+                return index
+            if source_id and (error := _unknown_source_error(pm, project_id, source_id)):
+                return error
+            if not engine.db.read_conn().execute("SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
+                return 'В индексе нет модулей для проверки. Добавьте выгрузку с модулями и выполните reindex.'
+            mode = _project_mode(pm, project_id)
+            limit = max(1, int(args.get('limit', 50)))
+            offset = max(0, offset)
+            try:
+                page, more = check_calls(engine, index, mode, source_id, limit, offset)
+            except sqlite3.OperationalError:
+                if index.path.exists():
+                    raise
+                return f'Справка {index.version} удалена во время проверки.'
+            heading = f'Проверка «{project_id}» по справке {index.version}. '
+            heading += f'Режим совместимости {mode}.' if mode else 'Числовой режим совместимости не задан.'
+            if not page:
+                return heading + (f' При offset={offset} записей больше нет.' if offset else ' Замечаний нет.')
+            if more:
+                page.append(f'Следующая страница: offset={offset + limit}.')
+            return '\n'.join([heading, *page])
 
         case 'diagnose_index':
             from ..core.search import diagnose_index
