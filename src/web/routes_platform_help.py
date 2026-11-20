@@ -167,8 +167,12 @@ def download_help(version: str):
 
 @router.post('/api/admin/platform-help/{version}/delete')
 def remove_help(version: str):
+    pm = get_pm()
+    store = pm.platform_help
     try:
-        get_pm().platform_help.remove(version)
+        was_newest = version == store.newest()
+        if store.remove(version) and was_newest:
+            pm.warm_platform_checks()
     except (ValueError, OSError) as e:
         return _back(error=str(e))
     return _back(message=f'Справка {version} удалена.')

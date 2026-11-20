@@ -71,9 +71,7 @@ def index_uses_old_parser(conn) -> bool:
     if not current:
         return False
     return conn.execute(
-        """SELECT 1 FROM parser_state WHERE fingerprint != '' AND fingerprint != ?
-           UNION ALL
-           SELECT 1 FROM sources s LEFT JOIN parser_state p ON p.source_id=s.id
-           WHERE COALESCE(p.fingerprint, '')='' AND EXISTS (
+        """SELECT 1 FROM sources s LEFT JOIN parser_state p ON p.source_id=s.id
+           WHERE COALESCE(p.fingerprint, '') != ? AND EXISTS (
                SELECT 1 FROM modules m WHERE m.source_id=s.id AND m.file_hash != '')
            LIMIT 1""", (current,)).fetchone() is not None

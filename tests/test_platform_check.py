@@ -2,9 +2,12 @@
 
 import asyncio
 import shutil
+import struct
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Event, enumerate as running_threads
+from threading import Barrier, Event, current_thread, enumerate as running_threads, get_ident
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -586,7 +589,21 @@ def test_cached_page_rechecks_all_modules(project, monkeypatch, session_code):
     result = execute_tool(pm, 'check_platform_calls', {'limit': 1})
     assert 'Module.bsl:1 — Ошибка' in result
     assert 'счётчики могут быть устаревшими' in result and 'reindex' in result
+    assert '@sample Ext/SessionModule.bsl — файл изменился' in result
     assert inputs == ['CommonModules/Пример/Ext/Module.bsl', 'Ext/SessionModule.bsl']
+
+
+def test_changed_module_notes_are_scoped_to_selected_source(project):
+    pm, source = project
+    ext = _extension(pm, source)
+    module = _write_module(ext, 'Ext/SessionModule.bsl', '// Без замечаний\n')
+    pm.reindex('demo')
+    module.unlink()
+    result = execute_tool(pm, 'check_platform_calls', {'source_id': 'sample'})
+    assert 'счётчики могут быть устаревшими' not in result and 'SessionModule.bsl' not in result
+    result = execute_tool(pm, 'check_platform_calls', {'source_id': 'sample_ext', 'level': 'error'})
+    assert 'счётчики могут быть устаревшими' in result
+    assert '@sample_ext Ext/SessionModule.bsl — нет исходного текста' in result
 
 
 def test_nested_extension_deletions_preserve_line_numbers(project):
@@ -716,6 +733,93 @@ def test_first_request_after_reindex_loads_persisted_report_by_source(project, m
     assert 'ОпечаткаРасширения()' in actual
 
 
+def test_parallel_requests_restore_the_archive_once(project, monkeypatch):
+    pm, _ = project
+    pm.reindex('demo')
+    looked_up, restores = set(), []
+    all_requests = Event()
+    original_lookup = platform_check._known_report
+    original_restore = platform_check._Report.restore
+
+    def lookup(*args, **kwargs):
+        looked_up.add(get_ident())  # Вызовы под _REPORTS_LOCK.
+        if len(looked_up) == 4:
+            all_requests.set()
+        return original_lookup(*args, **kwargs)
+
+    def restore(*args):
+        restores.append(1)
+        assert all_requests.wait(timeout=5)
+        original_restore(*args)
+
+    monkeypatch.setattr(platform_check, '_known_report', lookup)
+    monkeypatch.setattr(platform_check._Report, 'restore', restore)
+    with ThreadPoolExecutor(4) as pool:
+        pending = [pool.submit(execute_tool, pm, 'check_platform_calls', {}) for _ in range(4)]
+        for future in pending:
+            assert 'НесуществующийВызов()' in future.result(timeout=10)
+    assert restores == [1]
+
+
+def test_invalid_deflate_in_report_header_triggers_background_build(project):
+    pm, _ = project
+    pm.reindex('demo')
+    cache = pm._index_path('demo').with_name(platform_check.CACHE_FILE)
+    with ZipFile(cache) as archive:
+        offset = archive.getinfo('report.json').header_offset
+    contents = bytearray(cache.read_bytes())
+    name_len, extra_len = struct.unpack_from('<HH', contents, offset + 26)
+    contents[offset + 30 + name_len + extra_len] = 7  # Зарезервированный тип блока DEFLATE.
+    cache.write_bytes(contents)
+    with ZipFile(cache) as archive, pytest.raises(zlib.error):
+        archive.read('report.json')
+
+    assert 'Отчёт готовится' in execute_tool(pm, 'check_platform_calls', {})
+    _join_workers(_report_workers(pm))
+    assert 'НесуществующийВызов()' in execute_tool(pm, 'check_platform_calls', {})
+    with ZipFile(cache) as archive:
+        assert archive.testzip() is None
+
+
+def test_reindex_archive_wins_over_ongoing_background_publication(project, monkeypatch):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', 'НоваяОпечатка();\n')
+    replacing_old, release_old, saving_new, replacing_new = Event(), Event(), Event(), Event()
+    original_replace = platform_check.replace_with_retry
+    original_save = platform_check._Report.save
+    order = []
+
+    def save(report, *args, **kwargs):
+        if current_thread().name == 'reindex-demo':
+            saving_new.set()
+        return original_save(report, *args, **kwargs)
+
+    def replace(temp, path):
+        if current_thread().name == 'platform-check-demo':
+            replacing_old.set()
+            assert release_old.wait(timeout=10)
+            order.append('старый')
+        else:
+            replacing_new.set()
+            order.append('новый')
+        original_replace(temp, path)
+
+    monkeypatch.setattr(platform_check._Report, 'save', save)
+    monkeypatch.setattr(platform_check, 'replace_with_retry', replace)
+    try:
+        assert 'Отчёт готовится' in execute_tool(pm, 'check_platform_calls', {})
+        assert replacing_old.wait(timeout=5)
+        assert pm.reindex_async('demo')['status'] == 'started'
+        assert saving_new.wait(timeout=5)
+        assert not replacing_new.wait(timeout=0.1)
+    finally:
+        threads = _report_workers(pm) + [t for t in running_threads() if t.name == 'reindex-demo']
+        release_old.set()
+        _join_workers(threads)
+    assert order == ['старый', 'новый']
+    assert 'НоваяОпечатка()' in execute_tool(pm, 'check_platform_calls', {})
+
+
 def test_parallel_fallback_builds_report_once_and_writes_cache(project, monkeypatch):
     pm, _ = project
     cache = pm._index_path('demo').with_name('platform-check.zip')
@@ -803,6 +907,15 @@ def test_platform_check_waits_for_indexing(project):
     assert not _report_workers(pm)
 
 
+def test_old_parser_fingerprint_without_parsed_code_does_not_block_report(project):
+    pm, source = project
+    _extension(pm, source)
+    pm.reindex('demo')
+    pm.get_db('demo').set_parser_fingerprint('sample_ext', 'старый отпечаток')
+    result = execute_tool(pm, 'check_platform_calls', {'source_id': 'sample'})
+    assert 'НесуществующийВызов()' in result and 'старой версией Ариадны' not in result
+
+
 @pytest.mark.parametrize('upload_index', [False, True])
 def test_upload_warms_ready_projects_with_effective_version(project, tmp_path, monkeypatch, upload_index):
     pm, _ = project
@@ -876,6 +989,104 @@ def test_rebuild_of_help_invalidates_report(project):
     assert cache.read_bytes() != previous_cache
     pm.platform_help.remove(VERSION)
     assert 'не загружена' in execute_tool(pm, 'check_platform_calls', {})
+
+
+def test_deleting_newest_help_warms_the_automatic_fallback(project, monkeypatch):
+    pm, _ = project
+    older = '8.3.9.1'
+    pm.platform_help.build_from_bytes(older, context_book(older))
+    pm.reindex('demo')
+    _index_fixture(pm, 'pinned')
+    pm.update_project('pinned', platform_version=older)
+    monkeypatch.setattr(web, '_pm', pm)
+    built = []
+    original = platform_check._Report._build
+
+    def track(report, engine, conn, index, mode):
+        built.append((Path(engine.db.db_path).parent.name, index.version))
+        return original(report, engine, conn, index, mode)
+
+    monkeypatch.setattr(platform_check._Report, '_build', track)
+    with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+        response = client.post(f'/api/admin/platform-help/{VERSION}/delete')
+    assert response.status_code == 200 and 'удалена' in response.text
+    _join_workers([t for t in running_threads() if t.name == 'platform-check-warm-auto'])
+    _join_workers(_report_workers(pm))
+    assert built == [('demo', older)]
+    result = execute_tool(pm, 'check_platform_calls', {'project_id': 'demo'})
+    assert f'по справке {older}' in result and 'НесуществующийВызов()' in result
+
+
+def test_upload_during_final_reindex_warms_the_new_help(project, monkeypatch):
+    pm, _ = project
+    newest = '8.3.28.1'
+    monkeypatch.setattr(web, '_pm', pm)
+    old_started, release_old = Event(), Event()
+    built = []
+    original = platform_check._Report._build
+
+    def track(report, engine, conn, index, mode):
+        built.append(index.version)
+        if index.version == VERSION:
+            old_started.set()
+            assert release_old.wait(timeout=10)
+        return original(report, engine, conn, index, mode)
+
+    monkeypatch.setattr(platform_check._Report, '_build', track)
+    try:
+        assert pm.reindex_async('demo')['status'] == 'started'
+        assert old_started.wait(timeout=5)
+        with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+            response = client.post('/api/admin/platform-help', data={'version': newest},
+                                   files={'context': ('shcntx_ru.hbk', context_book(newest))})
+        assert response.status_code == 200 and 'Справка загружена' in response.text
+        _join_workers([t for t in running_threads() if t.name == f'platform-check-warm-{newest}'])
+        assert 'Дождитесь окончания переиндексации' in execute_tool(pm, 'check_platform_calls', {})
+    finally:
+        workers = [t for t in running_threads() if t.name == 'reindex-demo']
+        release_old.set()
+        _join_workers(workers)
+    assert built == [VERSION, newest]
+    result = execute_tool(pm, 'check_platform_calls', {})
+    assert f'по справке {newest}' in result and 'НесуществующийВызов()' in result
+
+
+def test_close_all_waits_for_help_warm_coordinator(project, monkeypatch):
+    pm, _ = project
+    entered, release, joining = Event(), Event(), Event()
+    original_search = pm.get_search
+    db = pm.get_db('demo')
+
+    def search(project_id):
+        if current_thread().name == f'platform-check-warm-{VERSION}':
+            entered.set()
+            assert release.wait(timeout=10)
+        return original_search(project_id)
+
+    monkeypatch.setattr(pm, 'get_search', search)
+    pm.warm_platform_checks(VERSION)
+    try:
+        assert entered.wait(timeout=5)
+        worker, = [t for t in running_threads() if t.name == f'platform-check-warm-{VERSION}']
+        original_join = worker.join
+
+        def join(*args, **kwargs):
+            joining.set()
+            return original_join(*args, **kwargs)
+
+        monkeypatch.setattr(worker, 'join', join)
+        with ThreadPoolExecutor(1) as pool:
+            closing = pool.submit(pm.close_all)
+            try:
+                assert joining.wait(timeout=5)
+                assert not closing.done()
+            finally:
+                release.set()
+            closing.result(timeout=5)
+    finally:
+        release.set()
+        _join_workers([t for t in running_threads() if t.name == 'platform-check-demo'])
+    assert db.conn is None and not pm._db_pool
 
 
 def test_mode_change_invalidates_persisted_report_without_reindex(project):

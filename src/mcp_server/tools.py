@@ -1020,8 +1020,8 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             heading += f'Режим совместимости {mode}.' if mode else 'Числовой режим совместимости не задан.'
             summary = (f"Модулей — {modules}. Ошибки — {counts['error']}, "
                        f"предупреждения — {counts['warning']}, не проверено — {counts['unchecked']}.")
-            notes = ['Файлы изменились после подготовки отчёта, счётчики могут быть устаревшими. '
-                     'Обновите индекс (reindex).'] if changed else []
+            notes = ['Файлы изменились или пропали после подготовки отчёта, счётчики могут быть устаревшими. '
+                     'Обновите индекс (reindex).', *changed] if changed else []
             if not page and not changed:
                 if offset:
                     page.append(f'При offset={offset} записей больше нет.')

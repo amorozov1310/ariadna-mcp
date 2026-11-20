@@ -300,9 +300,8 @@ def check_regression(ctx: LiveContext) -> list[Result]:
 # ============================================
 
 def check_indexing(ctx: LiveContext) -> list[Result]:
-    """reindex → сразу после ответа статус indexing (он записывается до
-    ответа «started»: раньше get_index_status ещё отдавал прежний статус) →
-    затем ready и процедуры в индексе."""
+    """После «started» новый проект индексируется или уже готов, затем
+    проверяем готовность и наличие процедур в индексе."""
     pid = ctx.temp_id
 
     async def go():
@@ -313,7 +312,8 @@ def check_indexing(ctx: LiveContext) -> list[Result]:
     (text, is_error), (status_now, _) = asyncio.run(go())
     out = [check('reindex отвечает «started»', not is_error and 'started' in text, text[:120])]
     first = status_now.splitlines()[0] if status_now else ''
-    out.append(check('сразу после ответа статус indexing', first == 'Status: indexing', first))
+    out.append(check('сразу после ответа статус indexing или ready',
+                     first in ('Status: indexing', 'Status: ready'), first))
     final = ctx.wait_ready(pid)
     stats, _ = ctx.call('get_index_status', {'project_id': pid})
     procs = int(m.group(1)) if (m := re.search(r'^Procedures: (\d+)', stats, re.M)) else 0
