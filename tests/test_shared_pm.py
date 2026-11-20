@@ -29,6 +29,7 @@ def shared(monkeypatch):
     from src import main as main_module
     from src.web import app as app_module
     with tempfile.TemporaryDirectory() as tmpdir:
+        monkeypatch.setenv('ARIADNA_PLATFORM', os.path.join(tmpdir, 'platform'))
         monkeypatch.setenv('INDEX_DIR', os.path.join(tmpdir, 'index'))
         monkeypatch.setattr(app_module, '_pm', None)
         pm = main_module.build_shared_state(os.path.join(tmpdir, 'data'))

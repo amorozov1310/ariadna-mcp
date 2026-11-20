@@ -163,6 +163,7 @@ def test_startup_migrates_before_resetting_stale_indexing(monkeypatch):
         finally:
             old_pm.close_all()
 
+        monkeypatch.setenv('ARIADNA_PLATFORM', str(Path(data_dir) / 'platform'))
         monkeypatch.setenv('INDEX_DIR', index_dir)
         pm = main_module.build_shared_state(data_dir)
         try:

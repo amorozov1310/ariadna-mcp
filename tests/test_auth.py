@@ -105,6 +105,9 @@ def test_roles_and_bearer(web, monkeypatch):
     assert client.post('/api/projects/p1/delete', headers=as_user).status_code == 403
     assert client.post('/api/projects/p1/sources/main/delete', headers=as_user).status_code == 403
     assert client.get('/admin/tokens', headers=as_user).status_code == 403
+    assert client.get('/admin/platform-help', headers=as_user).status_code == 403
+    assert client.post('/api/admin/platform-help', headers=as_user).status_code == 403
+    assert client.post('/api/admin/platform-help/8.3.27.1/delete', headers=as_user).status_code == 403
     assert client.post('/api/projects/p1/reindex', headers=as_user).status_code != 403
     # Playground не обходит роль: удаление источника — только admin.
     res = client.post('/api/projects/p1/playground', headers=as_user,

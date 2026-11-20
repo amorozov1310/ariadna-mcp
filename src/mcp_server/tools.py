@@ -9,6 +9,9 @@ removed — it never actually persisted anything, so every tool required
 project_id anyway; a single-project registry now just defaults to it).
 """
 
+import sqlite3
+
+from ..core.platform_help import KINDS, KIND_ALIASES, format_entry
 from ..core.project_manager import ProjectManager, ReindexInProgressError
 from ..core.search import format_search_results, format_object_details
 from . import semantic_search
@@ -257,7 +260,7 @@ def format_procedure_context(ctx: dict) -> str:
 MAX_LIMIT = 500
 _PAGED_TOOLS = ('search_metadata', 'search_attributes', 'find_references', 'list_objects',
                 'search_procedures', 'search_code', 'diff_from_base', 'update_conflicts',
-                'find_broken_calls', 'knowledge_sources')
+                'find_broken_calls', 'knowledge_sources', 'platform_help')
 
 # Сколько процедур «Missing from index» показывает diagnose_index: на большой
 # конфигурации их тысячи, а для диагностики хватает первых.
@@ -449,7 +452,59 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             f"выдаётся; остальное — через offset)")
 
 
+def _platform_help(pm: ProjectManager, args: dict) -> str:
+    store = pm.platform_help
+    version = (args.get('version') or '').strip()
+    if not version:
+        project_id = args.get('project_id')
+        if project_id:
+            try:
+                version = pm.get_project(project_id).platform_version
+            except KeyError:
+                return f'Error: проект «{project_id}» не найден'
+        else:
+            projects = pm.list_projects()
+            if len(projects) == 1:
+                version = projects[0].platform_version
+    version = version or store.newest()
+    try:
+        help_index = store.get(version) if version else None
+    except ValueError as e:
+        return f'Error: {e}'
+    if not help_index:
+        label = f' {version}' if version else ''
+        return (f'Справка платформы{label} не загружена. Добавьте её в Web UI → Настройки → '
+                'Справка платформы. При запуске Ариадна сама находит установленную платформу.')
+    query = args.get('query', '').strip()
+    if not query:
+        return 'Error: укажите имя или слова для поиска в справке платформы'
+    kind = (args.get('kind') or '').strip().casefold()
+    if kind and kind not in KIND_ALIASES:
+        return 'Error: неизвестный вид записи. Допустимые значения: ' + ', '.join(KINDS)
+    limit = max(1, int(args.get('limit', 10)))
+    offset = max(0, int(args.get('offset', 0)))
+    try:
+        entries, more = help_index.search(query, kind, limit, offset)
+    except sqlite3.OperationalError:
+        if help_index.path.exists():
+            raise
+        return f'Справка {version} удалена во время поиска.'
+    if not entries:
+        if offset:
+            return f'Справка {version}: при offset={offset} записей больше нет.'
+        msg = f'В справке платформы {version} нет записи «{query}».'
+        if all(part.isidentifier() for part in query.removesuffix('()').split('.')):
+            msg += ' Вероятно, это метод конфигурации. Ищите через search_procedures или search_code.'
+        return msg
+    parts = [f'Справка платформы {version}', *(format_entry(e) for e in entries)]
+    if more:
+        parts.append(f'Следующая страница: offset={offset + limit}.')
+    return '\n\n'.join(parts)
+
+
 def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
+    if tool == 'platform_help':
+        return _platform_help(pm, args)
     if tool == 'list_projects':
         projects = pm.list_projects()
         if not projects:

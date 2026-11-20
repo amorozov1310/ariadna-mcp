@@ -339,6 +339,7 @@ from .routes_diff import router as diff_router
 from .routes_checks import router as checks_router
 from .routes_auth import router as auth_router
 from .routes_update import router as update_router
+from .routes_platform_help import router as platform_help_router
 
 app.include_router(projects_router)
 app.include_router(search_router)
@@ -348,3 +349,4 @@ app.include_router(diff_router)
 app.include_router(checks_router)
 app.include_router(auth_router)
 app.include_router(update_router)
+app.include_router(platform_help_router)

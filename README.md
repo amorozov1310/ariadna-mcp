@@ -192,7 +192,7 @@ claude mcp add --transport http --scope user ariadna http://127.0.0.1:19879/mcp
 читает** — конфигурация, положенная туда, молча игнорируется.
 
 Проверка: в Claude Code команда `/mcp` показывает `ariadna` со статусом
-connected и 25 инструментами.
+connected и 26 инструментами.
 
 **Cursor** — `.cursor/mcp.json` в проекте или `~/.cursor/mcp.json`:
 
@@ -360,7 +360,7 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 
 ## MCP Tools
 
-25 инструментов. Все, кроме `reindex`, `remove_source`, `add_glossary_term` и
+26 инструментов. Все, кроме `reindex`, `remove_source`, `add_glossary_term` и
 `remove_glossary_term`, только читают
 (помечены `readOnlyHint`), `remove_source` помечен `destructiveHint`. На
 сервере с токенами удалить источник (`remove_source` с `confirm=true`) может
@@ -386,6 +386,7 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 | `get_procedure_code`| Код процедуры с номерами строк                    |
 | `get_module_outline`| Оглавление модуля без чтения кода                 |
 | `get_call_tree`     | Кто вызывает (`direction="up"`) / что вызывает (`"down"`) |
+| `platform_help` | Синтаксис, параметры и описание методов, функций и типов платформы. Для языка запросов укажите `kind="query"` |
 | `search_code`       | Строка внутри кода: запросы, присваивания, комментарии |
 | `semantic_search_code` | Процедура по описанию своими словами; ответ — текст и `structuredContent` с режимом поиска, строками и отпечатками |
 | `get_index_status`  | Статистика индекса и прогресс переиндексации      |
@@ -397,7 +398,10 @@ MCP_HTTP_HOST_PORT=33002 WEB_HOST_PORT=33001 docker compose up -d
 Соглашения, общие для всех инструментов:
 
 - **`project_id`** — необязателен, только если в реестре один проект;
-  иначе ошибка перечисляет доступные id.
+  иначе ошибка перечисляет доступные id. Справка платформы доступна и без проекта.
+  В `platform_help(query="Новый ТаблицаЗначений", project_id="demo")` версия берётся
+  из настроек проекта. Явный `version` имеет приоритет, по умолчанию используется
+  новейшая загруженная версия. [Загрузка справки и перенос](docs/operations.md#справка-платформы)
 - **Имена** — как в конфигураторе, русские или английские, регистр не
   важен: `kind="Catalog"` равно `kind="Справочник"`.
 - **Имя модуля** (`module_name` — в `get_procedure_code`,
@@ -526,9 +530,9 @@ python scripts/live_check.py --project demo
 запущенного сервера. `live_check.py` проверяет сервер по сети — так, как его
 видят агент (MCP, streamable HTTP) и браузер (Web UI):
 
-- регрессия: версия, 25 инструментов, ошибки, проверка `Host`/`Origin`;
+- регрессия: версия, 26 инструментов, ошибки, проверка `Host`/`Origin`;
 - индексация: сразу после `reindex` статус `indexing`, затем `ready`;
-- playground против MCP: для всех 25 инструментов ответы совпадают;
+- playground против MCP: для всех 26 инструментов ответы совпадают;
 - пересоздание и удаление проекта под нагрузкой MCP и Web UI (ни одного 500,
   только «not found»/«проект удалён»);
 - стресс: создание и удаление проектов рядом с чтением реестра;

@@ -45,11 +45,12 @@ INSTRUCTIONS = """\
 Типичный вызов — доли секунды, и он экономит контекст: не читайте файлы выгрузки напрямую, пока
 вопрос решается инструментами.
 
-Проект. Все инструменты, кроме list_projects, работают в рамках проекта. Если проектов
+Проект. Все инструменты, кроме list_projects и platform_help, работают в рамках проекта. Если проектов
 несколько, project_id обязателен — узнайте его через list_projects. Проект = основная
 конфигурация + расширения (источники, list_sources); source_id сужает выдачу до одного.
 
 Типовой порядок:
+- синтаксис методов, функций и типов платформы: platform_help (project_id выбирает версию проекта);
 - объект конфигурации: search_metadata → get_object_details(full_name из выдачи);
 - «где используется справочник/документ как тип реквизита»: find_references;
 - процедура: search_procedures → get_procedure_context (объявление, описание, кто вызывает
@@ -165,6 +166,21 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
             # Ожидаемая ошибка (проект не найден и т.п.) — без трассировки.
             raise ToolError(text.removeprefix('Error:').strip())
         return text
+
+    @mcp.tool(description="Синтаксис и описание типов, методов, конструкторов и функций платформы "
+                          "1С и языка запросов. Приоритет версии: version, настройка проекта, "
+                          "новейшая загруженная справка.", annotations=_READ_ONLY)
+    def platform_help(
+        query: Annotated[str, Field(description="Имя, Тип.Метод, Новый Тип или слова для поиска")],
+        kind: Annotated[str | None, Field(description="type, method, property, event, ctor, function, "
+                                                      "global_property или query")] = None,
+        version: Annotated[str | None, Field(description="Полная версия платформы, например 8.3.27.2170")] = None,
+        project_id: Annotated[str | None, Field(description="Проект для выбора версии справки")] = None,
+        limit: Annotated[int, Field(description=_LIMIT)] = 10,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+    ) -> str:
+        return run('platform_help', query=query, kind=kind, version=version, project_id=project_id,
+                   limit=limit, offset=offset)
 
     # ── Project / index ──
 
