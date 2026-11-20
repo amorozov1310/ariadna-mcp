@@ -74,6 +74,7 @@ INSTRUCTIONS = """\
   (сводка → object_name → module_name + procedure_name), если у проекта задана база.
 - «что сломано», «проверь код перед выкладкой»: find_broken_calls — вызовы методов, которых
   нет в модуле или которые не экспортные (упадут «Метод объекта не обнаружен»).
+- Вызовы платформы, режим совместимости и клиентский контекст проверяет check_platform_calls.
 - обновление на новый релиз: update_conflicts(release_project=проект с новой типовой) —
   где доработки пересекаются с изменениями релиза, и обе правки процедуры.
 
@@ -175,7 +176,7 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
         kind: Annotated[str | None, Field(description="type, method, property, event, ctor, function, "
                                                       "global_property или query")] = None,
         version: Annotated[str | None, Field(description="Полная версия платформы, например 8.3.27.2170")] = None,
-        project_id: Annotated[str | None, Field(description="Проект для выбора версии справки")] = None,
+        project_id: Annotated[str | None, Field(description="Проект для выбора версии справки и режима совместимости")] = None,
         limit: Annotated[int, Field(description=_LIMIT)] = 10,
         offset: Annotated[int, Field(description=_OFFSET)] = 0,
     ) -> str:
@@ -608,6 +609,23 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     ) -> str:
         return run('find_broken_calls', project_id=project_id, source_id=source_id,
                    module_name=module_name, limit=limit, offset=offset)
+
+    @mcp.tool(description="Сверить вызовы в модулях BSL со справкой платформы проекта. Показывает "
+                          "счётчики всего отчёта и замечания с файлом, строкой и причиной. "
+                          "Неизвестный тип помечается «Не проверено». Для поиска ошибок передайте level=error.",
+              annotations=_READ_ONLY)
+    def check_platform_calls(
+        project_id: Annotated[str | None, Field(description=_PID)] = None,
+        source_id: Annotated[str | None, Field(description="Проверить только модули этого источника")] = None,
+        limit: Annotated[int, Field(description=_LIMIT)] = 50,
+        offset: Annotated[int, Field(description=_OFFSET)] = 0,
+        level: Annotated[
+            Literal['error', 'warning', 'unchecked'] | list[Literal['error', 'warning', 'unchecked']] | None,
+            Field(description="Уровень или список уровней. Фильтр применяется до offset и limit."),
+        ] = None,
+    ) -> str:
+        return run('check_platform_calls', project_id=project_id, source_id=source_id,
+                   limit=limit, offset=offset, level=level)
 
     @mcp.tool(
         description="Диагностика индекса: процедуры в файлах против проиндексированных (пропущенные "

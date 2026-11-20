@@ -203,6 +203,20 @@ KIND_ALIASES_EN_TO_RU: dict[str, str] = {
     en.casefold(): ru for ru, en in OBJECT_TYPE_MAP.values()
 }
 
+# Коллекции, для которых можно проверить имя объекта по метаданным конфигурации.
+MANAGER_OBJECT_KINDS = frozenset({'справочник', 'документ', 'константа'})
+
+
+def indexed_manager_objects(conn):
+    """Имена объектов по всем источникам. Без выгрузки метаданных отсутствие недоказуемо."""
+    if not conn.execute(
+            "SELECT 1 FROM sources WHERE source_type='main' AND config_name != '' LIMIT 1").fetchone():
+        return None
+    objects = {row[0] for row in conn.execute('SELECT full_name_cf FROM metadata_objects')}
+    objects.update(row[0].removesuffix('.модульменеджера') for row in conn.execute(
+        "SELECT name_cf FROM modules WHERE module_type='МодульМенеджера'"))
+    return objects
+
 # RU canonical singular kind (case-folded) -> canonically-cased RU kind —
 # lets canonicalize_kind() also accept a RU kind typed in the wrong case
 # ("справочник" -> "Справочник").

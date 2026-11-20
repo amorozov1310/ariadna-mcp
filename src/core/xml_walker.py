@@ -24,7 +24,9 @@ from pathlib import Path
 # Mapping: XML directory name → 1C object kind
 DIR_TO_KIND = {
     'Catalogs': 'Справочник',
+    'Constants': 'Константа',
     'Documents': 'Документ',
+    'DocumentJournals': 'ЖурналДокументов',
     'InformationRegisters': 'РегистрСведений',
     'AccumulationRegisters': 'РегистрНакопления',
     'AccountingRegisters': 'РегистрБухгалтерии',
@@ -34,12 +36,15 @@ DIR_TO_KIND = {
     'Reports': 'Отчет',
     'Enums': 'Перечисление',
     'ChartsOfCharacteristicTypes': 'ПланВидовХарактеристик',
+    'ChartsOfCalculationTypes': 'ПланВидовРасчета',
     'ChartsOfAccounts': 'ПланСчетов',
     'BusinessProcesses': 'БизнесПроцесс',
     'Tasks': 'Задача',
     'ExchangePlans': 'ПланОбмена',
     'CommonForms': 'ОбщаяФорма',
     'CommonCommands': 'ОбщаяКоманда',
+    'SettingsStorages': 'ХранилищеНастроек',
+    'FilterCriteria': 'КритерийОтбора',
 }
 
 # Mapping: .bsl filename → module type

@@ -49,7 +49,7 @@ from mcp import Client
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_XML = ROOT / 'tests' / 'fixtures' / 'xml_ru'
-EXPECTED_TOOLS = 26
+EXPECTED_TOOLS = 27
 PREFIX = 'zz_live_'
 STRESS_PREFIX = 'zz_live_s'
 
@@ -78,6 +78,7 @@ PARITY_CASES = {
     'remove_glossary_term': {'entry_id': 'нет'},
     'diagnose_index': {},
     'find_broken_calls': {'limit': 5},
+    'check_platform_calls': {'limit': 5},
     # Базы у временного проекта нет — сверяется одинаковая ошибка.
     'diff_from_base': {},
     'update_conflicts': {'release_project': 'нет'},

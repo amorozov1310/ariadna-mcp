@@ -105,7 +105,8 @@ def _fake_fingerprint(monkeypatch, value: str):
 # Вычисление отпечатка
 # ---------------------------------------------------------------------------
 
-def test_fingerprint_ignores_line_endings_and_location(monkeypatch):
+@pytest.mark.parametrize('filename', ['bsl_reference.py', 'xml_walker.py'])
+def test_fingerprint_ignores_line_endings_and_location(monkeypatch, filename):
     base = parser_fingerprint.compute_parser_fingerprint()
     assert len(base) == 16
 
@@ -119,7 +120,7 @@ def test_fingerprint_ignores_line_endings_and_location(monkeypatch):
         assert parser_fingerprint.compute_parser_fingerprint() == base, \
             "другой путь + CRLF + BOM не должны менять отпечаток"
 
-        with open(copy_dir / 'bsl_reference.py', 'ab') as f:
+        with open(copy_dir / filename, 'ab') as f:
             f.write(b"\r\nNEW_STOPWORD = {'x'}\r\n")
         assert parser_fingerprint.compute_parser_fingerprint() != base
     finally:

@@ -317,7 +317,7 @@ _LI = re.compile(r'<\s*li\b[^>]*(?:>|$)', re.I)
 _NAME_PAIR = re.compile(r'^(.*?)\s*\(([^()]*)\)\s*$')
 _RUBRIC = re.compile(r'<div class="V8SH_rubric">(.*?)</div>', re.S | re.I)
 _SINCE = re.compile(r'начиная с версии\s+(\d+(?:\.\d+)+)', re.I)
-_COMPAT = re.compile(r'совместимости с версией\s+(\d+(?:\.\d+)+)', re.I)
+_COMPAT = re.compile(r'совместимости с верси(?:ей|и)\s+(\d+(?:\.\d+)+)', re.I)
 
 
 def html_text(fragment: str) -> str:
@@ -826,10 +826,41 @@ def _cut(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n].rstrip() + '…'
 
 
-def format_entry(e: HelpEntry, full: bool = True) -> str:
+# У этих функций без нижней границы в справке режим проверен в Конфигураторе
+# 8.3.27.2170 после обновления конфигурации БД. Регулярный поиск компилируется
+# с 8.3.9. Четыре клиентские функции компилируются в том числе в 8.2.13.
+_VERIFIED_MIN_MODES = {
+    ('strfindbyregularexpression', '8.3.23'): '8.3.9',
+    ('doqueryboxasync', '8.3.18'): '',
+    ('beginattachingcomputerinformationextension', '8.3.18'): '',
+    ('begininstallingcomputerinformationextension', '8.3.18'): '',
+    ('begingettingnetworkadaptersinformation', '8.3.18'): '',
+}
+
+
+def minimum_compatibility_mode(since: str, compat: str, global_function_en: str = '') -> str:
+    """Нижняя граница режима с учётом проверенных особенностей платформы."""
+    if not compat:
+        return _VERIFIED_MIN_MODES.get((global_function_en.casefold(), since), since)
+    return max(since, compat, key=version_key)
+
+
+def compatibility_warning(min_mode: str, mode: str) -> str:
+    """Ограничения из раздела «Использование в версии» для режима проекта."""
+    if not mode or not min_mode or version_key(min_mode) <= version_key(mode):
+        return ''
+    return (f'требует режима совместимости {min_mode} или новее, '
+            f'а у конфигурации режим совместимости {mode}')
+
+
+def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:
     """Карточка записи справки для агента: сжато, длинное описание обрезано."""
     head = e.full_ru + (f' ({e.full_en})' if e.full_en and e.full_en != e.full_ru else '')
     lines = [f'{head} — {KINDS.get(e.kind, e.kind)}']
+    min_mode = minimum_compatibility_mode(e.since, e.compat, e.name_en if e.kind == 'function' else '')
+    warning = compatibility_warning(min_mode, mode)
+    if warning:
+        lines.append(f'Недоступно в режиме проекта: элемент {warning}.')
     if not full:
         syntax = next((v['syntax'] for v in e.variants if v.get('syntax')), '')
         if syntax:
@@ -862,7 +893,9 @@ def format_entry(e: HelpEntry, full: bool = True) -> str:
     if e.availability:
         lines.append(f'Доступность: {e.availability}')
     if e.since:
-        lines.append(f'С версии {e.since}' + (f' (режим совместимости {e.compat} и новее)' if e.compat else ''))
+        lines.append(f'С версии {e.since}')
+    if min_mode:
+        lines.append(f'Режим совместимости {min_mode} и новее')
     if e.description:
         lines.append(f'Описание: {_cut(e.description, 600)}')
     if e.note:

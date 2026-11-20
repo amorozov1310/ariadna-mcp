@@ -471,7 +471,8 @@ class Indexer:
                 known_objects = self_objects
 
         parser = BSLParser(known_modules=known_modules, known_objects=known_objects,
-                           known_factory_functions=known_factory_functions)
+                           known_factory_functions=known_factory_functions,
+                           track_manager_objects=True)
 
         # Existing modules for this source, keyed by name (the UNIQUE
         # (source_id, name) identity) — lets every file be looked up once
@@ -644,13 +645,13 @@ class Indexer:
                             callee_module = mf.full_name
                         call_rows.append((caller_id, call.callee_name, callee_module,
                                           call.callee_proc, call.callee_kind, call.line, call.context))
+                        stats['calls'] += call.callee_kind != 'manager_object'
                     if call_rows:
                         conn.executemany(
                             """INSERT INTO calls (caller_id, callee_name, callee_module,
                                callee_proc, callee_kind, line, context)
                                VALUES (?, ?, ?, ?, ?, ?, ?)""",
                             call_rows)
-                        stats['calls'] += len(call_rows)
 
             if (i + 1) % commit_every == 0 or i + 1 == total_files:
                 conn.commit()
@@ -716,6 +717,8 @@ class Indexer:
             self.db.connect()
             conn = self.db.conn
 
+        from .broken_calls import _platform_manager_method
+
         conn.execute("DELETE FROM calls_resolved")
 
         source_type: dict[str, str] = {
@@ -729,7 +732,7 @@ class Indexer:
         module_local_procs: dict[int, dict[str, int]] = {}
         for r in conn.execute("SELECT id, module_id, name FROM procedures"):
             proc_module[r['id']] = r['module_id']
-            module_local_procs.setdefault(r['module_id'], {})[r['name'].lower()] = r['id']
+            module_local_procs.setdefault(r['module_id'], {})[r['name'].casefold()] = r['id']
 
         module_source: dict[int, str] = {
             r['id']: (r['source_id'] or '')
@@ -752,8 +755,8 @@ class Indexer:
                 """SELECT m.id as module_id, m.name as mname, p.id as pid, p.name as pname
                    FROM procedures p JOIN modules m ON m.id = p.module_id"""):
             src = module_source.get(r['module_id'], '')
-            pname_l = r['pname'].lower()
-            mname_l = r['mname'].lower()
+            pname_l = r['pname'].casefold()
+            mname_l = r['mname'].casefold()
             module_proc_index.setdefault((mname_l, pname_l), []).append((r['pid'], src))
             if '.' not in r['mname']:
                 dotted = f'общиймодуль.{mname_l}.модуль'
@@ -767,7 +770,7 @@ class Indexer:
                 """SELECT p.id, p.name, m.id as module_id
                    FROM procedures p JOIN modules m ON m.id = p.module_id
                    WHERE p.is_export = 1 AND m.is_global = 1"""):
-            global_exports.setdefault(r['name'].lower(), []).append(
+            global_exports.setdefault(r['name'].casefold(), []).append(
                 (r['id'], module_source.get(r['module_id'], '')))
 
         def pick_prefer_extension(candidates: list[tuple[int, str]]) -> int | None:
@@ -788,8 +791,8 @@ class Indexer:
                 "SELECT id, caller_id, callee_kind, callee_module, callee_proc FROM calls"):
             kind = call['callee_kind']
             caller_module_id = proc_module.get(call['caller_id'])
-            callee_proc_l = (call['callee_proc'] or '').lower()
-            callee_module_l = (call['callee_module'] or '').lower()
+            callee_proc_l = (call['callee_proc'] or '').casefold()
+            callee_module_l = (call['callee_module'] or '').casefold()
 
             callee_id = None
             confidence = None
@@ -810,10 +813,13 @@ class Indexer:
                     callee_id = pick_prefer_extension(candidates)
                     confidence = 'exact'
 
-            elif kind == 'manager':
+            elif kind in {'manager', 'manager_object'}:
                 key = (callee_module_l, callee_proc_l)
                 candidates = module_proc_index.get(key)
-                if candidates:
+                # Кандидат мог появиться до индексации менеджера. При новом
+                # проходе он получает ребро, если найден прикладной метод.
+                if candidates and (kind == 'manager'
+                                   or not _platform_manager_method(*key)):
                     callee_id = pick_prefer_extension(candidates)
                     confidence = 'exact'
 

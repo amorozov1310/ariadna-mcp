@@ -961,7 +961,7 @@ class SearchEngine:
         unresolved = [dict(r) for r in conn.execute(
             """SELECT c.callee_name AS name, COUNT(*) AS sites, MIN(c.line) AS line
                FROM calls c
-               WHERE c.caller_id = ? AND NOT EXISTS
+               WHERE c.caller_id = ? AND c.callee_kind != 'manager_object' AND NOT EXISTS
                      (SELECT 1 FROM calls_resolved r WHERE r.call_id = c.id)
                GROUP BY c.callee_name ORDER BY MIN(c.line)""", (proc['id'],))]
         entry = self.glossary.for_target(f"{mod['name']}.{proc['name']}") if self.glossary else None
@@ -1462,17 +1462,19 @@ def call_graph_resolution_stats(conn, worst_modules_limit: int = 20,
     callee names (candidates for the platform stoplist, or a resolver
     bug) and how many procedures are &Вместо/&Around-style interceptors.
     """
-    total = conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0]
     resolved = conn.execute("SELECT COUNT(DISTINCT call_id) FROM calls_resolved").fetchone()[0]
 
     by_kind_rows = conn.execute("""
-        SELECT c.callee_kind as kind, COUNT(*) as total,
+        SELECT CASE c.callee_kind WHEN 'manager_object' THEN 'manager' ELSE c.callee_kind END AS kind,
+               COUNT(*) as total,
                COUNT(cr.call_id) as resolved
         FROM calls c
         LEFT JOIN calls_resolved cr ON cr.call_id = c.id
-        GROUP BY c.callee_kind
+        WHERE c.callee_kind != 'manager_object' OR cr.call_id IS NOT NULL
+        GROUP BY kind
         ORDER BY total DESC
     """).fetchall()
+    total = sum(r['total'] for r in by_kind_rows)
     by_kind = {}
     for r in by_kind_rows:
         t, res = r['total'], r['resolved']
@@ -1488,6 +1490,7 @@ def call_graph_resolution_stats(conn, worst_modules_limit: int = 20,
         JOIN procedures p ON p.id = c.caller_id
         JOIN modules m ON m.id = p.module_id
         LEFT JOIN calls_resolved cr ON cr.call_id = c.id
+        WHERE c.callee_kind != 'manager_object' OR cr.call_id IS NOT NULL
         GROUP BY m.id
         HAVING total >= ?
         ORDER BY (CAST(resolved AS REAL) / total) ASC, total DESC
@@ -1506,7 +1509,7 @@ def call_graph_resolution_stats(conn, worst_modules_limit: int = 20,
         SELECT c.callee_module as module, c.callee_proc as name, COUNT(*) as freq
         FROM calls c
         LEFT JOIN calls_resolved cr ON cr.call_id = c.id
-        WHERE cr.call_id IS NULL
+        WHERE cr.call_id IS NULL AND c.callee_kind != 'manager_object'
         GROUP BY c.callee_module, c.callee_proc
         ORDER BY freq DESC
         LIMIT ?

@@ -28,9 +28,11 @@
 
 import re
 
+from .bsl_parser import _PLATFORM_MANAGER_METHODS
 from .bsl_reference import (FORM_CONTEXT_IDENTIFIERS_EN, FORM_CONTEXT_IDENTIFIERS_RU,
                             GLOBAL_CONTEXT_OBJECTS_EN, GLOBAL_CONTEXT_OBJECTS_RU,
                             is_platform_manager_method, module_context_methods)
+from .metadata_model import MANAGER_OBJECT_KINDS, indexed_manager_objects
 
 
 
@@ -43,7 +45,8 @@ _KINDS_CF = {k.casefold(): module_context_methods(k, 'МодульМенедже
 
 def _platform_manager_method(module_cf: str, proc_cf: str) -> bool:
     kind = module_cf.split('.', 1)[0]
-    return is_platform_manager_method(kind, proc_cf) or proc_cf in _KINDS_CF.get(kind, set())
+    return (proc_cf in _PLATFORM_MANAGER_METHODS or is_platform_manager_method(kind, proc_cf)
+            or proc_cf in _KINDS_CF.get(kind, ()))
 
 
 def _direct(context: str, module: str, proc: str) -> bool:
@@ -133,7 +136,8 @@ def find_broken_calls(conn, source_id: str = '', module_name: str = '',
     def item(row, **extra) -> dict:
         return {'caller_module': row['caller_module'], 'caller_proc': row['caller_proc'],
                 'source_id': row['src'] or '', 'line': row['line'] or 0,
-                'kind': row['kind'], 'module': row['module'] or '', 'name': row['name'] or '',
+                'kind': 'manager' if row['kind'] == 'manager_object' else row['kind'],
+                'module': row['module'] or '', 'name': row['name'] or '',
                 **extra}
 
     missing, not_export, external = [], [], {}
@@ -150,18 +154,27 @@ def find_broken_calls(conn, source_id: str = '', module_name: str = '',
            JOIN modules m ON m.id = p.module_id
            LEFT JOIN calls_resolved cr ON cr.call_id = c.id
            LEFT JOIN procedures t ON t.id = cr.callee_id
-           WHERE c.callee_kind IN ('common_module', 'manager')
+                WHERE c.callee_kind IN ('common_module', 'manager', 'manager_object')
              AND (cr.call_id IS NULL OR t.is_export = 0)""")
+    objects = indexed_manager_objects(conn)
     for r in calls:
         module_cf = (r['module'] or '').casefold()
         proc_cf = (r['name'] or '').casefold()
         if not module_cf or not wanted(r):
             continue
-        if r['kind'] == 'manager' and _platform_manager_method(module_cf, proc_cf):
-            continue
+        if r['kind'] in {'manager', 'manager_object'}:
+            obj = module_cf.removesuffix('.модульменеджера')
+            if (objects is not None and obj.split('.', 1)[0] in MANAGER_OBJECT_KINDS
+                    and obj not in objects):
+                missing.append(item(r, missing_object=True, defined_in=[]))
+                continue
+            if _platform_manager_method(module_cf, proc_cf):
+                continue
         key = _module_key(r['kind'], module_cf)
         procs = module_procs.get(key)
         if procs is None:
+            if r['kind'] == 'manager_object':
+                continue
             if (r['resolved'] is None and _short(module_cf) not in short_names
                     and module_cf not in _PLATFORM_GLOBALS
                     and not (r['kind'] == 'common_module'

@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS calls (
     callee_name   TEXT NOT NULL,
     callee_module TEXT DEFAULT '',
     callee_proc   TEXT NOT NULL,
-    callee_kind   TEXT DEFAULT '',   -- local | common_module | manager | override
+    callee_kind   TEXT DEFAULT '',   -- local | common_module | manager | override | manager_object
     line          INTEGER DEFAULT 0,
     context       TEXT DEFAULT ''
 );
@@ -809,13 +809,13 @@ class Database:
                 "WHERE source_id=?", (now, full_reparse_reason, source_id))
         self.conn.commit()
 
-    def update_state(self, **kwargs):
-        now = datetime.now().isoformat()
+    def update_state(self, *, updated_at=None, **kwargs):
+        now = updated_at or datetime.now().isoformat()
         if not self.conn:
             self.connect()
         existing = self.conn.execute("SELECT id FROM index_state WHERE id=1").fetchone()
         if not existing:
             self.conn.execute("INSERT INTO index_state (id, created_at, updated_at) VALUES (1, ?, ?)", (now, now))
-        for key, value in kwargs.items():
-            self.conn.execute(f"UPDATE index_state SET {key}=?, updated_at=? WHERE id=1", (value, now))
+        fields = ', '.join(f'{key}=?' for key in (*kwargs, 'updated_at'))
+        self.conn.execute(f"UPDATE index_state SET {fields} WHERE id=1", (*kwargs.values(), now))
         self.conn.commit()

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <Configuration>
+    <Properties>
+      <Name>ПроверкаПлатформы</Name>
+      <ScriptVariant>Russian</ScriptVariant>
+      <CompatibilityMode>Version8_3_24</CompatibilityMode>
+    </Properties>
+    <ChildObjects>
+      <CommonModule>Пример</CommonModule>
+      <Catalog>Пример</Catalog>
+    </ChildObjects>
+  </Configuration>
+</MetaDataObject>

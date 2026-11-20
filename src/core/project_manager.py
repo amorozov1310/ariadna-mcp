@@ -24,6 +24,7 @@ from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
 from .platform_help import PlatformHelpStore
 from .search import SearchEngine
+from .xml_metadata import compatibility_version
 
 logger = logging.getLogger('ariadna')
 
@@ -602,7 +603,8 @@ class ProjectManager:
                 # только закончится запрос, начатый до закрытия (Database.close
                 # ждёт его), а ещё его может ненадолго открыть антивирус.
                 if path == self.platform_help.root:
-                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'):
+                    from .platform_check import CACHE_FILE
+                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal', CACHE_FILE):
                         (path / name).unlink(missing_ok=True)
                 else:
                     rmtree_with_retry(path)
@@ -755,7 +757,9 @@ class ProjectManager:
                    WHERE m.source_id=?""", (source_id,)).fetchone()[0]
             counts['calls'] = conn.execute(
                 """SELECT COUNT(*) FROM calls c JOIN procedures p ON p.id = c.caller_id
-                   JOIN modules m ON m.id = p.module_id WHERE m.source_id=?""",
+                   JOIN modules m ON m.id = p.module_id
+                   WHERE m.source_id=? AND (c.callee_kind != 'manager_object' OR EXISTS
+                         (SELECT 1 FROM calls_resolved cr WHERE cr.call_id = c.id))""",
                 (source_id,)).fetchone()[0]
         except Exception:
             pass  # DB not indexed yet — a files-only preview is still useful
@@ -788,7 +792,7 @@ class ProjectManager:
         try:
             db = self.get_db(project_id)
             self._clear_source_data(db, source_id)
-            db.conn.commit()
+            db.update_state()
         except Exception:
             # If DB doesn't exist yet (project never indexed), skip — not fatal
             pass
@@ -990,6 +994,9 @@ class ProjectManager:
             return 'main'
         main = next((s for s in sources if (s.source_type or 'main') == 'main'), None)
         return (main or (sources[0] if sources else None)).id if sources else 'main'
+
+    def platform_mode(self, project_id: str) -> str:
+        return compatibility_version(self.get_source_xml_path(project_id, self.main_source(project_id)))
 
     def _diff_sources(self, project_id: str, base_id: str, source_id: str | None) -> tuple[str, str]:
         """(источник проекта, источник базы) для сравнения: по умолчанию — их
@@ -1496,9 +1503,6 @@ class ProjectManager:
                 source.indexed_at = datetime.now().isoformat()
                 progress['done'] += len(walked.get(source.id, []))
 
-            total_stats = self._calc_stats_from_db(db)
-            total_stats.duration_sec = duration_sec
-
             # Resolve the call graph (1.2) — recomputed in full every time,
             # regardless of full vs. partial reindex: it's cheap (table
             # scans + dict joins, no per-call queries) and a partial reindex
@@ -1514,6 +1518,9 @@ class ProjectManager:
                 db.update_state(progress_phase='resolving')
                 indexer.resolve_calls()
                 db.set_graph_resolved(resolver)
+
+            total_stats = self._calc_stats_from_db(db)
+            total_stats.duration_sec = duration_sec
 
             # Поисковые карточки процедур — только для изменившихся модулей
             # (src/core/cards.py). Вспомогательный индекс: его сбой пишется в
@@ -1533,12 +1540,25 @@ class ProjectManager:
             except Exception:
                 logger.exception('Проект %s: карточки процедур не построены', project_id)
 
+            # Снимок должен быть доступен уже при первом статусе ready.
+            ready_at = datetime.now().isoformat()
+            try:
+                version = project.platform_version or self.platform_help.newest()
+                index = self.platform_help.get(version) if version else None
+                if index:
+                    from .platform_check import warm_report
+                    db.update_state(progress_phase='platform_check')
+                    warm_report(self.get_search(project_id), index, self.platform_mode(project_id), ready_at)
+            except Exception:
+                # Без снимка первый запрос посчитает его из готового индекса.
+                logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
+
             total_stats.last_indexed = datetime.now().isoformat()
             total_stats.duration_sec = round(total_stats.duration_sec, 2)
             project.index_stats = total_stats
             project.status = 'ready'
             db.update_state(status='ready', progress_phase='', progress_current=0,
-                             progress_total=0, index_duration_sec=total_stats.duration_sec)
+                             progress_total=0, index_duration_sec=total_stats.duration_sec, updated_at=ready_at)
             self._save_project_to_disk(project_id, project)
             self._warm_related(project_id)
 
@@ -1929,7 +1949,9 @@ class ProjectManager:
             total_forms=conn.execute("SELECT COUNT(*) FROM forms").fetchone()[0],
             total_modules=conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0],
             total_procedures=conn.execute("SELECT COUNT(*) FROM procedures").fetchone()[0],
-            total_calls=conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0],
+            total_calls=conn.execute(
+                """SELECT COUNT(*) FROM calls c WHERE c.callee_kind != 'manager_object' OR EXISTS
+                         (SELECT 1 FROM calls_resolved cr WHERE cr.call_id = c.id)""").fetchone()[0],
         )
 
     # ============================================
