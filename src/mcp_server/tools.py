@@ -13,8 +13,7 @@ import sqlite3
 
 from ..core.platform_help import KINDS, KIND_ALIASES, format_entry
 from ..core.project_manager import ProjectManager, ReindexInProgressError
-from ..core.platform_check import LEVELS, check_calls
-from ..core.xml_metadata import compatibility_version
+from ..core.platform_check import LEVELS, ReportIndexChanged, check_calls
 from ..core.search import format_search_results, format_object_details
 from . import semantic_search
 
@@ -470,10 +469,6 @@ def _project_help(pm: ProjectManager, project, version: str = ''):
     return help_index
 
 
-def _project_mode(pm, project_id):
-    return compatibility_version(pm.get_source_xml_path(project_id, pm.main_source(project_id)))
-
-
 def _platform_help(pm: ProjectManager, args: dict) -> str:
     project_id = (args.get('project_id') or '').strip()
     requested_version = (args.get('version') or '').strip()
@@ -512,7 +507,7 @@ def _platform_help(pm: ProjectManager, args: dict) -> str:
         if all(part.isidentifier() for part in query.removesuffix('()').split('.')):
             msg += ' Вероятно, это метод конфигурации. Ищите через search_procedures или search_code.'
         return msg
-    mode = _project_mode(pm, project.id) if project else ''
+    mode = pm.platform_mode(project.id) if project else ''
     parts = [f'Справка платформы {version}', *(format_entry(e, mode=mode) for e in entries)]
     if more:
         parts.append(f'Следующая страница: offset={offset + limit}.')
@@ -1000,13 +995,15 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             index = _project_help(pm, pm.get_project(project_id))
             if isinstance(index, str):
                 return index
-            mode = _project_mode(pm, project_id)
+            mode = pm.platform_mode(project_id)
             limit = max(1, int(args.get('limit', 50)))
             offset = max(0, offset)
             try:
                 page, more, counts, modules = check_calls(engine, index, mode, source_id,
                                                           limit, offset, levels)
-            except sqlite3.OperationalError:
+            except ReportIndexChanged as e:
+                return str(e)
+            except (FileNotFoundError, sqlite3.OperationalError):
                 if index.path.exists():
                     raise
                 return f'Справка {index.version} удалена во время проверки.'

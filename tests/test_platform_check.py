@@ -2,7 +2,9 @@
 
 import asyncio
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -628,7 +630,6 @@ def test_page_reuses_diagnoses_and_updates_after_source_change(project, monkeypa
     pm, source = project
     module = _write_module(source, 'CommonModules/Пример/Ext/Module.bsl',
                            ''.join(f'Опечатка{i}();\n' for i in range(50)))
-    pm.reindex('demo')
     observed = []
     diagnose = platform_check._diagnosis
 
@@ -637,6 +638,8 @@ def test_page_reuses_diagnoses_and_updates_after_source_change(project, monkeypa
         return diagnose(call, *args)
 
     monkeypatch.setattr(platform_check, '_diagnosis', track)
+    pm.reindex('demo')
+    assert observed == [f'опечатка{i}' for i in range(50)]
     first = execute_tool(pm, 'check_platform_calls', {'limit': 1})
     last = execute_tool(pm, 'check_platform_calls', {'limit': 1, 'offset': 48})
     assert 'Опечатка0()' in first and 'Опечатка48()' in last
@@ -658,17 +661,82 @@ def test_pages_cross_packed_blocks(project):
     assert 'offset=1499' in result
 
 
+def test_first_request_after_reindex_loads_persisted_report_by_source(project, monkeypatch):
+    pm, source = project
+    ext = _extension(pm, source)
+    _write_module(ext, 'CommonModules/Пример/Ext/Module.bsl', 'ОпечаткаРасширения();\n')
+    pm.reindex('demo')
+    cache = pm._index_path('demo').with_name('platform-check.zip')
+    assert cache.is_file()
+    args = {'source_id': 'sample_ext', 'level': ['error', 'unchecked']}
+    expected = execute_tool(pm, 'check_platform_calls', args)
+    platform_check._REPORTS.clear()
+    pm.close_all()
+
+    def fail(*args):
+        pytest.fail('готовый снимок должен прочитаться с диска')
+
+    monkeypatch.setattr(platform_check, '_diagnosis', fail)
+    actual = execute_tool(pm, 'check_platform_calls', args)
+    assert actual == expected
+    assert 'Модулей — 1. Ошибки — 1, предупреждения — 0, не проверено — 0.' in actual
+    assert 'ОпечаткаРасширения()' in actual
+
+
+def test_parallel_fallback_builds_report_once_and_writes_cache(project, monkeypatch):
+    pm, _ = project
+    cache = pm._index_path('demo').with_name('platform-check.zip')
+    assert not cache.exists()  # Справка появилась после индексации.
+    original = platform_check._Report._build
+    builds = []
+    start = Barrier(2)
+
+    def track(*args):
+        builds.append(1)
+        return original(*args)
+
+    def request():
+        start.wait(timeout=5)
+        return execute_tool(pm, 'check_platform_calls', {'level': 'error'})
+
+    monkeypatch.setattr(platform_check._Report, '_build', track)
+    with ThreadPoolExecutor(2) as pool:
+        first, second = pool.submit(request), pool.submit(request)
+        assert first.result(timeout=10) == second.result(timeout=10)
+    assert builds == [1]
+    assert cache.is_file()
+
+
 def test_rebuild_of_help_invalidates_report(project):
     pm, source = project
     _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', 'СтрНайти("x", "y");\n')
     pm.reindex('demo')
     assert 'Замечаний нет' in execute_tool(pm, 'check_platform_calls', {})
+    cache = pm._index_path('demo').with_name('platform-check.zip')
+    assert cache.is_file()
+    previous_cache = cache.read_bytes()
+    platform_check._REPORTS.clear()
     pm.platform_help.build_from_bytes(VERSION, _book([
         ('objects/Global context/methods/Other.html', 'ДругойВызов',
          '<h1>ДругойВызов (Other)</h1>'),
     ]))
     result = execute_tool(pm, 'check_platform_calls', {})
     assert '— Ошибка' in result and 'СтрНайти(' in result
+    assert cache.read_bytes() != previous_cache
+    pm.platform_help.remove(VERSION)
+    assert 'не загружена' in execute_tool(pm, 'check_platform_calls', {})
+
+
+def test_mode_change_invalidates_persisted_report_without_reindex(project):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', 'СтрШаблон("%1", 1);\n')
+    pm.reindex('demo')
+    assert 'Замечаний нет' in execute_tool(pm, 'check_platform_calls', {})
+    config = source / 'Configuration.xml'
+    config.write_text(config.read_text(encoding='utf-8').replace('Version8_3_24', 'Version8_3_5'),
+                      encoding='utf-8')
+    platform_check._REPORTS.clear()
+    assert 'требует режима совместимости 8.3.6' in execute_tool(pm, 'check_platform_calls', {})
 
 
 def test_module_variable_shadows_global_property(project):

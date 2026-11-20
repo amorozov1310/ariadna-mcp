@@ -4,25 +4,38 @@
 выражения, в том числе вложенные и перенесённые на следующую строку.
 """
 
+import hashlib
 import json
+import logging
 import re
 import sqlite3
+import sys
 import zlib
 from array import array
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict, defaultdict
 from contextlib import closing
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache, lru_cache
 from heapq import merge
+from itertools import groupby
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .bsl_parser import (_BSL_TOKEN, _RE_MODULE_VAR_DECL, _form_context_vars,
                          _parse_param_names, read_bsl_text, without_deletions)
 from .bsl_reference import module_context_vars
+from .fsretry import replace_with_retry
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
 from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, indexed_manager_objects
-from .platform_help import compatibility_warning, minimum_compatibility_mode, version_key
+from .parser_fingerprint import parser_fingerprint
+from .platform_help import (compatibility_warning, fingerprint as help_fingerprint,
+                            minimum_compatibility_mode, read_meta, version_key)
+
+
+logger = logging.getLogger('ariadna')
 
 
 _COLLECTIONS = {k.casefold(): ru for k, (ru, _) in OBJECT_TYPE_MAP.items()}
@@ -466,6 +479,11 @@ _LEVEL_BY_LABEL = {label: key for key, label in LEVELS.items()}
 _REPORTS = OrderedDict()
 _REPORTS_LOCK = Lock()
 _MAX_REPORTS = 3
+CACHE_FILE = 'platform-check.zip'
+
+
+class ReportIndexChanged(ValueError):
+    """Во время запроса началась переиндексация или изменился индекс."""
 
 
 def _module_input(engine, mod):
@@ -475,33 +493,28 @@ def _module_input(engine, mod):
 
 
 class _Report:
-    """Один снимок проверки на источник. Хранит текст блоками и позиции по уровням."""
+    """Один снимок проекта. Источники занимают непрерывные диапазоны модулей."""
 
-    def __init__(self, conn, index, mode, source_id):
+    def __init__(self):
         self.lock = Lock()
-        self.mode = mode
-        self.vocab = _Vocabulary(index)
-        self.declarations = defaultdict(dict)
-        self.globals = set()
-        self.objects = indexed_manager_objects(conn)
-        for module, name, is_export, is_global in conn.execute(
-                """SELECT m.name_cf, p.name_cf, p.is_export, m.is_global
-                   FROM modules m LEFT JOIN procedures p ON p.module_id=m.id"""):
-            procedures = self.declarations[module]
-            if name:
-                procedures[name] = procedures.get(name, False) or bool(is_export)
-            if is_global and is_export:
-                self.globals.add(name)
+        self.inputs = None
+        self.selections = {}
+
+    def _load_modules(self, conn):
         self.modules = conn.execute(
             """SELECT m.id, m.name_cf, m.file_path, m.abs_path, m.source_id, m.object_id,
                       m.file_hash, m.module_type, s.stat, o.kind FROM modules m
                LEFT JOIN module_stat s ON s.module_id=m.id
                LEFT JOIN metadata_objects o ON o.id=m.object_id
-               WHERE (? IS NULL OR m.source_id=?) AND m.file_path != ''
-               ORDER BY m.source_id, m.file_path, m.id""", (source_id, source_id)).fetchall()
-        self.inputs = None
+               WHERE m.file_path != '' ORDER BY m.source_id, m.file_path, m.id""").fetchall()
+        self.sources = {}
+        start = 0
+        for sid, rows in groupby(self.modules, key=lambda row: row['source_id']):
+            end = start + sum(1 for _ in rows)
+            self.sources[sid] = (start, end)
+            start = end
 
-    def _module_findings(self, mod, procedures, bindings, form_attrs, path, form, stat):
+    def _module_findings(self, mod, procedures, bindings, form_attrs, diagnosis, path, form, stat):
         where = f"@{mod['source_id']} {mod['file_path']}"
         try:
             if path and mod['stat'] != stat and mod['file_hash'] != module_file_hash(path, form):
@@ -522,16 +535,32 @@ class _Report:
         for first, body, params, directive, context in _regions(lines, procedures):
             visible = bindings | _form_context_vars(directive, form_attrs)
             for call in _sites(body, first, params, visible, context, preprocessor):
-                message = _diagnosis(call, mod['name_cf'], self.declarations,
-                                     self.globals, self.objects, self.vocab, self.mode)
+                message = diagnosis(call, mod['name_cf'])
                 if message:
                     level = _LEVEL_BY_LABEL[message.partition(' — ')[0]]
                     yield level, f'{where}:{call.line} — {message}\n  {call.text}'
 
-    def _build(self, engine, conn):
+    def _build(self, engine, conn, index, mode):
+        self._load_modules(conn)
+        vocab = _Vocabulary(index)
+        declarations = defaultdict(dict)
+        globals_ = set()
+        objects = indexed_manager_objects(conn)
+        for module, name, is_export, is_global in conn.execute(
+                """SELECT m.name_cf, p.name_cf, p.is_export, m.is_global
+                   FROM modules m LEFT JOIN procedures p ON p.module_id=m.id"""):
+            procedures = declarations[module]
+            if name:
+                procedures[name] = procedures.get(name, False) or bool(is_export)
+            if is_global and is_export:
+                globals_.add(name)
+
+        def diagnosis(call, module):
+            return _diagnosis(call, module, declarations, globals_, objects, vocab, mode)
+
         self.blocks = []
         self.positions = {level: array('I') for level in LEVELS}
-        self.selections = {}
+        self.selections.clear()
         self.starts = []
         self.count = 0
         inputs, block = [], []
@@ -552,7 +581,8 @@ class _Report:
                     "SELECT name_cf FROM form_attributes WHERE module_id=?", (mod['id'],))}
             inputs.append(snapshot)
             self.starts.append(self.count)
-            for level, msg in self._module_findings(mod, procedures, bindings, form_attrs, *snapshot):
+            for level, msg in self._module_findings(mod, procedures, bindings, form_attrs,
+                                                    diagnosis, *snapshot):
                 self.positions[level].append(self.count)
                 self.count += 1
                 block.append(msg)
@@ -566,6 +596,43 @@ class _Report:
         self.blocks.append(zlib.compress(json.dumps(block, ensure_ascii=False).encode(), level=1))
         block.clear()
 
+    def restore(self, path, key, conn):
+        try:
+            with ZipFile(path) as archive:
+                saved_key, count, starts, inputs = json.loads(archive.read('report.json'))
+                if saved_key != key:
+                    return
+                self._load_modules(conn)
+                if len(starts) != len(inputs) or len(inputs) != len(self.modules):
+                    return
+                positions = {level: array('I', archive.read(level)) for level in LEVELS}
+                if sum(map(len, positions.values())) != count:
+                    return
+                blocks = [archive.read(f'blocks/{i}') for i in range((count + _BLOCK_SIZE - 1) // _BLOCK_SIZE)]
+            self.count, self.starts, self.positions, self.blocks = count, starts, positions, blocks
+            self.inputs = [tuple(item) for item in inputs]
+        except FileNotFoundError:
+            pass
+        except (OSError, BadZipFile, KeyError, ValueError, TypeError, RuntimeError):
+            logger.warning('Не удалось прочитать кэш диагностики %s', path, exc_info=True)
+
+    def save(self, path, key):
+        try:
+            # Соседний временный каталог: замена целого архива атомарна
+            # и при одновременной записи из разных процессов.
+            with TemporaryDirectory(dir=path.parent) as tmp_dir:
+                temp = Path(tmp_dir) / path.name
+                with ZipFile(temp, 'w') as archive:
+                    header = json.dumps([key, self.count, self.starts, self.inputs], ensure_ascii=False)
+                    archive.writestr('report.json', header.encode(), compress_type=ZIP_DEFLATED, compresslevel=1)
+                    for level, positions in self.positions.items():
+                        archive.writestr(level, positions.tobytes(), compress_type=ZIP_DEFLATED, compresslevel=1)
+                    for i, block in enumerate(self.blocks):
+                        archive.writestr(f'blocks/{i}', block)
+                replace_with_retry(temp, path)
+        except OSError:
+            logger.warning('Не удалось сохранить кэш диагностики %s', path, exc_info=True)
+
     def _select(self, levels):
         if levels is None or len(levels) == len(LEVELS):
             return range(self.count)
@@ -575,48 +642,120 @@ class _Report:
             self.selections[levels] = array('I', merge(*(self.positions[level] for level in levels)))
         return self.selections[levels]
 
-    def page(self, engine, conn, limit, offset, levels):
-        if self.inputs is None:
-            self._build(engine, conn)
-        else:
-            positions = self._select(levels)[offset:offset + limit]
-            window = {bisect_right(self.starts, pos) - 1 for pos in positions}
-            if not self.count and not offset and levels is None:
-                window = range(len(self.modules))
-            # Между страницами проверяем файлы выдачи. При изменении
-            # строим новый снимок, чтобы пересчитать уровни и смещения.
-            if any(_module_input(engine, self.modules[i]) != self.inputs[i] for i in window):
-                self.inputs = None
-                self._build(engine, conn)
-
+    def _page_selection(self, source_id, limit, offset, levels):
+        lo, hi = (0, len(self.modules)) if source_id is None else self.sources.get(source_id, (0, 0))
+        lower = self.starts[lo] if lo < len(self.starts) else self.count
+        upper = self.starts[hi] if hi < len(self.starts) else self.count
         selection = self._select(levels)
+        first = bisect_left(selection, lower)
+        stop = bisect_left(selection, upper, lo=first)
+        return lo, hi, lower, upper, selection[first + offset:min(first + offset + limit, stop)], stop - first
+
+    def page(self, engine, source_id, limit, offset, levels, verify_files):
+        lo, hi, lower, upper, positions, count = self._page_selection(source_id, limit, offset, levels)
+        if verify_files:
+            window = {bisect_right(self.starts, pos) - 1 for pos in positions}
+            if lower == upper and not offset and levels is None:
+                window = range(lo, hi)
+            # Как и для снимка в памяти, сверяем исходники запрошенной страницы.
+            if any(_module_input(engine, self.modules[i]) != self.inputs[i] for i in window):
+                return None
+
         items, prev = [], -1
-        for pos in selection[offset:offset + limit]:
+        for pos in positions:
             block, index = divmod(pos, _BLOCK_SIZE)
             if block != prev:
                 values = json.loads(zlib.decompress(self.blocks[block]))
                 prev = block
             items.append(values[index])
-        counts = {level: len(positions) for level, positions in self.positions.items()}
-        return items, offset + limit < len(selection), counts, len(self.modules)
+        counts = {level: bisect_left(rows, upper) - bisect_left(rows, lower)
+                  for level, rows in self.positions.items()}
+        return items, offset + limit < count, counts, hi - lo
+
+
+@cache
+def _report_fingerprint():
+    code = Path(__file__).read_text(encoding='utf-8').replace('\r\n', '\n')
+    return hashlib.sha256(code.encode()).hexdigest(), parser_fingerprint(), help_fingerprint()
+
+
+def _file_identity(path):
+    stat = Path(path).stat()
+    return stat.st_dev, stat.st_ino
+
+
+def _help_stamp(path):
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+
+@lru_cache(maxsize=32)
+def _help_revision(path, stamp):
+    meta = read_meta(path)
+    return stamp, meta.get('schema', ''), meta.get('built_at', '')
+
+
+def _cache_key(engine, index, mode, revision):
+    parts = (_report_fingerprint(), sys.byteorder, _file_identity(engine.db.db_path), revision,
+             sorted(engine.source_roots.items()), index.version,
+             _help_revision(index.path, _help_stamp(index.path)), mode)
+    return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
+
+
+def _index_revision(conn):
+    state = conn.execute("SELECT updated_at, status FROM index_state WHERE id=1").fetchone()
+    return tuple(state) if state else ('', 'empty')
+
+
+def _cached_report(db, key):
+    with _REPORTS_LOCK:
+        report = _REPORTS.get((db, key))
+        if report is None:
+            report = _REPORTS[db, key] = _Report()
+        _REPORTS.move_to_end((db, key))
+        if len(_REPORTS) > _MAX_REPORTS:
+            _REPORTS.popitem(last=False)
+        return report
+
+
+def warm_report(engine, index, mode, ready_at):
+    """Подготовить снимок для состояния, которое reindex опубликует последним."""
+    conn = engine.db.read_conn()
+    if not conn.execute("SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
+        return
+    key = _cache_key(engine, index, mode, (ready_at, 'ready'))
+    report = _Report()
+    report._build(engine, conn, index, mode)
+    if key == _cache_key(engine, index, mode, (ready_at, 'ready')):
+        report.save(Path(engine.db.db_path).with_name(CACHE_FILE), key)
 
 
 def check_calls(engine, index, mode, source_id, limit, offset, levels=None):
     """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
     conn = engine.db.read_conn()
-    state = conn.execute("SELECT updated_at, status FROM index_state WHERE id=1").fetchone()
-    key = (engine.db, tuple(state) if state else (), module_file_stat(engine.db.db_path),
-           module_file_stat(engine.db.db_path + '-wal'), tuple(sorted(engine.source_roots.items())),
-           index.path, module_file_stat(index.path), mode, source_id)
-    with _REPORTS_LOCK:
-        report = _REPORTS.get(key)
-        if report is not None:
-            _REPORTS.move_to_end(key)
-    if report is None:
-        report = _Report(conn, index, mode, source_id)
-        with _REPORTS_LOCK:
-            report = _REPORTS.setdefault(key, report)
-            if len(_REPORTS) > _MAX_REPORTS:
-                _REPORTS.popitem(last=False)
+    revision = _index_revision(conn)
+    if revision[1] == 'indexing':
+        raise ReportIndexChanged('Дождитесь окончания переиндексации и повторите проверку.')
+    key = _cache_key(engine, index, mode, revision)
+    report = _cached_report(engine.db, key)
+    path = Path(engine.db.db_path).with_name(CACHE_FILE)
     with report.lock:
-        return report.page(engine, conn, limit, offset, levels)
+        if report.inputs is None and revision[1] == 'ready':
+            report.restore(path, key, conn)
+        if report.inputs is not None:
+            try:
+                page = report.page(engine, source_id, limit, offset, levels, verify_files=True)
+            except (IndexError, ValueError, zlib.error):
+                page = None
+            if page is not None:
+                if key != _cache_key(engine, index, mode, _index_revision(conn)):
+                    raise ReportIndexChanged('Индекс или справка изменились. Повторите проверку.')
+                return page
+        report.inputs = None
+        report._build(engine, conn, index, mode)
+        if key != _cache_key(engine, index, mode, _index_revision(conn)):
+            report.inputs = None
+            raise ReportIndexChanged('Индекс или справка изменились. Повторите проверку.')
+        if revision[1] == 'ready':
+            report.save(path, key)
+        return report.page(engine, source_id, limit, offset, levels, verify_files=False)
