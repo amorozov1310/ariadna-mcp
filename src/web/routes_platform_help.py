@@ -1,12 +1,16 @@
 """Управление общей для проектов справкой платформы в настройках сервера."""
 
 import logging
+import shutil
 import sqlite3
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
 from zipfile import BadZipFile
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -83,17 +87,19 @@ def build_status():
 
 
 def _install_upload(form: FormData) -> None:
-    store = get_pm().platform_help
+    pm = get_pm()
+    store = pm.platform_help
     version = form.get('version', '').strip()
     context, query, index = (form.get(field) for field in ('context', 'query', 'index'))
     if isinstance(index, UploadFile) and index.filename:
-        store.install_index(version, index.file.read())
+        version = store.install_index(version, index.file.read())['version']
     elif isinstance(context, UploadFile) and context.filename:
         # Браузер отправляет невыбранный файл частью multipart с пустым именем.
         query_data = query.file.read() if isinstance(query, UploadFile) and query.filename else None
         store.build_from_bytes(version, context.file.read(), query_data)
     else:
         raise ValueError('выберите shcntx_ru.hbk или готовый help.db')
+    pm.warm_platform_checks(version)
 
 
 @router.post('/api/admin/platform-help', openapi_extra={
@@ -129,6 +135,34 @@ async def upload_help(request: Request):
     except (MultiPartException, ValueError, OSError, BadZipFile, sqlite3.DatabaseError) as e:
         return _back(error=str(e))
     return _back(message='Справка загружена и доступна агентам.')
+
+
+@router.get('/api/admin/platform-help/{version}/download')
+def download_help(version: str):
+    store = get_pm().platform_help
+    missing = 'Версия справки платформы не найдена.'
+    try:
+        source = store.path(version).resolve()
+    except ValueError:
+        raise HTTPException(status_code=404, detail=missing) from None
+    if not source.is_relative_to(store.root.resolve()) or not any(
+            item['version'] == version for item in store.versions()):
+        raise HTTPException(status_code=404, detail=missing)
+
+    # Хранилище публикует готовый файл атомарной заменой и больше его не пишет.
+    # Копия позволяет завершить скачивание, даже если версию заменят или удалят.
+    directory = TemporaryDirectory(prefix='ariadna-platform-help-')
+    snapshot = Path(directory.name) / ph.INDEX_FILE
+    try:
+        shutil.copyfile(source, snapshot)
+    except FileNotFoundError:
+        directory.cleanup()
+        raise HTTPException(status_code=404, detail=missing) from None
+    except OSError:
+        directory.cleanup()
+        raise
+    return FileResponse(snapshot, media_type='application/octet-stream', filename=f'help-{version}.db',
+                        background=BackgroundTask(directory.cleanup))
 
 
 @router.post('/api/admin/platform-help/{version}/delete')

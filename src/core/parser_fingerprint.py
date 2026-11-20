@@ -63,3 +63,17 @@ def compute_parser_fingerprint() -> str:
 def parser_fingerprint() -> str:
     """Отпечаток текущего кода — считается один раз на процесс."""
     return compute_parser_fingerprint()
+
+
+def index_uses_old_parser(conn) -> bool:
+    """Устарел хотя бы один источник, включая старые индексы без отпечатка."""
+    current = parser_fingerprint()
+    if not current:
+        return False
+    return conn.execute(
+        """SELECT 1 FROM parser_state WHERE fingerprint != '' AND fingerprint != ?
+           UNION ALL
+           SELECT 1 FROM sources s LEFT JOIN parser_state p ON p.source_id=s.id
+           WHERE COALESCE(p.fingerprint, '')='' AND EXISTS (
+               SELECT 1 FROM modules m WHERE m.source_id=s.id AND m.file_hash != '')
+           LIMIT 1""", (current,)).fetchone() is not None

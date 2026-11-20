@@ -998,6 +998,35 @@ class ProjectManager:
     def platform_mode(self, project_id: str) -> str:
         return compatibility_version(self.get_source_xml_path(project_id, self.main_source(project_id)))
 
+    def warm_platform_checks(self, version: str) -> None:
+        """Подготовить в фоне отчёты проектов, использующих загруженную справку."""
+        from .platform_check import warm_ready_report
+
+        def run():
+            try:
+                newest = self.platform_help.newest()
+                index = self.platform_help.get(version)
+                if index is None:
+                    return
+                for project in self.list_projects():
+                    if project.status != 'ready' or (project.platform_version or newest) != version:
+                        continue
+                    try:
+                        engine = self.get_search(project.id)
+                        try:
+                            warm_ready_report(engine, index, self.platform_mode(project.id), project.id)
+                        finally:
+                            engine.db.close_thread_reader()
+                    except Exception:
+                        logger.exception('Проект %s: не удалось запустить проверку платформы', project.id)
+            except Exception:
+                logger.exception('Не удалось начать прогрев проверки для справки %s', version)
+
+        try:
+            threading.Thread(target=run, daemon=True, name=f'platform-check-warm-{version}').start()
+        except RuntimeError:
+            logger.exception('Не удалось запустить прогрев проверки для справки %s', version)
+
     def _diff_sources(self, project_id: str, base_id: str, source_id: str | None) -> tuple[str, str]:
         """(источник проекта, источник базы) для сравнения: по умолчанию — их
         основные конфигурации; явный source_id, отличный от основной, — тот же
@@ -1550,7 +1579,7 @@ class ProjectManager:
                     db.update_state(progress_phase='platform_check')
                     warm_report(self.get_search(project_id), index, self.platform_mode(project_id), ready_at)
             except Exception:
-                # Без снимка первый запрос посчитает его из готового индекса.
+                # Без снимка первый запрос запустит его построение в фоне.
                 logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
 
             total_stats.last_indexed = datetime.now().isoformat()

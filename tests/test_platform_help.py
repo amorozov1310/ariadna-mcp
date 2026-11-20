@@ -26,6 +26,7 @@ from src.core import platform_help as ph
 from src.core.project_manager import ProjectManager
 from src.mcp_server.tools import execute_tool
 from src.web import app as web
+from src.web import routes_platform_help
 from tests.fixtures.generate_platform_help import _book, _container, context_book, query_book
 
 OLD, NEW = '8.3.9.1', '8.3.27.1'
@@ -185,7 +186,11 @@ def test_web_and_mcp_share_versions(tmp_path, monkeypatch):
                  b'\r\nContent-Type: application/octet-stream\r\n\r\n\r\n--x--\r\n')
     response = client.post(url, content=multipart, headers={'Content-Type': 'multipart/form-data; boundary=x'})
     assert 'Справка загружена' in response.text and store.get(NEW).search('СтрНайти', 'query') == ([], False)
-    data = store.path(OLD).read_bytes()
+    download = client.get(f'{url}/{OLD}/download')
+    assert download.status_code == 200
+    assert download.headers['content-disposition'] == f'attachment; filename="help-{OLD}.db"'
+    data = download.content
+    assert data == store.path(OLD).read_bytes()
     assert client.post(f'{url}/{OLD}/delete').status_code == 200
     assert 'не загружена' in ask(project_id='demo')
     assert 'Справка загружена' in client.post(url, files={'index': ('help.db', data)}).text
@@ -200,6 +205,33 @@ def test_web_and_mcp_share_versions(tmp_path, monkeypatch):
     pm.delete_project('platform-help')
     assert store.get(NEW) and store.get(OLD)
     pm.close_all()
+
+
+def test_help_download_link_and_unknown_version(help_client):
+    client, pm = help_client
+    pm.platform_help.build_from_bytes(NEW, context_book())
+    page = client.get('/admin/platform-help')
+    assert f'href="{UPLOAD_URL}/{NEW}/download"' in page.text
+    assert 'Файл help.db можно скачать в таблице версий' in page.text
+    for version in ('8.3.1.1', '%2e%2e', '%2e%2e%5c8.3.27.1', '%2e%2e%2f8.3.27.1'):
+        assert client.get(f'{UPLOAD_URL}/{version}/download').status_code == 404
+
+
+def test_help_download_snapshot_survives_removal(help_client, monkeypatch):
+    client, pm = help_client
+    store = pm.platform_help
+    store.build_from_bytes(NEW, context_book())
+    original = store.path(NEW).read_bytes()
+    file_response = routes_platform_help.FileResponse
+
+    def remove_before_send(*args, **kwargs):
+        store.remove(NEW)
+        return file_response(*args, **kwargs)
+
+    monkeypatch.setattr(routes_platform_help, 'FileResponse', remove_before_send)
+    download = client.get(f'{UPLOAD_URL}/{NEW}/download')
+    assert download.status_code == 200 and download.content == original
+    assert not store.path(NEW).exists()
 
 
 def test_upload_openapi_describes_multipart_body(help_client):
