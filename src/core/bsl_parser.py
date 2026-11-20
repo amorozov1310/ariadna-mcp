@@ -25,6 +25,36 @@ from .bsl_reference import (
     GLOBAL_CONTEXT_OBJECTS_RU,
     GLOBAL_CONTEXT_OBJECTS_EN,
 )
+from .metadata_model import MANAGER_OBJECT_KINDS
+
+
+# Пустые строки и комментарии между продолжениями «|» входят в литерал.
+_STRING = r'"(?:""|[^"\r\n]|\r?\n(?:[ \t]*(?://[^\r\n]*)?\r?\n)*[ \t]*\|)*(?:"|(?=\r?$))'
+_BSL_TOKEN = re.compile(r'//[^\n]*|' + _STRING + r'|\'[^\'\n]*\'|^[ \t]*[&#][^\n]*|\w+|[^\s]', re.M)
+_DELETION = re.compile(r'^[ \t]*#[ \t]*(удаление|delete|конецудаления|enddelete)\b', re.I | re.M)
+
+
+def without_deletions(source):
+    """Убирает удалённый код из модуля, сохраняя номера строк."""
+    if not _DELETION.search(source):
+        return source
+    parts, depth, cursor = [], 0, 0
+    for token in _BSL_TOKEN.finditer(source):
+        directive = _DELETION.match(token[0])
+        if not directive:
+            continue
+        if directive[1].casefold() in {'удаление', 'delete'}:
+            if not depth:
+                parts.append(source[cursor:token.start()])
+                cursor = token.start()
+            depth += 1
+        elif depth:
+            depth -= 1
+            if not depth:
+                parts.append(re.sub(r'[^\r\n]+', '', source[cursor:token.end()]))
+                cursor = token.end()
+    parts.append(re.sub(r'[^\r\n]+', '', source[cursor:]) if depth else source[cursor:])
+    return ''.join(parts)
 
 
 @dataclass
@@ -178,6 +208,7 @@ _METADATA_MANAGERS = {
     'планыобмена': 'ПланОбмена', 'exchangeplans': 'ПланОбмена',  # D11
     'бизнеспроцессы': 'БизнесПроцесс', 'businessprocesses': 'БизнесПроцесс',  # D11
     'задачи': 'Задача', 'tasks': 'Задача',  # D11
+    'константы': 'Константа', 'constants': 'Константа',
 }
 
 # Левая часть двухчастного `Имя.Метод(`, которая не может быть общим
@@ -850,12 +881,14 @@ class BSLParser:
 
     def __init__(self, known_modules: set[str] | None = None,
                  known_objects: dict[str, set[str]] | None = None,
-                 known_factory_functions: dict[str, set[str]] | None = None):
+                 known_factory_functions: dict[str, set[str]] | None = None,
+                 track_manager_objects: bool = False):
         self.known_modules = known_modules or set()
         self.known_objects = known_objects or {}
         # {module_name_lower: {exported_factory_function_name_lower, ...}}
         # — project-wide pre-pass result, see ParseResult.factory_functions.
         self.known_factory_functions = known_factory_functions or {}
+        self.track_manager_objects = track_manager_objects
 
     def parse_file(self, file_path: str, encoding: str = 'utf-8-sig',
                    form_attributes: set[str] | None = None,
@@ -898,7 +931,7 @@ class BSLParser:
         form_attributes = form_attributes or set()
         context_vars = context_vars or set()
         context_methods = context_methods or set()
-        lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        lines = without_deletions(content.replace('\r\n', '\n').replace('\r', '\n')).split('\n')
         result = ParseResult(line_count=len(lines), content=content)
 
         procedures = []
@@ -1314,8 +1347,7 @@ class BSLParser:
             # just the one that happened to construct/alias them — merge
             # last so a per-procedure shadow (a local of the same name)
             # would still win, though that's rare in practice.
-            if module_level_constructed:
-                proc_vars = proc_vars | module_level_constructed
+            proc_vars = proc_vars | module_level_constructed | module_level_var_names
             if module_level_aliases:
                 proc_aliases = {**module_level_aliases, **proc_aliases}
             overrides = self._manager_overrides(
@@ -1498,13 +1530,9 @@ class BSLParser:
             obj_name = m.group(2)       # Организации
             method_name = m.group(3)    # СоздатьОрганизацию
 
-            singular = _METADATA_MANAGERS.get(manager_type.lower())
+            prefix = manager_type.casefold()
+            singular = _METADATA_MANAGERS.get(prefix)
             if not singular:
-                continue
-
-            # Skip standard platform manager methods (not user code)
-            if (method_name.lower() in _PLATFORM_MANAGER_METHODS
-                    or is_platform_manager_method(singular, method_name)):
                 continue
 
             # Validate the object name against Pass 1's fact base, when we
@@ -1512,8 +1540,21 @@ class BSLParser:
             # more likely a local variable that happens to look like
             # "Справочники.Something.Method(" than a real manager call.
             bucket = self.known_objects.get(singular)
-            if bucket and obj_name.lower() not in bucket:
+            known = obj_name.casefold() in (bucket or ())
+            platform_method = (method_name.casefold() in _PLATFORM_MANAGER_METHODS
+                               or is_platform_manager_method(singular, method_name))
+            if prefix in constructed_vars:
                 continue
+            if (self.track_manager_objects and singular.casefold() in MANAGER_OBJECT_KINDS
+                    and (platform_method or not known)):
+                # Сохраняем кандидат для проверки по метаданным, в том числе
+                # после удаления объекта без перепарса вызывающего модуля.
+                # Платформенный метод не образует ребро графа.
+                kind = 'manager_object'
+            elif platform_method or (bucket and not known):
+                continue
+            else:
+                kind = 'manager'
 
             # Build module name: Справочник.Организации.МодульМенеджера
             module_full = f'{singular}.{obj_name}.МодульМенеджера'
@@ -1523,7 +1564,7 @@ class BSLParser:
                 callee_proc=method_name,
                 line=line_num,
                 context=line.strip()[:120],
-                callee_kind='manager',
+                callee_kind=kind,
             ))
             matched_positions.add(m.start())
 

@@ -1,5 +1,6 @@
 """Проверка платформы через обычные точки входа проекта и MCP."""
 
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -36,7 +37,7 @@ def test_platform_calls(project):
     assert 'режим совместимости 8.3.24' in result
     assert 'CommonModules/Пример/Ext/Module.bsl:3 — Ошибка' in result
     assert 'НесуществующийВызов()' in result
-    assert 'метод появился в 8.3.25' in result and 'Таблица.cOuNt()' in result
+    assert 'Таблица.cOuNt()' not in result
     assert 'Module.bsl:6 — Ошибка' in result  # СтрНайти есть только в глобальном контексте.
     assert 'Module.bsl:7 — Не проверено' in result and 'Получатель.НетМетода()' in result
     assert result.count('доступен только на сервере') == 3
@@ -49,7 +50,7 @@ def test_help_mode_by_project(project):
     pm, source = project
     pm.create_project('other', 'Другой')
     args = {'query': 'ValueTable.Count', 'version': VERSION}
-    assert 'Недоступно' in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
+    assert 'Недоступно' not in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', args)
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', dict(args, project_id='other'))
     config = source / 'Configuration.xml'
@@ -71,7 +72,7 @@ def test_pages_and_missing_help(project):
     first = check(limit=1, offset=-1, source_id='sample')
     assert 'offset=1' in first and 'НесуществующийВызов()' in first and 'cOuNt' not in first
     second = check(limit=0, offset=1)
-    assert 'offset=2' in second and 'cOuNt' in second and 'НесуществующийВызов' not in second
+    assert 'offset=2' in second and 'Таблица.СтрНайти()' in second and 'НесуществующийВызов' not in second
     assert 'записей больше нет' in check(offset=50)
     assert 'урезан до 500' in check(limit=1000)
     assert check(source_id='other').startswith('Error:')
@@ -108,10 +109,10 @@ EndProcedure
     pm.reindex('demo')
     result = execute_tool(pm, 'check_platform_calls', {})
     assert 'Module.bsl:4 — Не проверено' in result and 'ExampleTable.Unknown()' in result
-    assert 'Module.bsl:6 — Предупреждение' in result and 'T.Count()' in result
+    assert 'Module.bsl:6' not in result
     assert 'Module.bsl:9 — Не проверено' in result and 'T.AfterBranch()' in result
     assert 'StrFind' not in result and 'Пример.Внутренняя' not in result
-    assert 'Module.bsl:17 — Предупреждение' in result and 'получатель exampletable появился в 8.3.27' in result
+    assert 'Module.bsl:17' not in result
     assert 'Module.bsl:19 — Ошибка' in result and 'ОпечаткаВМодуле()' in result
     module.unlink()
     assert 'нет исходного текста' in execute_tool(pm, 'check_platform_calls', {})
@@ -183,11 +184,10 @@ def test_managers_of_additional_metadata_types(project, directory, collection):
     assert 'Замечаний нет' in execute_tool(pm, 'check_platform_calls', {})
 
 
-@pytest.mark.parametrize(('mode', 'warn'), [
-    ('Version8_3_6', False), ('Version8_3_5', False), ('Version8_3_4', True),
-    ('Version8_3_7', False), ('DontUse', False), ('', False),
+@pytest.mark.parametrize('mode', [
+    'Version8_3_6', 'Version8_3_5', 'Version8_3_4', 'Version8_3_7', 'DontUse', '',
 ])
-def test_compatibility_threshold_in_both_tools(project, mode, warn):
+def test_conflicting_compatibility_in_both_tools(project, mode):
     pm, source = project
     config = source / 'Configuration.xml'
     xml = config.read_text(encoding='utf-8')
@@ -198,11 +198,44 @@ def test_compatibility_threshold_in_both_tools(project, mode, warn):
     pm.reindex('demo')
     calls = execute_tool(pm, 'check_platform_calls', {})
     help_text = execute_tool(pm, 'platform_help', {'query': 'СтрШаблон'})
-    assert ('— Предупреждение' in calls) == warn
-    assert ('Недоступно' in help_text) == warn
-    if warn:
-        assert 'требует режима совместимости 8.3.5' in calls and 'СтрШаблон(' in calls
-    assert 'С версии 8.3.6 (режим совместимости 8.3.5 и новее)' in help_text
+    assert 'Замечаний нет' in calls
+    assert 'Недоступно' not in help_text
+    assert 'В справке указан режим 8.3.5, фактически требуется 8.3.6' in help_text
+
+
+@pytest.mark.parametrize(('opening', 'closing'), [('#If Server Then', '#EndIf'),
+                                                     ('#Если Сервер Тогда', '#КонецЕсли')])
+def test_preprocessor_does_not_turn_comparison_into_assignment(project, opening, closing):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', f'''Procedure Check()
+    T = New Array;
+    Flag =
+    {opening}
+    T = New Structure;
+    T.Add(1);
+    {closing}
+EndProcedure
+''')
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {})
+    assert 'Module.bsl:6 — Не проверено' in result
+    assert '— Ошибка' not in result
+
+
+def test_property_chain_requires_known_receiver_and_documented_member(project):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', '''Procedure Check(Unknown)
+    T = New ValueTable;
+    T.Columns.Add("A");
+    T.Колонки.Опечатка();
+    Unknown.Columns.Add("B");
+EndProcedure
+''')
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {})
+    assert 'Module.bsl:3 —' not in result
+    assert 'Module.bsl:4 — Не проверено' in result
+    assert 'Module.bsl:5 — Не проверено' in result
 
 
 @pytest.mark.parametrize(('availability', 'warn'), [
@@ -227,6 +260,166 @@ def test_external_processor_connect_on_client(project):
     pm.reindex('demo')
     result = execute_tool(pm, 'check_platform_calls', {})
     assert 'Module.bsl:3 — Предупреждение' in result and 'недоступен на клиенте' in result
+
+
+def test_client_context_is_scoped_to_preprocessor_branch(project):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', '''&AtClient
+Procedure Check()
+    ExternalDataProcessors.Connect(Path);
+    #If Server Then
+    ExternalDataProcessors.Connect(Path);
+    #EndIf
+    ExternalDataProcessors.Connect(Path);
+EndProcedure
+
+Procedure CheckBranch()
+    #If Client Then
+    ExternalDataProcessors.Connect(Path);
+    #Else
+    ExternalDataProcessors.Connect(Path);
+    #EndIf
+EndProcedure
+
+&AtServer
+Procedure CheckServer()
+    #If Client Then
+    ExternalDataProcessors.Connect(Path);
+    #EndIf
+EndProcedure
+''')
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {})
+    for line in (3, 7, 12):
+        assert f'Module.bsl:{line} — Предупреждение' in result
+    for line in (5, 14, 21):
+        assert f'Module.bsl:{line} —' not in result
+
+
+def test_deleted_procedures_do_not_resolve_live_calls(project):
+    pm, source = project
+    ext = _extension(pm, source)
+    _write_module(ext, 'CommonModules/Пример/Ext/Module.bsl', '''#Delete
+Procedure DeletedGlobal() Export
+EndProcedure
+#EndDelete
+Procedure Check()
+    DeletedGlobal();
+EndProcedure
+''')
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {'source_id': 'sample_ext'})
+    assert 'Module.bsl:6 — Ошибка' in result and 'DeletedGlobal()' in result
+
+
+def test_manager_private_member_and_missing_object_in_both_tools(project):
+    pm, source = project
+    ext = _extension(pm, source)
+    _write_module(ext, 'Constants/MyConst/Ext/ManagerModule.bsl', '''Procedure PrivateMember()
+EndProcedure
+Procedure PublicMember() Export
+    PrivateMember();
+EndProcedure
+''')
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', '''Procedure Check()
+    Constants.MyConst.PrivateMember();
+    Constants.MyConst.PublicMember();
+    Constants.MyConst.Get();
+    Catalogs.NoSuchCatalog.FindByCode("X");
+    Документы.НетДокумента.НайтиПоНомеру("X");
+    Constants.NoSuchConstant.Get();
+EndProcedure
+''')
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {'source_id': 'sample'})
+    assert 'Module.bsl:2 — Ошибка — метод менеджера без «Экспорт»' in result
+    for line in (5, 6, 7):
+        assert f'Module.bsl:{line} — Ошибка — объект метаданных' in result
+    assert 'PublicMember()' not in result and 'Constants.MyConst.Get()' not in result
+    broken = pm.broken_calls('demo', source_id='sample')
+    assert [(item['line'], item['name']) for item in broken['not_export']] == [(2, 'PrivateMember')]
+    assert [(item['line'], item.get('missing_object')) for item in broken['missing']] == [
+        (5, True), (6, True), (7, True),
+    ]
+    assert 'объекта метаданных нет' in execute_tool(pm, 'find_broken_calls', {'source_id': 'sample'})
+
+
+def test_broken_calls_detects_manager_removed_on_incremental_reindex(project):
+    pm, source = project
+    manager = _write_module(source, 'Catalogs/Пример/Ext/ManagerModule.bsl',
+                            'Процедура Метод() Экспорт\nКонецПроцедуры\n')
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', '''Procedure Check()
+    Catalogs.Пример.FindByCode("X");
+    Catalogs.Пример.Метод();
+    Catalogs.Пример.CreateItem();
+EndProcedure
+''')
+    pm.reindex('demo')
+    assert not pm.broken_calls('demo')['missing']
+
+    manager.unlink()
+    config = source / 'Configuration.xml'
+    config.write_text(config.read_text(encoding='utf-8').replace('<Catalog>Пример</Catalog>', ''),
+                      encoding='utf-8')
+    pm.reindex('demo')
+    missing = pm.broken_calls('demo')['missing']
+    assert [(item['line'], item.get('missing_object')) for item in missing] == [
+        (2, True), (3, True), (4, True),
+    ]
+
+
+def test_filter_and_counts_cover_whole_report_across_pages(project):
+    pm, source = project
+    code = 'Получатель.Неизвестно();\n' * 503 + 'Опечатка();\nПримерРежима();\nОпечаткаДва();\n'
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', code)
+    pm.reindex('demo')
+
+    def check(**args):
+        return execute_tool(pm, 'check_platform_calls', args)
+
+    first = check(level='error', limit=1)
+    assert 'Модулей — 1. Ошибки — 2, предупреждения — 1, не проверено — 503.' in first.splitlines()[1]
+    assert 'Опечатка()' in first and 'offset=1' in first
+    assert 'ОпечаткаДва()' in check(level='error', offset=1)
+    assert 'Получатель.Неизвестно()' not in first
+    pair = check(level=['warning', 'error', 'warning'])
+    assert pair.index('Опечатка()') < pair.index('ПримерРежима()') < pair.index('ОпечаткаДва()')
+    assert check(level='unknown').startswith('Error:')
+    assert 'Замечаний нет' in check(level=[])
+    assert 'Получатель.Неизвестно()' in check(level='unchecked', offset=502)
+    assert 'Опечатка' not in check(level='unchecked', offset=503)
+
+    from mcp import Client
+    from src.mcp_server.server import create_mcp_server
+
+    async def verify_mcp():
+        async with Client(create_mcp_server(pm)) as client:
+            for level in ('error', ['warning', 'error']):
+                args = {'level': level, 'limit': 1}
+                result = await client.call_tool('check_platform_calls', args)
+                assert not result.is_error
+                assert result.content[0].text == check(**args)
+
+    asyncio.run(verify_mcp())
+
+
+def test_cached_page_rechecks_only_modules_on_page(project, monkeypatch):
+    pm, source = project
+    for path in ('CommonModules/Пример/Ext/Module.bsl', 'Ext/SessionModule.bsl'):
+        _write_module(source, path, 'Опечатка();\n' * 500)
+    pm.reindex('demo')
+    execute_tool(pm, 'check_platform_calls', {'offset': 500, 'limit': 1})
+    inputs = []
+    original = platform_check._module_input
+
+    def track(engine, mod):
+        inputs.append(mod['file_path'])
+        return original(engine, mod)
+
+    monkeypatch.setattr(platform_check, '_module_input', track)
+    result = execute_tool(pm, 'check_platform_calls', {'offset': 500, 'limit': 1})
+    assert 'SessionModule.bsl:1' in result
+    assert inputs == ['Ext/SessionModule.bsl']
 
 
 def test_nested_extension_deletions_preserve_line_numbers(project):
@@ -436,8 +629,8 @@ def test_known_platform_methods_omitted_from_help(project):
 Metadata.Presentation();
 Метаданные.ПолноеИмя();
 Metadata.FullName();
-Справочники.Проба.ПолучитьИмяПредопределенного(Ссылка);
-Catalogs.Проба.GetPredefinedItemName(Ссылка);
+Справочники.Пример.ПолучитьИмяПредопределенного(Ссылка);
+Catalogs.Пример.GetPredefinedItemName(Ссылка);
 Запись = Новый КаноническаяЗаписьXML;
 Запись.УстановитьСтроку(ТипКаноническогоXML.КаноническийXML);
 Writer = New XMLCanonicalizingWriter;
@@ -459,7 +652,7 @@ Metadata.Typo();
     xml = config.read_text(encoding='utf-8')
     config.write_text(xml.replace('Version8_3_24', 'Version8_3_19'), encoding='utf-8')
     restricted = execute_tool(pm, 'check_platform_calls', {})
-    assert restricted.count('метод появился в 8.3.20') == 2
+    assert '— Предупреждение' not in restricted
 
 
 def test_global_property_cannot_be_called(project):

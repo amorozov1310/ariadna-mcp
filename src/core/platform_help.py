@@ -826,14 +826,17 @@ def _cut(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n].rstrip() + '…'
 
 
+def _compatibility_conflict(since: str, compat: str) -> bool:
+    return bool(since and compat and version_key(since) > version_key(compat))
+
+
 def compatibility_warning(since: str, compat: str, mode: str) -> str:
     """Ограничения из раздела «Использование в версии» для режима проекта."""
-    minimum = compat or since
-    if not mode or not minimum or version_key(minimum) <= version_key(mode):
+    if (not mode or not compat or _compatibility_conflict(since, compat)
+            or version_key(compat) <= version_key(mode)):
         return ''
-    reason = (f'требует режима совместимости {compat} или новее' if compat
-              else f'появился в {since}')
-    return reason + f', а у конфигурации режим совместимости {mode}'
+    return (f'требует режима совместимости {compat} или новее, '
+            f'а у конфигурации режим совместимости {mode}')
 
 
 def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:
@@ -843,6 +846,16 @@ def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:
     warning = compatibility_warning(e.since, e.compat, mode)
     if warning:
         lines.append(f'Недоступно в режиме проекта: элемент {warning}.')
+    conflict = _compatibility_conflict(e.since, e.compat)
+    if conflict:
+        if (e.kind == 'function'
+                and (e.name_ru.casefold() == 'стршаблон' or e.name_en.casefold() == 'strtemplate')
+                and (e.since, e.compat) == ('8.3.6', '8.3.5')):
+            lines.append('В справке указан режим 8.3.5, фактически требуется 8.3.6 '
+                         '(см. примечания к выпуску 8.3.6 и руководство разработчика 1С).')
+        else:
+            lines.append(f'В справке указан режим {e.compat}, а элемент появился в версии '
+                         f'{e.since}. Минимальный режим требует проверки на платформе.')
     if not full:
         syntax = next((v['syntax'] for v in e.variants if v.get('syntax')), '')
         if syntax:
@@ -875,7 +888,8 @@ def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:
     if e.availability:
         lines.append(f'Доступность: {e.availability}')
     if e.since:
-        lines.append(f'С версии {e.since}' + (f' (режим совместимости {e.compat} и новее)' if e.compat else ''))
+        lines.append(f'С версии {e.since}' + (f' (режим совместимости {e.compat} и новее)'
+                                             if e.compat and not conflict else ''))
     elif e.compat:
         lines.append(f'Режим совместимости {e.compat} и новее')
     if e.description:

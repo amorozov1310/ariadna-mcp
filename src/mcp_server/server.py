@@ -611,17 +611,21 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
                    module_name=module_name, limit=limit, offset=offset)
 
     @mcp.tool(description="Сверить вызовы в модулях BSL со справкой платформы проекта. Показывает "
-                          "файл, строку, вызов и причину: неизвестное имя, ограничение версии "
-                          "или клиентского контекста. Неизвестный тип помечается «Не проверено».",
+                          "счётчики всего отчёта и замечания с файлом, строкой и причиной. "
+                          "Неизвестный тип помечается «Не проверено». Для поиска ошибок передайте level=error.",
               annotations=_READ_ONLY)
     def check_platform_calls(
         project_id: Annotated[str | None, Field(description=_PID)] = None,
         source_id: Annotated[str | None, Field(description="Проверить только модули этого источника")] = None,
         limit: Annotated[int, Field(description=_LIMIT)] = 50,
         offset: Annotated[int, Field(description=_OFFSET)] = 0,
+        level: Annotated[
+            Literal['error', 'warning', 'unchecked'] | list[Literal['error', 'warning', 'unchecked']] | None,
+            Field(description="Уровень или список уровней. Фильтр применяется до offset и limit."),
+        ] = None,
     ) -> str:
         return run('check_platform_calls', project_id=project_id, source_id=source_id,
-                   limit=limit, offset=offset)
+                   limit=limit, offset=offset, level=level)
 
     @mcp.tool(
         description="Диагностика индекса: процедуры в файлах против проиндексированных (пропущенные "

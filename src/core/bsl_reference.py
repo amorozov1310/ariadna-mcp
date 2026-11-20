@@ -695,9 +695,13 @@ _REGISTER_ONLY = {s.lower() for s in (
     'СоздатьКлючЗаписи', 'CreateRecordKey', 'ПустойКлюч', 'EmptyKey',
     'СоздатьНаборЗаписей', 'CreateRecordSet', 'СоздатьМенеджерЗаписи', 'CreateRecordManager',
     'ПолучитьФормуЗаписи', 'GetRecordForm')}
-_KIND_ONLY = _KIND_ONLY | _REGISTER_ONLY
+_CONSTANT_METHODS = {'получить', 'get', 'установить', 'set',
+                     'создатьключзначения', 'createvaluekey',
+                     'создатьменеджерзначения', 'createvaluemanager'}
+_KIND_ONLY = _KIND_ONLY | _REGISTER_ONLY | _CONSTANT_METHODS
 _REGISTER_METHODS = {'получить', 'get'} | _REGISTER_ONLY
 _PLATFORM_BY_KIND = {
+    'константа': _CONSTANT_METHODS,
     'отчет': {'создать', 'create'},
     'обработка': {'создать', 'create'},
     'перечисление': {'индекс', 'indexof', 'количество', 'count', 'получить', 'get'},

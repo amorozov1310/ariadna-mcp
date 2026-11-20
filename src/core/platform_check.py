@@ -8,18 +8,20 @@ import json
 import re
 import sqlite3
 import zlib
+from array import array
 from bisect import bisect_right
 from collections import OrderedDict, defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from functools import lru_cache
-from itertools import islice
+from heapq import merge
 from threading import Lock
 
-from .bsl_parser import _RE_MODULE_VAR_DECL, _form_context_vars, _parse_param_names, read_bsl_text
+from .bsl_parser import (_BSL_TOKEN, _RE_MODULE_VAR_DECL, _form_context_vars,
+                         _parse_param_names, read_bsl_text, without_deletions)
 from .bsl_reference import module_context_vars
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
-from .metadata_model import OBJECT_TYPE_MAP
+from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, indexed_manager_objects
 from .platform_help import compatibility_warning, version_key
 
 
@@ -31,17 +33,17 @@ _KEYWORDS = set("""
     вызватьисключение raise выполнить execute добавитьобработчик addhandler
     удалитьобработчик removehandler продолжитьвызов proceedwithcall
 """.split())
-# Внутри многострочной строки могут быть пустые строки и комментарии между
-# строками с «|». Кавычки комментария не закрывают строковый литерал.
-_STRING = r'"(?:""|[^"\r\n]|\r?\n(?:[ \t]*(?://[^\r\n]*)?\r?\n)*[ \t]*\|)*(?:"|(?=\r?$))'
-_TOKEN = re.compile(r'//[^\n]*|' + _STRING + r'|\'[^\'\n]*\'|^[ \t]*[&#][^\n]*|\w+|[^\s]', re.M)
 _NEW = {'новый', 'new'}
 _EXECUTE = {'выполнить', 'execute'}
 _VAR = {'перем', 'var'}
 _BRANCHES = set('иначе else иначеесли elsif конецесли endif для for пока while цикл do '
                 'конеццикла enddo исключение except конецпопытки endtry'.split())
 _STATEMENT_BOUNDARIES = set('; : тогда then иначе else цикл do попытка try исключение except'.split())
-_DELETION = re.compile(r'^[ \t]*#[ \t]*(удаление|delete|конецудаления|enddelete)\b', re.I | re.M)
+_CONDITIONAL = re.compile(r'^\s*#\s*(if|если|elsif|иначеесли|else|иначе|endif|конецесли)\b([^/]*)')
+_CLIENT_TEST = {'client then', 'клиент тогда'}
+_SERVER_TEST = {'server then', 'сервер тогда'}
+_CLIENT_DIRECTIVES = {'&наклиенте', '&atclient'}
+_SERVER_DIRECTIVES = {'&насервере', '&atserver', '&насерверебезконтекста', '&atservernocontext'}
 _SERVER_CONTEXTS = {
     'сервер', 'внешнее соединение', 'мобильное приложение (сервер)', 'мобильный автономный сервер',
     'server', 'external connection', 'mobile application (server)', 'mobile standalone server',
@@ -75,6 +77,7 @@ class _Call:
     receiver: list[str]
     # None — имя может быть глобальным, '' — локальная переменная неизвестного типа.
     binding: str | None
+    client: bool
 
 
 class _Vocabulary:
@@ -85,28 +88,34 @@ class _Vocabulary:
         self.owners = set()
         self.properties = {}
         self.property_entries = defaultdict(list)
+        self.member_properties = defaultdict(set)
         self.dynamic_owners = {'comобъект', 'comobject'}
         uri = index.path.resolve().as_uri() + '?mode=ro'
         with closing(sqlite3.connect(uri, uri=True)) as conn:
             for kind, ru, en, owner_ru, owner_en, since, compat, availability, value_type in conn.execute(
                 """SELECT kind, name_ru_cf, name_en_cf, owner_ru_cf, owner_en_cf,
                           since, compat, availability, value_type FROM entries
-                   WHERE kind IN ('type','function','global_property','method')"""
+                   WHERE kind IN ('type','function','global_property','method','property')"""
             ):
                 names = {ru, en} - {''}
                 if kind == 'type':
                     self.owners.update(names)
                     continue
                 owners = {''}
-                if kind == 'method':
+                if kind in ('method', 'property'):
                     owners = {s.partition('.<')[0] for s in (owner_ru, owner_en) if s}
-                    self.owners.update(owners)
-                    if any('<' in name for name in names):
-                        self.dynamic_owners.update(owners)
+                    if kind == 'method':
+                        self.owners.update(owners)
+                        if any('<' in name for name in names):
+                            self.dynamic_owners.update(owners)
                 for name in names:
                     if kind == 'global_property':
                         self.properties[name] = value_type.casefold() if value_type.isidentifier() else ''
                         self.property_entries[name].append((since, compat, availability))
+                    elif kind == 'property':
+                        for owner in owners:
+                            self.member_properties[owner, name].add(
+                                (value_type.casefold(), since, compat, availability))
                     else:
                         for owner in owners:
                             self.members[owner, name].append((since, compat, availability))
@@ -119,32 +128,9 @@ class _Vocabulary:
                         self.members.setdefault((owner, name), [(since, '', availability)])
 
 
-def _without_deletions(source):
-    """Убирает удалённый код из всего модуля, сохраняя номера строк."""
-    if not _DELETION.search(source):
-        return source
-    parts, depth, cursor = [], 0, 0
-    for token in _TOKEN.finditer(source):
-        directive = _DELETION.match(token[0])
-        if not directive:
-            continue
-        if directive[1].casefold() in {'удаление', 'delete'}:
-            if not depth:
-                parts.append(source[cursor:token.start()])
-                cursor = token.start()
-            depth += 1
-        elif depth:
-            depth -= 1
-            if not depth:
-                parts.append(re.sub(r'[^\r\n]+', '', source[cursor:token.end()]))
-                cursor = token.end()
-    parts.append(re.sub(r'[^\r\n]+', '', source[cursor:]) if depth else source[cursor:])
-    return ''.join(parts)
-
-
-def _sites(body, first_line, params, bindings):
+def _sites(body, first_line, params, bindings, context):
     """Вызовы с позицией в тексте, получателем и доказанным типом переменной."""
-    tokens = [m for m in _TOKEN.finditer(body) if not m[0].startswith('//')]
+    tokens = [m for m in _BSL_TOKEN.finditer(body) if not m[0].startswith('//')]
     words = [m[0].casefold() for m in tokens]
     stack, pairs = [], {}
     for i, word in enumerate(words):
@@ -166,6 +152,9 @@ def _sites(body, first_line, params, bindings):
     locals_ = _parse_param_names(params or '') | bindings
     assignments = {}
     execute_pending = False
+    scopes = []
+    client = context is True
+    may_run_on_client = context is not False
     for i in range(start, len(words) - 1):
         word, after = words[i:i + 2]
         before = words[i - 1] if i else ''
@@ -178,10 +167,29 @@ def _sites(body, first_line, params, bindings):
         # Через развилки, метки и директивы препроцессора тип не переносим.
         if before != '.' and (word in _BRANCHES or word.lstrip().startswith(('#', '~'))):
             types.clear()
+        if word.lstrip().startswith('#') and (condition := _CONDITIONAL.match(word)):
+            # Только простые условия доказывают, что ветка клиентская.
+            branch, test = condition[1], ' '.join(condition[2].split())
+            if branch in {'if', 'если'}:
+                scopes.append((client, may_run_on_client, True))
+            if scopes:
+                outer_client, outer_possible, remaining = scopes[-1]
+                if branch in {'endif', 'конецесли'}:
+                    scopes.pop()
+                    client, may_run_on_client = outer_client, outer_possible
+                else:
+                    possible = outer_possible and remaining
+                    may_run_on_client = possible and test not in _SERVER_TEST
+                    client = possible and test in _CLIENT_TEST
+                    if branch in {'else', 'иначе'}:
+                        client = outer_client and possible
+                    if test in _CLIENT_TEST:
+                        scopes[-1] = outer_client, outer_possible, False
         if not word.isidentifier():
             continue
-        statement_start = (i == start or before in _STATEMENT_BOUNDARIES
-                           or before.lstrip().startswith(('#', '&')))
+        # Директива может разрывать выражение. Сомнение в границе оператора
+        # оставляет тип неизвестным, чтобы вызов получил «Не проверено».
+        statement_start = i == start or before in _STATEMENT_BOUNDARIES
         if statement_start and word in _EXECUTE:
             execute_pending = True
             continue
@@ -222,7 +230,7 @@ def _sites(body, first_line, params, bindings):
         if offset + 160 < end:
             snippet += '…'
         yield _Call(first_line + bisect_right(newlines, tokens[i].start()), snippet, word,
-                    receiver, binding)
+                    receiver, binding, client)
 
 
 @lru_cache(maxsize=128)
@@ -239,13 +247,13 @@ def _restrictions(entries, mode, client, subject):
             reasons.append(subject + ' ' + warnings[0])
     if client and entries and all(_server_only(a) for _, _, a in entries):
         if all(a.strip().casefold() in {'сервер', 'server'} for _, _, a in entries):
-            reasons.append(f'{subject} доступен только на сервере, а процедура выполняется на клиенте')
+            reasons.append(f'{subject} доступен только на сервере, а вызов выполняется на клиенте')
         else:
-            reasons.append(f'{subject} недоступен на клиенте, а процедура выполняется на клиенте')
+            reasons.append(f'{subject} недоступен на клиенте, а вызов выполняется на клиенте')
     return reasons
 
 
-def _diagnosis(call, module, declarations, globals_, vocab, mode, client):
+def _diagnosis(call, module, declarations, globals_, objects, vocab, mode):
     name, receiver = call.name, call.receiver
     owner = ''
     implicit = False
@@ -261,16 +269,31 @@ def _diagnosis(call, module, declarations, globals_, vocab, mode, client):
             implicit = True
     elif len(receiver) == 2 and receiver[0] in _COLLECTIONS and call.binding is None:
         kind = _COLLECTIONS[receiver[0]].casefold()
-        if name in declarations.get(f'{kind}.{receiver[1]}.модульменеджера', ()):
-            return ''
+        obj = f'{kind}.{receiver[1]}'
+        manager = f'{obj}.модульменеджера'
+        if manager in declarations:
+            procedures = declarations[manager]
+            if name in procedures:
+                return '' if procedures[name] else 'Ошибка — метод менеджера без «Экспорт»'
+        elif kind in MANAGER_OBJECT_KINDS and objects is not None and obj not in objects:
+            return f'Ошибка — объект метаданных {obj} отсутствует в выгрузке'
         owner = kind + 'менеджер'
     elif len(receiver) == 1:
         if f'общиймодуль.{receiver[0]}.модуль' in declarations and call.binding is None:
             return ''  # Вызовы общих модулей проверяет find_broken_calls.
         owner = call.binding if call.binding is not None else vocab.properties.get(receiver[0], '')
         if call.binding is None and receiver[0] in vocab.properties:
-            reasons = _restrictions(vocab.property_entries[receiver[0]], mode, client,
+            reasons = _restrictions(vocab.property_entries[receiver[0]], mode, call.client,
                                     f'получатель {receiver[0]}')
+    elif len(receiver) == 2 and call.binding:
+        props = vocab.member_properties.get((call.binding, receiver[1]), ())
+        candidates = {value_type for value_type, *_ in props}
+        if len(candidates) == 1:
+            target = next(iter(candidates))
+            if vocab.members.get((target, name)):
+                owner = target
+                reasons = _restrictions([entry[1:] for entry in props], mode, call.client,
+                                        f'свойство {receiver[1]}')
     entries = vocab.members.get((owner, name), ())
     if not receiver and not entries:
         entries = vocab.members.get(('', name), ())
@@ -283,9 +306,9 @@ def _diagnosis(call, module, declarations, globals_, vocab, mode, client):
         verdict = f'Ошибка — в справке нет метода{label} с таким именем'
     else:
         verdict = ''
-        reasons.extend(_restrictions(entries, mode, client, 'метод'))
+        reasons.extend(_restrictions(entries, mode, call.client, 'метод'))
     if reasons:
-        return (verdict + '. ' if verdict else '') + 'Предупреждение — ' + '. '.join(reasons)
+        return 'Предупреждение — ' + '. '.join(reasons) + (f'. {verdict}' if verdict else '')
     return verdict
 
 
@@ -295,19 +318,21 @@ def _regions(lines, procedures):
     for proc in procedures:
         first = proc['start_line']
         if first > next_line:
-            yield next_line, ''.join(lines[next_line - 1:first - 1]), None, '', False
+            yield next_line, ''.join(lines[next_line - 1:first - 1]), None, '', None
         body = ''.join(lines[first - 1:proc['end_line']])
-        directives = proc['directive'].casefold().split()
-        client = bool({'&наклиенте', '&atclient'}.intersection(directives))
-        if re.search(r'^\s*#\s*(?:если|if)\b', body, re.I | re.M):
-            client = False
-        yield first, body, proc['params'], proc['directive'], client
+        directives = set(proc['directive'].casefold().split())
+        context = True if directives & _CLIENT_DIRECTIVES else None
+        if directives & _SERVER_DIRECTIVES:
+            context = False
+        yield first, body, proc['params'], proc['directive'], context
         next_line = proc['end_line'] + 1
     if next_line <= len(lines):
-        yield next_line, ''.join(lines[next_line - 1:]), None, '', False
+        yield next_line, ''.join(lines[next_line - 1:]), None, '', None
 
 
 _BLOCK_SIZE = 500
+LEVELS = {'error': 'Ошибка', 'warning': 'Предупреждение', 'unchecked': 'Не проверено'}
+_LEVEL_BY_LABEL = {label: key for key, label in LEVELS.items()}
 _REPORTS = OrderedDict()
 _REPORTS_LOCK = Lock()
 _MAX_REPORTS = 3
@@ -320,20 +345,22 @@ def _module_input(engine, mod):
 
 
 class _Report:
-    """Продолжает разбор с последнего вызова. Сжатые блоки ограничивают
-    расход памяти на больших выгрузках и позволяют читать любую страницу."""
+    """Один снимок проверки на источник. Хранит текст блоками и позиции по уровням."""
 
     def __init__(self, conn, index, mode, source_id):
         self.lock = Lock()
         self.mode = mode
         self.vocab = _Vocabulary(index)
-        self.declarations = defaultdict(set)
+        self.declarations = defaultdict(dict)
         self.globals = set()
-        for module, name, global_export in conn.execute(
-                """SELECT m.name_cf, p.name_cf, m.is_global AND p.is_export
+        self.objects = indexed_manager_objects(conn)
+        for module, name, is_export, is_global in conn.execute(
+                """SELECT m.name_cf, p.name_cf, p.is_export, m.is_global
                    FROM modules m LEFT JOIN procedures p ON p.module_id=m.id"""):
-            self.declarations[module].add(name)
-            if global_export:
+            procedures = self.declarations[module]
+            if name:
+                procedures[name] = procedures.get(name, False) or bool(is_export)
+            if is_global and is_export:
                 self.globals.add(name)
         self.modules = conn.execute(
             """SELECT m.id, m.name_cf, m.file_path, m.abs_path, m.source_id, m.object_id,
@@ -342,65 +369,42 @@ class _Report:
                LEFT JOIN metadata_objects o ON o.id=m.object_id
                WHERE (? IS NULL OR m.source_id=?) AND m.file_path != ''
                ORDER BY m.source_id, m.file_path, m.id""", (source_id, source_id)).fetchall()
-        self._reset()
-
-    def _reset(self):
-        self.blocks = []
-        self.tail = []
-        self.inputs = []
-        self.current = iter(())
+        self.inputs = None
 
     def _module_findings(self, mod, procedures, bindings, form_attrs, path, form, stat):
         where = f"@{mod['source_id']} {mod['file_path']}"
         try:
             if path and mod['stat'] != stat and mod['file_hash'] != module_file_hash(path, form):
-                yield f'{where} — Не проверено — файл изменился, обновите индекс'
+                yield 'unchecked', f'{where} — Не проверено — файл изменился, обновите индекс'
                 return
             source = read_bsl_text(path) if path else None
         except OSError:
             source = None
         if source is None:
-            yield f'{where} — Не проверено — нет исходного текста'
+            yield 'unchecked', f'{where} — Не проверено — нет исходного текста'
             return
-        lines = _without_deletions(source).splitlines(keepends=True)
+        lines = without_deletions(source).splitlines(keepends=True)
         header_end = procedures[0]['start_line'] - 1 if procedures else len(lines)
         for line in lines[:header_end]:
             if match := _RE_MODULE_VAR_DECL.match(line.lstrip()):
                 bindings.update(part.split()[0].casefold() for part in match[1].split(',') if part.strip())
-        for first, body, params, directive, client in _regions(lines, procedures):
+        for first, body, params, directive, context in _regions(lines, procedures):
             visible = bindings | _form_context_vars(directive, form_attrs)
-            for call in _sites(body, first, params, visible):
+            for call in _sites(body, first, params, visible, context):
                 message = _diagnosis(call, mod['name_cf'], self.declarations,
-                                     self.globals, self.vocab, self.mode, client)
+                                     self.globals, self.objects, self.vocab, self.mode)
                 if message:
-                    yield f'{where}:{call.line} — {message}\n  {call.text}'
+                    level = _LEVEL_BY_LABEL[message.partition(' — ')[0]]
+                    yield level, f'{where}:{call.line} — {message}\n  {call.text}'
 
-    def page(self, engine, conn, limit, offset):
-        stop = offset + limit + 1
-        # Для этой страницы достаточно сверить исходники от начала до её конца.
-        # Иначе правка на диске могла изменить смещение всех следующих замечаний.
-        for mod, (start, snapshot) in zip(self.modules, self.inputs):
-            if start >= stop:
-                break
-            if _module_input(engine, mod) != snapshot:
-                self._reset()
-                break
-
-        count = len(self.blocks) * _BLOCK_SIZE + len(self.tail)
-        while count < stop:
-            room = min(stop - count, _BLOCK_SIZE - len(self.tail))
-            added = list(islice(self.current, room))
-            self.tail.extend(added)
-            count += len(added)
-            if len(self.tail) == _BLOCK_SIZE:
-                self.blocks.append(zlib.compress(json.dumps(self.tail, ensure_ascii=False).encode(), level=1))
-                self.tail.clear()
-            if len(added) == room:
-                continue
-            next_module = len(self.inputs)
-            if next_module == len(self.modules):
-                break
-            mod = self.modules[next_module]
+    def _build(self, engine, conn):
+        self.blocks = []
+        self.positions = {level: array('I') for level in LEVELS}
+        self.selections = {}
+        self.starts = []
+        self.count = 0
+        inputs, block = [], []
+        for mod in self.modules:
             snapshot = _module_input(engine, mod)
             procedures = conn.execute(
                 """SELECT start_line, end_line, directive, params FROM procedures
@@ -415,23 +419,59 @@ class _Report:
             if module_type == 'МодульФормы':
                 form_attrs = {row[0] for row in conn.execute(
                     "SELECT name_cf FROM form_attributes WHERE module_id=?", (mod['id'],))}
-            self.inputs.append((count, snapshot))
-            self.current = self._module_findings(mod, procedures, bindings, form_attrs, *snapshot)
+            inputs.append(snapshot)
+            self.starts.append(self.count)
+            for level, msg in self._module_findings(mod, procedures, bindings, form_attrs, *snapshot):
+                self.positions[level].append(self.count)
+                self.count += 1
+                block.append(msg)
+                if len(block) == _BLOCK_SIZE:
+                    self._pack(block)
+        if block:
+            self._pack(block)
+        self.inputs = inputs
 
-        end = min(offset + limit, count)
-        items = []
-        pos = offset
-        while pos < end:
-            block, start = divmod(pos, _BLOCK_SIZE)
-            values = json.loads(zlib.decompress(self.blocks[block])) if block < len(self.blocks) else self.tail
-            take = min(_BLOCK_SIZE - start, end - pos)
-            items.extend(values[start:start + take])
-            pos += take
-        return items, count > offset + limit
+    def _pack(self, block):
+        self.blocks.append(zlib.compress(json.dumps(block, ensure_ascii=False).encode(), level=1))
+        block.clear()
+
+    def _select(self, levels):
+        if levels is None or len(levels) == len(LEVELS):
+            return range(self.count)
+        if len(levels) == 1:
+            return self.positions[next(iter(levels))]
+        if levels not in self.selections:
+            self.selections[levels] = array('I', merge(*(self.positions[level] for level in levels)))
+        return self.selections[levels]
+
+    def page(self, engine, conn, limit, offset, levels):
+        if self.inputs is None:
+            self._build(engine, conn)
+        else:
+            positions = self._select(levels)[offset:offset + limit]
+            window = {bisect_right(self.starts, pos) - 1 for pos in positions}
+            if not self.count and not offset and levels is None:
+                window = range(len(self.modules))
+            # Между страницами проверяем файлы выдачи. При изменении
+            # строим новый снимок, чтобы пересчитать уровни и смещения.
+            if any(_module_input(engine, self.modules[i]) != self.inputs[i] for i in window):
+                self.inputs = None
+                self._build(engine, conn)
+
+        selection = self._select(levels)
+        items, prev = [], -1
+        for pos in selection[offset:offset + limit]:
+            block, index = divmod(pos, _BLOCK_SIZE)
+            if block != prev:
+                values = json.loads(zlib.decompress(self.blocks[block]))
+                prev = block
+            items.append(values[index])
+        counts = {level: len(positions) for level, positions in self.positions.items()}
+        return items, offset + limit < len(selection), counts, len(self.modules)
 
 
-def check_calls(engine, index, mode, source_id, limit, offset):
-    """Страница замечаний в стабильном порядке исходников, с просмотром на одно вперёд."""
+def check_calls(engine, index, mode, source_id, limit, offset, levels=None):
+    """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
     conn = engine.db.read_conn()
     state = conn.execute("SELECT updated_at, status FROM index_state WHERE id=1").fetchone()
     key = (engine.db, tuple(state) if state else (), module_file_stat(engine.db.db_path),
@@ -448,4 +488,4 @@ def check_calls(engine, index, mode, source_id, limit, offset):
             if len(_REPORTS) > _MAX_REPORTS:
                 _REPORTS.popitem(last=False)
     with report.lock:
-        return report.page(engine, conn, limit, offset)
+        return report.page(engine, conn, limit, offset, levels)

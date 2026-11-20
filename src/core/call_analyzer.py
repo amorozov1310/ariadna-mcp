@@ -162,7 +162,7 @@ class CallAnalyzer:
                       cr.callee_id, cr.confidence
                FROM calls c
                LEFT JOIN calls_resolved cr ON cr.call_id = c.id
-               WHERE c.caller_id = ?
+               WHERE c.caller_id = ? AND c.callee_kind != 'manager_object'
                ORDER BY c.line""",
             (proc_id,)).fetchall()
 

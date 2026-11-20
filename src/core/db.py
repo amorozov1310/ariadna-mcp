@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS calls (
     callee_name   TEXT NOT NULL,
     callee_module TEXT DEFAULT '',
     callee_proc   TEXT NOT NULL,
-    callee_kind   TEXT DEFAULT '',   -- local | common_module | manager | override
+    callee_kind   TEXT DEFAULT '',   -- local | common_module | manager | override | manager_object
     line          INTEGER DEFAULT 0,
     context       TEXT DEFAULT ''
 );

@@ -74,6 +74,10 @@ def context_book(description='Учебное описание.'):
     page('objects/ValueTable.html', 'ТаблицаЗначений', 'ValueTable')
     page('objects/ValueTable/methods/Count.html', 'Количество', 'Count', 'ТаблицаЗначений',
          'ValueTable', 'Доступен начиная с версии 8.3.25.', 'Тонкий клиент, сервер')
+    page('objects/ValueTable/properties/Columns.html', 'Колонки', 'Columns', 'ТаблицаЗначений',
+         'ValueTable', value_type='КоллекцияКолонокТаблицыЗначений')
+    page('objects/ValueTableColumnCollection/methods/Add.html', 'Добавить', 'Add',
+         'КоллекцияКолонокТаблицыЗначений', 'ValueTableColumnCollection')
     page('objects/Global context/methods/ModeExample.html', 'ПримерРежима', 'ModeExample',
          version='Доступен в режиме совместимости с версией 8.3.26 и последующими.')
     page('objects/Global context/methods/StrTemplate.html', 'СтрШаблон', 'StrTemplate',

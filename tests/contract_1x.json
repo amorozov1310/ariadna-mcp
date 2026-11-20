@@ -49,6 +49,16 @@
         "type": "integer",
         "required": false,
         "default": 0
+      },
+      "level": {
+        "type": "array|null|string",
+        "required": false,
+        "default": null,
+        "enum": [
+          "error",
+          "unchecked",
+          "warning"
+        ]
       }
     },
     "read_only": true,

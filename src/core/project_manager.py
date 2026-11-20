@@ -755,7 +755,8 @@ class ProjectManager:
                    WHERE m.source_id=?""", (source_id,)).fetchone()[0]
             counts['calls'] = conn.execute(
                 """SELECT COUNT(*) FROM calls c JOIN procedures p ON p.id = c.caller_id
-                   JOIN modules m ON m.id = p.module_id WHERE m.source_id=?""",
+                   JOIN modules m ON m.id = p.module_id
+                   WHERE m.source_id=? AND c.callee_kind != 'manager_object'""",
                 (source_id,)).fetchone()[0]
         except Exception:
             pass  # DB not indexed yet — a files-only preview is still useful
@@ -1929,7 +1930,8 @@ class ProjectManager:
             total_forms=conn.execute("SELECT COUNT(*) FROM forms").fetchone()[0],
             total_modules=conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0],
             total_procedures=conn.execute("SELECT COUNT(*) FROM procedures").fetchone()[0],
-            total_calls=conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0],
+            total_calls=conn.execute(
+                "SELECT COUNT(*) FROM calls WHERE callee_kind != 'manager_object'").fetchone()[0],
         )
 
     # ============================================

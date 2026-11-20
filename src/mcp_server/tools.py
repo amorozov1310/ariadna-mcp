@@ -13,7 +13,7 @@ import sqlite3
 
 from ..core.platform_help import KINDS, KIND_ALIASES, format_entry
 from ..core.project_manager import ProjectManager, ReindexInProgressError
-from ..core.platform_check import check_calls
+from ..core.platform_check import LEVELS, check_calls
 from ..core.xml_metadata import compatibility_version
 from ..core.search import format_search_results, format_object_details
 from . import semantic_search
@@ -80,6 +80,8 @@ def _paginate(fetch, limit: int, offset: int):
 def format_broken_call(i: dict) -> str:
     where = f"{i['caller_module']}.{i['caller_proc']}:{i['line']} @{i['source_id']}"
     target = f"{i['module']}.{i['name']}"
+    if i.get('missing_object'):
+        return f"  {where}\n    → {target}: объекта метаданных нет в выгрузке"
     if 'defined_in' in i:
         homes = ', '.join(f"{d['module']} @{d['source_id']}" for d in i['defined_in'])
         hint = f" — с таким именем есть в: {homes}" if homes else ''
@@ -978,6 +980,14 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
         case 'check_platform_calls':
             if source_id and (error := _unknown_source_error(pm, project_id, source_id)):
                 return error
+            levels = args.get('level')
+            if levels is not None:
+                if isinstance(levels, str):
+                    levels = [levels]
+                if not isinstance(levels, list) or any(
+                        not isinstance(level, str) or level not in LEVELS for level in levels):
+                    return 'Error: level принимает error, warning, unchecked или список этих значений.'
+                levels = frozenset(levels)
             where = " AND source_id=?" if source_id else ""
             modules = engine.db.read_conn().execute(
                 "SELECT 1 FROM modules WHERE file_path != ''" + where + " LIMIT 1",
@@ -994,18 +1004,25 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             limit = max(1, int(args.get('limit', 50)))
             offset = max(0, offset)
             try:
-                page, more = check_calls(engine, index, mode, source_id, limit, offset)
+                page, more, counts, modules = check_calls(engine, index, mode, source_id,
+                                                          limit, offset, levels)
             except sqlite3.OperationalError:
                 if index.path.exists():
                     raise
                 return f'Справка {index.version} удалена во время проверки.'
             heading = f'Проверка «{project_id}» по справке {index.version}. '
             heading += f'Режим совместимости {mode}.' if mode else 'Числовой режим совместимости не задан.'
+            summary = (f"Модулей — {modules}. Ошибки — {counts['error']}, "
+                       f"предупреждения — {counts['warning']}, не проверено — {counts['unchecked']}.")
             if not page:
-                return heading + (f' При offset={offset} записей больше нет.' if offset else ' Замечаний нет.')
+                if offset:
+                    page.append(f'При offset={offset} записей больше нет.')
+                else:
+                    page.append('Замечаний нет для выбранных уровней.' if levels is not None
+                                else 'Замечаний нет.')
             if more:
                 page.append(f'Следующая страница: offset={offset + limit}.')
-            return '\n'.join([heading, *page])
+            return '\n'.join([heading, summary, *page])
 
         case 'diagnose_index':
             from ..core.search import diagnose_index

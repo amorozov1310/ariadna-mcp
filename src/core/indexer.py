@@ -471,7 +471,8 @@ class Indexer:
                 known_objects = self_objects
 
         parser = BSLParser(known_modules=known_modules, known_objects=known_objects,
-                           known_factory_functions=known_factory_functions)
+                           known_factory_functions=known_factory_functions,
+                           track_manager_objects=True)
 
         # Existing modules for this source, keyed by name (the UNIQUE
         # (source_id, name) identity) — lets every file be looked up once
@@ -644,13 +645,13 @@ class Indexer:
                             callee_module = mf.full_name
                         call_rows.append((caller_id, call.callee_name, callee_module,
                                           call.callee_proc, call.callee_kind, call.line, call.context))
+                        stats['calls'] += call.callee_kind != 'manager_object'
                     if call_rows:
                         conn.executemany(
                             """INSERT INTO calls (caller_id, callee_name, callee_module,
                                callee_proc, callee_kind, line, context)
                                VALUES (?, ?, ?, ?, ?, ?, ?)""",
                             call_rows)
-                        stats['calls'] += len(call_rows)
 
             if (i + 1) % commit_every == 0 or i + 1 == total_files:
                 conn.commit()
@@ -785,7 +786,8 @@ class Indexer:
 
         inserts: list[tuple[int, int, str]] = []
         for call in conn.execute(
-                "SELECT id, caller_id, callee_kind, callee_module, callee_proc FROM calls"):
+                """SELECT id, caller_id, callee_kind, callee_module, callee_proc FROM calls
+                   WHERE callee_kind != 'manager_object'"""):
             kind = call['callee_kind']
             caller_module_id = proc_module.get(call['caller_id'])
             callee_proc_l = (call['callee_proc'] or '').lower()

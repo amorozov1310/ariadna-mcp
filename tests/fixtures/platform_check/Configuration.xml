@@ -6,6 +6,9 @@
       <ScriptVariant>Russian</ScriptVariant>
       <CompatibilityMode>Version8_3_24</CompatibilityMode>
     </Properties>
-    <ChildObjects><CommonModule>Пример</CommonModule></ChildObjects>
+    <ChildObjects>
+      <CommonModule>Пример</CommonModule>
+      <Catalog>Пример</Catalog>
+    </ChildObjects>
   </Configuration>
 </MetaDataObject>

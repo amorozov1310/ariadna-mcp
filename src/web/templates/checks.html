@@ -131,7 +131,7 @@
         <tr>
             <td>{{ caller(i) }}</td>
             <td class="mono">{{ i.module }}.{{ i.name }}</td>
-            <td class="text-muted">{% for d in i.defined_in %}{{ d.module }}{% if project.sources|length > 1 %} ({{ d.source_id }}){% endif %}{% if not loop.last %}<br>{% endif %}{% else %}нигде{% endfor %}</td>
+            <td class="text-muted">{% if i.missing_object %}Объекта нет в выгрузке{% else %}{% for d in i.defined_in %}{{ d.module }}{% if project.sources|length > 1 %} ({{ d.source_id }}){% endif %}{% if not loop.last %}<br>{% endif %}{% else %}нигде{% endfor %}{% endif %}</td>
         </tr>
         {% endfor %}
         </tbody>
