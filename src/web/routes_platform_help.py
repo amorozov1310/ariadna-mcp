@@ -1,19 +1,22 @@
 """Управление общей для проектов справкой платформы в настройках сервера."""
 
+import logging
 import sqlite3
 from urllib.parse import urlencode
 from zipfile import BadZipFile
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.requests import ClientDisconnect
 
 from ..core import platform_help as ph
 from .app import get_pm, templates
 
 router = APIRouter()
+logger = logging.getLogger('ariadna')
 _PAGE = '/admin/platform-help'
 _MULTIPART_OVERHEAD = 64 * 1024
 _REQUEST_SIZE_ERROR = 'размер запроса превышает допустимый предел'
@@ -93,7 +96,17 @@ def _install_upload(form: FormData) -> None:
         raise ValueError('выберите shcntx_ru.hbk или готовый help.db')
 
 
-@router.post('/api/admin/platform-help')
+@router.post('/api/admin/platform-help', openapi_extra={
+    'requestBody': {'content': {'multipart/form-data': {'schema': {
+        'type': 'object',
+        'properties': {
+            'version': {'type': 'string', 'default': ''},
+            'context': {'type': 'string', 'format': 'binary'},
+            'query': {'type': 'string', 'format': 'binary'},
+            'index': {'type': 'string', 'format': 'binary'},
+        },
+    }}}},
+})
 async def upload_help(request: Request):
     try:
         # В одной форме могут быть две книги по 256 МБ и служебные поля multipart.
@@ -108,6 +121,11 @@ async def upload_help(request: Request):
             await run_in_threadpool(_install_upload, form)
         finally:
             await form.close()
+    except ClientDisconnect:
+        # MultiPartParser закрывает временные файлы при исключении из потока.
+        message = 'Загрузка справки прервана клиентом.'
+        logger.info(message)
+        raise HTTPException(status_code=400, detail=message) from None
     except (MultiPartException, ValueError, OSError, BadZipFile, sqlite3.DatabaseError) as e:
         return _back(error=str(e))
     return _back(message='Справка загружена и доступна агентам.')

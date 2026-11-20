@@ -2,19 +2,25 @@
 
 import asyncio
 import io
+import logging
 import sqlite3
 import struct
 import threading
 import time
+import tracemalloc
 import zipfile
 from contextlib import closing
 from pathlib import Path
+from tempfile import SpooledTemporaryFile
 
 import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
+from starlette import formparsers
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartParser
+from starlette.requests import ClientDisconnect
 
 from src.core import platform_help as ph
 from src.core.project_manager import ProjectManager
@@ -196,6 +202,49 @@ def test_web_and_mcp_share_versions(tmp_path, monkeypatch):
     pm.close_all()
 
 
+def test_upload_openapi_describes_multipart_body(help_client):
+    client, _ = help_client
+    operation = client.get('/openapi.json').json()['paths'][UPLOAD_URL]['post']
+    schema = operation['requestBody']['content']['multipart/form-data']['schema']
+    assert schema['type'] == 'object'
+    fields = schema['properties']
+    assert set(fields) == {'version', 'context', 'query', 'index'}
+    assert fields['version']['type'] == 'string'
+    for name in ('context', 'query', 'index'):
+        assert fields[name]['type'] == 'string' and fields[name]['format'] == 'binary'
+
+
+def test_interrupted_upload_closes_temporary_files(help_client, tmp_path, monkeypatch, caplog):
+    client, pm = help_client
+    upload_dir = tmp_path / 'uploads'
+    upload_dir.mkdir()
+    files = []
+
+    def open_spooled_file(**kwargs):
+        file = SpooledTemporaryFile(dir=upload_dir, **kwargs)
+        files.append(file)
+        return file
+
+    async def interrupted_stream(request):
+        yield (b'--x\r\nContent-Disposition: form-data; name="context"; filename="test.hbk"\r\n\r\n'
+               + b'a' * 128)
+        assert files and files[0].tell() == 128
+        raise ClientDisconnect
+
+    monkeypatch.setattr(formparsers, 'SpooledTemporaryFile', open_spooled_file)
+    monkeypatch.setattr(MultiPartParser, 'spool_max_size', 32)
+    monkeypatch.setattr(Request, 'stream', interrupted_stream)
+    with caplog.at_level(logging.INFO, logger='ariadna'):
+        response = client.post(UPLOAD_URL, headers={'Content-Type': 'multipart/form-data; boundary=x'})
+
+    assert response.status_code == 400
+    records = [record for record in caplog.records if record.name == 'ariadna']
+    assert len(records) == 1 and 'Загрузка справки прервана клиентом' in records[0].getMessage()
+    assert not records[0].exc_info and 'Unhandled error' not in caplog.text
+    assert all(file.closed for file in files) and not list(upload_dir.iterdir())
+    assert not pm.platform_help.get(NEW)
+
+
 def test_streaming_upload_stops_before_oversize_chunk_is_written(help_client, monkeypatch):
     _, pm = help_client
     limit = 256
@@ -265,6 +314,20 @@ def test_upload_rejects_extra_file_field(help_client, monkeypatch):
     ])
     assert response.status_code == 200 and 'неожиданное файловое поле' in response.text
     assert not pm.platform_help.get(NEW)
+
+
+def test_local_books_build_with_small_peak_memory(tmp_path, store):
+    (tmp_path / ph.CONTEXT_FILE).write_bytes(context_book())
+    (tmp_path / ph.QUERY_FILE).write_bytes(query_book())
+    tracemalloc.start()
+    try:
+        result = store.build_from_dir(tmp_path, OLD)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert result['entries'] > 0
+    assert peak < 16 * 1024 * 1024, f'Пик памяти сборки: {peak / 1024**2:.2f} МиБ'
 
 
 def test_local_book_size_checked_before_reading(tmp_path, store, monkeypatch):

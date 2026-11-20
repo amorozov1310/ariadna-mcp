@@ -1070,12 +1070,16 @@ class PlatformHelpStore:
             path = directory / name
             if not path.is_file():
                 continue
-            if path.stat().st_size > MAX_UPLOAD_BYTES:
+            size = path.stat().st_size
+            if size > MAX_UPLOAD_BYTES:
                 raise HbkError(f'{name}: {UPLOAD_SIZE_ERROR}')
             with path.open('rb') as stream:
-                data = stream.read(MAX_UPLOAD_BYTES + 1)
+                # Дополнительный байт позволяет заметить рост книги после stat().
+                data = stream.read(size + 1)
             if len(data) > MAX_UPLOAD_BYTES:
                 raise HbkError(f'{name}: {UPLOAD_SIZE_ERROR}')
+            if len(data) != size:
+                raise HbkError(f'{name}: размер файла изменился во время чтения')
             sources[book] = data
         if 'context' not in sources:
             raise HbkError(f'в {directory} нет {CONTEXT_FILE}')
