@@ -4,23 +4,60 @@ import sqlite3
 from urllib.parse import urlencode
 from zipfile import BadZipFile
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import FormData, UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
+from ..core import platform_help as ph
 from .app import get_pm, templates
 
 router = APIRouter()
 _PAGE = '/admin/platform-help'
-_MAX_UPLOAD = 256 * 1024 * 1024
+_MULTIPART_OVERHEAD = 64 * 1024
+_REQUEST_SIZE_ERROR = 'размер запроса превышает допустимый предел'
 
 
-def _read(upload: UploadFile) -> bytes:
-    if upload.size is not None and upload.size > _MAX_UPLOAD:
-        raise ValueError('размер файла превышает 256 МБ')
-    data = upload.file.read(_MAX_UPLOAD + 1)
-    if len(data) > _MAX_UPLOAD:
-        raise ValueError('размер файла превышает 256 МБ')
-    return data
+async def _request_stream(request: Request, limit: int):
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise MultiPartException(_REQUEST_SIZE_ERROR)
+        yield chunk
+
+
+class _HelpMultipartParser(MultiPartParser):
+    def __init__(self, request: Request, limit: int):
+        super().__init__(request.headers, _request_stream(request, limit),
+                         max_files=3, max_fields=1, max_part_size=1024)
+        self._file_fields: set[str] = set()
+        self._file_size = 0
+
+    def on_headers_finished(self) -> None:
+        super().on_headers_finished()
+        part = self._current_part
+        if part.file is None:
+            if part.field_name != 'version':
+                raise MultiPartException(f'неожиданное поле формы: {part.field_name}')
+            return
+        name = part.field_name
+        if name not in {'context', 'query', 'index'}:
+            raise MultiPartException(f'неожиданное файловое поле: {name}')
+        if name in self._file_fields:
+            raise MultiPartException(f'повторяющееся файловое поле: {name}')
+        if self._file_fields and (name == 'index' or 'index' in self._file_fields):
+            raise MultiPartException('загружайте готовый индекс отдельно от книг справки')
+        self._file_fields.add(name)
+        self._file_size = 0
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        if self._current_part.file is not None:
+            self._file_size += end - start
+            if self._file_size > ph.MAX_UPLOAD_BYTES:
+                raise MultiPartException(ph.UPLOAD_SIZE_ERROR)
+        super().on_part_data(data, start, end)
 
 
 def _back(**message):
@@ -30,8 +67,10 @@ def _back(**message):
 @router.get(_PAGE)
 def platform_settings(request: Request, message: str = '', error: str = ''):
     store = get_pm().platform_help
+    versions, listing_error = store.version_listing()
     return templates.TemplateResponse(name='platform_help.html', request=request, context={
-        'versions': store.versions(), 'status': store.status(), 'message': message, 'error': error,
+        'versions': versions, 'status': store.status(), 'message': message, 'error': error,
+        'listing_error': listing_error,
     })
 
 
@@ -40,20 +79,36 @@ def build_status():
     return get_pm().platform_help.status()
 
 
-@router.post('/api/admin/platform-help')
-def upload_help(version: str = Form(''), context: UploadFile | None = File(None),
-                query: UploadFile | None = File(None), index: UploadFile | None = File(None)):
+def _install_upload(form: FormData) -> None:
     store = get_pm().platform_help
+    version = form.get('version', '').strip()
+    context, query, index = (form.get(field) for field in ('context', 'query', 'index'))
+    if isinstance(index, UploadFile) and index.filename:
+        store.install_index(version, index.file.read())
+    elif isinstance(context, UploadFile) and context.filename:
+        # Браузер отправляет невыбранный файл частью multipart с пустым именем.
+        query_data = query.file.read() if isinstance(query, UploadFile) and query.filename else None
+        store.build_from_bytes(version, context.file.read(), query_data)
+    else:
+        raise ValueError('выберите shcntx_ru.hbk или готовый help.db')
+
+
+@router.post('/api/admin/platform-help')
+async def upload_help(request: Request):
     try:
-        if index and not context and not query:
-            store.install_index(version.strip(), _read(index))
-        elif context and not index:
-            # Браузер отправляет невыбранный файл частью multipart с пустым именем.
-            query_data = _read(query) if query and query.filename else None
-            store.build_from_bytes(version.strip(), _read(context), query_data)
-        else:
-            raise ValueError('выберите shcntx_ru.hbk или готовый help.db')
-    except (ValueError, OSError, BadZipFile, sqlite3.DatabaseError) as e:
+        # В одной форме могут быть две книги по 256 МБ и служебные поля multipart.
+        limit = 2 * ph.MAX_UPLOAD_BYTES + _MULTIPART_OVERHEAD
+        if int(request.headers.get('content-length', '0')) > limit:
+            return _back(error=_REQUEST_SIZE_ERROR)
+        media_type = request.headers.get('content-type', '').partition(';')[0].strip().lower()
+        if media_type != 'multipart/form-data':
+            return _back(error='выберите shcntx_ru.hbk или готовый help.db')
+        form = await _HelpMultipartParser(request, limit).parse()
+        try:
+            await run_in_threadpool(_install_upload, form)
+        finally:
+            await form.close()
+    except (MultiPartException, ValueError, OSError, BadZipFile, sqlite3.DatabaseError) as e:
         return _back(error=str(e))
     return _back(message='Справка загружена и доступна агентам.')
 
