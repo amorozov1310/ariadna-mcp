@@ -1577,3 +1577,45 @@ def test_explicit_help_version_with_unknown_project(project):
     assert 'проект «unknown» не найден' in execute_tool(pm, 'platform_help', args)
     result = execute_tool(pm, 'platform_help', dict(args, version=VERSION))
     assert f'Справка платформы {VERSION}' in result and 'СтрНайти (StrFind)' in result
+
+
+def _archives(pm):
+    return sorted(pm._index_path('demo').parent.glob('platform-check*.zip'))
+
+
+def test_repeated_help_uploads_keep_bounded_archives(project, monkeypatch):
+    """Повторная загрузка той же версии меняет ключ отчёта; архивов не больше лимита."""
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    monkeypatch.setattr(web, '_pm', pm)
+    with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+        for _ in range(platform_check._MAX_ARCHIVES + 3):
+            _upload_help(client, VERSION)
+            _join_help_warm(pm, VERSION)
+    archives = _archives(pm)
+    assert 0 < len(archives) <= platform_check._MAX_ARCHIVES
+    assert _report_archive(pm) in archives
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+
+
+def test_busy_archive_does_not_stop_pruning(project, monkeypatch):
+    """Занятый архив (Windows держит открытый файл) не прерывает удаление остальных."""
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    directory = pm._index_path('demo').parent
+    stale = [directory / f'platform-check-{str(i) * 64}.zip' for i in range(1, 4)]
+    for path in stale:
+        path.write_bytes(b'old')
+    busy = stale[0]
+    unlink = Path.unlink
+
+    def locked(path, *args, **kwargs):
+        if path == busy:
+            raise PermissionError(13, 'locked', str(path))
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', locked)
+    monkeypatch.setattr(platform_check, 'retry_on_permission_error', lambda action: action())
+    platform_check.prune_report_archives(pm._index_path('demo'))
+    assert busy.exists()
+    assert not any(path.exists() for path in stale[1:])

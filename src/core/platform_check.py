@@ -489,6 +489,7 @@ _CLOSING_DATABASES = WeakSet()
 _RESTORE_LOCKS = WeakValueDictionary()
 _PUBLISH_LOCKS = WeakValueDictionary()
 _MAX_REPORTS = 3
+_MAX_ARCHIVES = 3
 _CHANGED_FILES_SHOWN = 5
 _CACHE_ARCHIVE = re.compile(r'platform-check(?:-[0-9a-f]{64})?\.zip')
 
@@ -507,6 +508,15 @@ def _publish_lock(directory):
         return _PUBLISH_LOCKS.setdefault(directory, Lock())
 
 
+def _unlink_archive(path):
+    """Удалить архив; занятый (на Windows его может держать читатель) оставить
+    до следующего прохода, не прерывая очистку остальных."""
+    try:
+        retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+    except OSError:
+        logger.info('Архив проверки платформы занят и не удалён: %s', path.name)
+
+
 def prune_report_archives(db_path, keep=()):
     """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
     directory = Path(db_path).parent
@@ -514,7 +524,26 @@ def prune_report_archives(db_path, keep=()):
     with _publish_lock(directory):
         for path in directory.glob('platform-check*.zip'):
             if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
-                retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+                _unlink_archive(path)
+
+
+def _trim_archives(published):
+    """После публикации оставить только _MAX_ARCHIVES самых свежих архивов индекса.
+
+    Каждая смена справки (в том числе повторная загрузка той же версии) даёт
+    новый ключ и новый архив; без этого их число росло бы до следующего reindex.
+    Свежие по времени записи сохраняются, чтобы откат на предыдущую справку не
+    требовал полной сборки. Вызывается под блокировкой публикации."""
+    archives = []
+    for path in published.parent.glob('platform-check*.zip'):
+        if path != published and _CACHE_ARCHIVE.fullmatch(path.name):
+            try:
+                archives.append((path.stat().st_mtime_ns, path))
+            except OSError:
+                pass
+    archives.sort(reverse=True)
+    for _, path in archives[_MAX_ARCHIVES - 1:]:
+        _unlink_archive(path)
 
 
 def wait_report_jobs(databases):
@@ -678,6 +707,7 @@ class _Report:
                     before_replace()
                     replace_with_retry(temp, path)
                     self.archive_stamp = _stat_signature(path.stat())
+                    _trim_archives(path)
         except OSError:
             logger.warning('Не удалось сохранить кэш диагностики %s', path, exc_info=True)
             return False
