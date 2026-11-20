@@ -179,6 +179,8 @@ async def update_project_meta(
                     raise HTTPException(400, 'Справка выбранной версии ещё не загружена')
             changes['platform_version'] = platform_version
         pm.update_project(project_id, **changes)
+        if 'platform_version' in changes:
+            pm.warm_platform_checks(project_id=project_id)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except KeyError:

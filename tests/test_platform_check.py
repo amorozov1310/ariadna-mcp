@@ -1,6 +1,7 @@
 """Проверка платформы через обычные точки входа проекта и MCP."""
 
 import asyncio
+import json
 import shutil
 import struct
 import zlib
@@ -60,6 +61,29 @@ def _join_workers(workers):
 def _join_help_warm(pm, version):
     _join_workers([t for t in running_threads() if t.name == f'platform-check-warm-{version}'])
     _join_workers(_report_workers(pm))
+
+
+def _report_archive(pm, version=None):
+    engine = pm.get_search('demo')
+    index = pm.platform_help.get(version or pm.platform_help_version('demo'))
+    revision = platform_check._index_revision(engine.db.read_conn())
+    key = platform_check._cache_key(engine, index, pm.platform_mode('demo'), revision)
+    return pm._index_path('demo').with_name(f'platform-check-{key}.zip')
+
+
+def _assert_persisted_report(pm, version):
+    pm.close_all()
+    path = _report_archive(pm)
+    with ZipFile(path) as archive:
+        key = json.loads(archive.read('report.json'))[0]
+    assert path.name == f'platform-check-{key}.zip'
+    assert f'по справке {version}' in execute_tool(pm, 'check_platform_calls', {})
+
+
+def _upload_help(client, version):
+    response = client.post('/api/admin/platform-help', data={'version': version},
+                           files={'context': ('shcntx_ru.hbk', context_book(version))})
+    assert response.status_code == 200 and 'Справка загружена' in response.text
 
 
 def _ready_check(pm, **args):
@@ -721,7 +745,7 @@ def test_first_request_after_reindex_loads_persisted_report_by_source(project, m
     ext = _extension(pm, source)
     _write_module(ext, 'CommonModules/Пример/Ext/Module.bsl', 'ОпечаткаРасширения();\n')
     pm.reindex('demo')
-    cache = pm._index_path('demo').with_name('platform-check.zip')
+    cache = _report_archive(pm)
     assert cache.is_file()
     args = {'source_id': 'sample_ext', 'level': ['error', 'unchecked']}
     expected = execute_tool(pm, 'check_platform_calls', args)
@@ -769,7 +793,7 @@ def test_parallel_requests_restore_the_archive_once(project, monkeypatch):
 def test_invalid_deflate_in_report_header_triggers_background_build(project):
     pm, _ = project
     pm.reindex('demo')
-    cache = pm._index_path('demo').with_name(platform_check.CACHE_FILE)
+    cache = _report_archive(pm)
     with ZipFile(cache) as archive:
         offset = archive.getinfo('report.json').header_offset
     contents = bytearray(cache.read_bytes())
@@ -786,10 +810,27 @@ def test_invalid_deflate_in_report_header_triggers_background_build(project):
         assert archive.testzip() is None
 
 
+def test_legacy_shared_archive_is_ignored_and_removed_on_reindex(project):
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    old = _report_archive(pm)
+    legacy = old.with_name('platform-check.zip')
+    old.rename(legacy)
+    pm.close_all()
+
+    assert 'Отчёт готовится' in execute_tool(pm, 'check_platform_calls', {})
+    _join_workers(_report_workers(pm))
+    assert old.is_file()
+    pm.reindex('demo')
+    assert not legacy.exists() and not old.exists()
+    _assert_persisted_report(pm, VERSION)
+
+
 def test_reindex_archive_wins_over_ongoing_background_publication(project, monkeypatch):
     pm, source = project
     _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', 'НоваяОпечатка();\n')
     replacing_old, release_old, saving_new, replacing_new = Event(), Event(), Event(), Event()
+    old_archive = _report_archive(pm)
     original_replace = platform_check.replace_with_retry
     original_save = platform_check._Report.save
     order = []
@@ -822,12 +863,14 @@ def test_reindex_archive_wins_over_ongoing_background_publication(project, monke
         release_old.set()
         _join_workers(threads)
     assert order == ['старый', 'новый']
+    assert not old_archive.exists()
+    assert _report_archive(pm).is_file()
     assert 'НоваяОпечатка()' in execute_tool(pm, 'check_platform_calls', {})
 
 
 def test_parallel_fallback_builds_report_once_and_writes_cache(project, monkeypatch):
     pm, _ = project
-    cache = pm._index_path('demo').with_name('platform-check.zip')
+    cache = _report_archive(pm)
     assert not cache.exists()  # Справка появилась после индексации.
     original = platform_check._Report._build
     builds = []
@@ -981,7 +1024,7 @@ def test_rebuild_of_help_invalidates_report(project):
     _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', 'СтрНайти("x", "y");\n')
     pm.reindex('demo')
     assert 'Замечаний нет' in execute_tool(pm, 'check_platform_calls', {})
-    cache = pm._index_path('demo').with_name('platform-check.zip')
+    cache = _report_archive(pm)
     assert cache.is_file()
     previous_cache = cache.read_bytes()
     platform_check._REPORTS.clear()
@@ -991,7 +1034,8 @@ def test_rebuild_of_help_invalidates_report(project):
     ]))
     result = _ready_check(pm)
     assert '— Ошибка' in result and 'СтрНайти(' in result
-    assert cache.read_bytes() != previous_cache
+    assert _report_archive(pm) != cache
+    assert cache.read_bytes() == previous_cache
     pm.platform_help.remove(VERSION)
     assert 'не загружена' in execute_tool(pm, 'check_platform_calls', {})
 
@@ -1056,13 +1100,137 @@ def test_overlapping_deletions_warm_the_last_help_version(project, monkeypatch):
     assert f'по справке {older}' in execute_tool(pm, 'check_platform_calls', {})
 
 
+def test_two_deletions_cannot_displace_the_ready_fallback_archive(project, monkeypatch):
+    pm, _ = project
+    middle, newest = '8.3.28.1', '8.3.29.1'
+    monkeypatch.setattr(web, '_pm', pm)
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    fallback = _report_archive(pm)
+    saved = fallback.read_bytes()
+    pm.platform_help.build_from_bytes(middle, context_book(middle))
+    publishing, release = Event(), Event()
+    both_removed = Barrier(2)
+    replace = platform_check.replace_with_retry
+    warm = pm.warm_platform_checks
+
+    def delay_replace(temp, path):
+        publishing.set()
+        assert release.wait(timeout=10)
+        replace(temp, path)
+
+    def warm_after_both_deletions(version=''):
+        if not version:
+            both_removed.wait(timeout=5)
+        warm(version)
+
+    monkeypatch.setattr(platform_check, 'replace_with_retry', delay_replace)
+    monkeypatch.setattr(pm, 'warm_platform_checks', warm_after_both_deletions)
+    try:
+        with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client, ThreadPoolExecutor(2) as pool:
+            _upload_help(client, newest)
+            assert publishing.wait(timeout=5)
+            latest = [pool.submit(client.post, f'/api/admin/platform-help/{v}/delete')
+                      for v in (middle, newest)]
+            assert all(future.result(timeout=5).status_code == 200 for future in latest)
+            _join_workers([t for t in running_threads() if t.name == 'platform-check-warm-auto'])
+            assert pm.platform_help_version('demo') == VERSION
+            assert fallback.read_bytes() == saved
+    finally:
+        workers = _report_workers(pm)
+        release.set()
+        _join_workers(workers)
+    assert fallback.read_bytes() == saved
+    _assert_persisted_report(pm, VERSION)
+
+
+def test_project_version_change_during_publication_keeps_the_selected_archive(project, monkeypatch):
+    pm, _ = project
+    newest = '8.3.28.1'
+    monkeypatch.setattr(web, '_pm', pm)
+    pm.update_project('demo', platform_version=VERSION)
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    first = _report_archive(pm)
+    saved = first.read_bytes()
+    pm.platform_help.build_from_bytes(newest, context_book(newest))
+    publishing, release = Event(), Event()
+    replace = platform_check.replace_with_retry
+
+    def delay_replace(temp, path):
+        publishing.set()
+        assert release.wait(timeout=10)
+        replace(temp, path)
+
+    monkeypatch.setattr(platform_check, 'replace_with_retry', delay_replace)
+    try:
+        with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+            for version in (newest, VERSION):
+                response = client.post('/api/projects/demo/update', data={'name': 'Демо',
+                                       'platform_version': version}, follow_redirects=False)
+                assert response.status_code == 303
+                assert publishing.wait(timeout=5)
+            _join_workers([t for t in running_threads() if t.name == 'platform-check-warm-demo'])
+    finally:
+        workers = _report_workers(pm)
+        release.set()
+        _join_workers(workers)
+    assert first.read_bytes() == saved
+    _assert_persisted_report(pm, VERSION)
+
+
+def test_rollback_while_fallback_job_is_still_registered(project, monkeypatch):
+    pm, _ = project
+    newest = '8.3.28.1'
+    monkeypatch.setattr(web, '_pm', pm)
+    fallback = _report_archive(pm)
+    started, finish_build, cleanup, finish_cleanup = Event(), Event(), Event(), Event()
+    build = platform_check._Report._build
+    db = pm.get_db('demo')
+    close_reader = db.close_thread_reader
+    old_job = None
+
+    def delayed_build(report, engine, conn, index, mode):
+        if index.version == VERSION:
+            started.set()
+            assert finish_build.wait(timeout=10)
+        return build(report, engine, conn, index, mode)
+
+    def delayed_cleanup():
+        if current_thread() is old_job:
+            cleanup.set()
+            assert finish_cleanup.wait(timeout=10)
+        close_reader()
+
+    monkeypatch.setattr(platform_check._Report, '_build', delayed_build)
+    monkeypatch.setattr(db, 'close_thread_reader', delayed_cleanup)
+    try:
+        assert 'Отчёт готовится' in execute_tool(pm, 'check_platform_calls', {})
+        assert started.wait(timeout=5)
+        old_job, = _report_workers(pm)
+        with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+            _upload_help(client, newest)
+            _join_workers([t for t in running_threads() if t.name == f'platform-check-warm-{newest}'])
+            _join_workers([t for t in _report_workers(pm) if t is not old_job])
+            assert _report_archive(pm, newest).is_file()
+            finish_build.set()
+            assert cleanup.wait(timeout=5)
+            assert old_job in _report_workers(pm)
+            assert client.post(f'/api/admin/platform-help/{newest}/delete').status_code == 200
+            _join_workers([t for t in running_threads() if t.name == 'platform-check-warm-auto'])
+    finally:
+        workers = _report_workers(pm)
+        finish_build.set()
+        finish_cleanup.set()
+        _join_workers(workers)
+    assert fallback.is_file()
+    _assert_persisted_report(pm, VERSION)
+
+
 def test_old_help_build_cannot_overwrite_the_current_version_archive(project, monkeypatch):
     pm, _ = project
     newest = '8.3.28.1'
     monkeypatch.setattr(web, '_pm', pm)
     old_started, release_old = Event(), Event()
     original = platform_check._Report._build
-    cache = pm._index_path('demo').with_name(platform_check.CACHE_FILE)
 
     def delay_build(report, engine, conn, index, mode):
         if index.version == VERSION:
@@ -1081,6 +1249,7 @@ def test_old_help_build_cannot_overwrite_the_current_version_archive(project, mo
         assert 'Справка загружена' in response.text
         _join_workers([t for t in running_threads() if t.name == f'platform-check-warm-{newest}'])
         _join_workers([t for t in _report_workers(pm) if t is not old_job])
+        cache = _report_archive(pm, newest)
         new_archive = cache.read_bytes()
     finally:
         workers = _report_workers(pm)
@@ -1097,7 +1266,7 @@ def test_help_rollback_republishes_the_memory_snapshot(project, monkeypatch):
     monkeypatch.setattr(web, '_pm', pm)
     expected = _ready_check(pm)
     assert f'по справке {VERSION}' in expected
-    cache = pm._index_path('demo').with_name(platform_check.CACHE_FILE)
+    cache = _report_archive(pm)
     with ZipFile(cache) as archive:
         old_header = archive.read('report.json')
     with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
@@ -1105,8 +1274,9 @@ def test_help_rollback_republishes_the_memory_snapshot(project, monkeypatch):
                                files={'context': ('shcntx_ru.hbk', context_book(newest))})
         assert 'Справка загружена' in response.text
         _join_help_warm(pm, newest)
-        with ZipFile(cache) as archive:
+        with ZipFile(_report_archive(pm, newest)) as archive:
             assert archive.read('report.json') != old_header
+        cache.unlink()  # Снимок остался в памяти, архив мог быть удалён с тома.
 
         def fail(*args):
             pytest.fail('готовый снимок из памяти нужно записать без пересчёта')
@@ -1210,6 +1380,47 @@ def test_close_all_waits_for_help_warm_coordinator(project, monkeypatch):
         release.set()
         _join_workers([t for t in running_threads() if t.name == 'platform-check-demo'])
     assert db.conn is None and not pm._db_pool
+
+
+def test_close_all_waits_for_report_archive_republication(project, monkeypatch):
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    cache = _report_archive(pm)
+    cache.unlink()
+    publishing, release, joining = Event(), Event(), Event()
+    replace = platform_check.replace_with_retry
+    db = pm.get_db('demo')
+
+    def delay_replace(temp, path):
+        publishing.set()
+        assert release.wait(timeout=10)
+        replace(temp, path)
+
+    monkeypatch.setattr(platform_check, 'replace_with_retry', delay_replace)
+    pm.warm_platform_checks(project_id='demo')
+    try:
+        assert publishing.wait(timeout=5)
+        writer, = _report_workers(pm)
+        original_join = writer.join
+
+        def join(*args, **kwargs):
+            joining.set()
+            return original_join(*args, **kwargs)
+
+        monkeypatch.setattr(writer, 'join', join)
+        with ThreadPoolExecutor(1) as pool:
+            closing = pool.submit(pm.close_all)
+            try:
+                assert joining.wait(timeout=5)
+                assert not closing.done() and db.conn is not None and not cache.exists()
+            finally:
+                release.set()
+            closing.result(timeout=5)
+        assert not writer.is_alive() and cache.is_file()
+    finally:
+        release.set()
+    assert db.conn is None and not pm._db_pool
+    _assert_persisted_report(pm, VERSION)
 
 
 def test_mode_change_invalidates_persisted_report_without_reindex(project):

@@ -24,14 +24,14 @@ from itertools import groupby, islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock, Thread
-from weakref import WeakKeyDictionary, WeakValueDictionary
+from weakref import WeakKeyDictionary, WeakSet, WeakValueDictionary
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .bsl_parser import (_BSL_TOKEN, _RE_MODULE_VAR_DECL, _form_context_vars,
                          _parse_param_names, read_bsl_text, without_deletions)
 from .bsl_reference import module_context_vars
 from .db import IndexRemovedError
-from .fsretry import replace_with_retry
+from .fsretry import replace_with_retry, retry_on_permission_error
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
 from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, indexed_manager_objects
 from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
@@ -485,15 +485,46 @@ _REPORTS = OrderedDict()
 _REPORTS_LOCK = Lock()
 _REPORT_JOBS = {}
 _REPORT_ERRORS = WeakKeyDictionary()
+_CLOSING_DATABASES = WeakSet()
 _RESTORE_LOCKS = WeakValueDictionary()
 _PUBLISH_LOCKS = WeakValueDictionary()
 _MAX_REPORTS = 3
 _CHANGED_FILES_SHOWN = 5
-CACHE_FILE = 'platform-check.zip'
+_CACHE_ARCHIVE = re.compile(r'platform-check(?:-[0-9a-f]{64})?\.zip')
 
 
 class ReportUnavailable(ValueError):
     """Снимок пока нельзя выдать. Текст исключения предназначен пользователю."""
+
+
+def _archive_path(db_path, key):
+    return Path(db_path).with_name(f'platform-check-{key}.zip')
+
+
+def _publish_lock(directory):
+    directory = directory.resolve()
+    with _REPORTS_LOCK:
+        return _PUBLISH_LOCKS.setdefault(directory, Lock())
+
+
+def prune_report_archives(db_path, keep=()):
+    """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
+    directory = Path(db_path).parent
+    keep = {_archive_path(db_path, key).name for key in keep}
+    with _publish_lock(directory):
+        for path in directory.glob('platform-check*.zip'):
+            if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
+                retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+
+
+def wait_report_jobs(databases):
+    """Не запускать новых задач для закрываемых индексов и дождаться текущих."""
+    databases = set(databases)
+    with _REPORTS_LOCK:
+        _CLOSING_DATABASES.update(databases)
+        jobs = [job for (db, _), job in _REPORT_JOBS.items() if db in databases]
+    for job in jobs:
+        job.join()
 
 
 def _module_input(engine, mod):
@@ -642,12 +673,8 @@ class _Report:
                         archive.writestr(level, positions.tobytes(), compress_type=ZIP_DEFLATED, compresslevel=1)
                     for i, block in enumerate(self.blocks):
                         archive.writestr(f'blocks/{i}', block)
-                archive_path = path.resolve()
-                with _REPORTS_LOCK:
-                    publish_lock = _PUBLISH_LOCKS.setdefault(archive_path, Lock())
-                # Проверка ревизии и замена с повторами идут вместе: старый
-                # поток не может затереть архив, опубликованный reindex.
-                with publish_lock:
+                # Очистка при reindex ждёт замену файлов прошлого индекса.
+                with _publish_lock(path.parent):
                     before_replace()
                     replace_with_retry(temp, path)
                     self.archive_stamp = _stat_signature(path.stat())
@@ -793,17 +820,12 @@ def _check_revision(engine, conn, index, mode, key, project_id):
         raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
 
-def _check_help_selection(index, resolve_version):
-    if index.version != resolve_version():
-        raise ReportUnavailable('Выбранная справка изменилась. Повторите проверку.')
-
-
-def _request_report(engine, index, mode, revision, project_id, resolve_version, *, warm=False, invalid=None):
+def _request_report(engine, index, mode, revision, project_id, *, warm=False, invalid=None):
     db = engine.db
     conn = db.read_conn()
     key = _cache_key(engine, index, mode, revision)
     cache_id = db, key
-    path = Path(db.db_path).with_name(CACHE_FILE)
+    path = _archive_path(db.db_path, key)
     with _REPORTS_LOCK:
         report = _known_report(cache_id, warm=warm)
         if not warm and report is not None and report is not invalid:
@@ -815,7 +837,6 @@ def _request_report(engine, index, mode, revision, project_id, resolve_version, 
             reader = db.read_conn()
 
             def verify():
-                _check_help_selection(index, resolve_version)
                 _check_revision(engine, reader, index, mode, key, project_id)
 
             verify()
@@ -829,7 +850,7 @@ def _request_report(engine, index, mode, revision, project_id, resolve_version, 
                 _remember(cache_id, report)
         except IndexRemovedError:
             logger.info('Проект %s: индекс закрыт во время подготовки отчёта', project_id)
-        except ReportUnavailable as exc:
+        except (ReportUnavailable, FileNotFoundError) as exc:
             logger.info('Проект %s: подготовка отчёта прервана (%s)', project_id, exc)
         except Exception as exc:
             logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
@@ -858,6 +879,8 @@ def _request_report(engine, index, mode, revision, project_id, resolve_version, 
                     _remember(cache_id, restored)
                 return key, restored
         with _REPORTS_LOCK:
+            if db in _CLOSING_DATABASES:
+                raise ReportUnavailable('Индекс закрывается. Повторите проверку.')
             thread = Thread(target=prepare, args=(report,), daemon=True, name=f'platform-check-{project_id}')
             _REPORT_JOBS[cache_id] = thread
             try:
@@ -868,7 +891,7 @@ def _request_report(engine, index, mode, revision, project_id, resolve_version, 
     raise ReportUnavailable('Отчёт готовится. Повторите вызов через минуту-две.')
 
 
-def warm_report(engine, index, mode, ready_at, resolve_version, warmed_key=None):
+def warm_report(engine, index, mode, ready_at, warmed_key=None):
     """Подготовить снимок для состояния, которое reindex опубликует последним."""
     conn = engine.db.read_conn()
     if index_uses_old_parser(conn) or not conn.execute(
@@ -882,16 +905,15 @@ def warm_report(engine, index, mode, ready_at, resolve_version, warmed_key=None)
     report._build(engine, conn, index, mode)
 
     def verify():
-        _check_help_selection(index, resolve_version)
         if (engine.db.file_replaced() or revision != _index_revision(conn)
                 or key != _cache_key(engine, index, mode, (ready_at, 'ready'))):
             raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
-    if report.save(Path(engine.db.db_path).with_name(CACHE_FILE), key, before_replace=verify):
+    if report.save(_archive_path(engine.db.db_path, key), key, before_replace=verify):
         return key
 
 
-def warm_ready_report(engine, index, mode, project_id, resolve_version, warmed_key=None):
+def warm_ready_report(engine, index, mode, project_id, warmed_key=None):
     conn = engine.db.read_conn()
     try:
         revision = check_index(conn, project_id)
@@ -899,18 +921,18 @@ def warm_ready_report(engine, index, mode, project_id, resolve_version, warmed_k
                 "SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
             if warmed_key is not None and warmed_key == _cache_key(engine, index, mode, revision):
                 return
-            _request_report(engine, index, mode, revision, project_id, resolve_version, warm=True)
+            _request_report(engine, index, mode, revision, project_id, warm=True)
     except ReportUnavailable:
         pass  # Уже готовится либо сообщение будет выдано при запросе отчёта.
 
 
-def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision, resolve_version):
+def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision):
     """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
-    key, report = _request_report(engine, index, mode, revision, project_id, resolve_version)
+    key, report = _request_report(engine, index, mode, revision, project_id)
     try:
         page = report.page(engine, source_id, limit, offset, levels)
     except (IndexError, ValueError, zlib.error):
-        key, report = _request_report(engine, index, mode, revision, project_id, resolve_version, invalid=report)
+        key, report = _request_report(engine, index, mode, revision, project_id, invalid=report)
         page = report.page(engine, source_id, limit, offset, levels)
     conn = engine.db.read_conn()
     _check_revision(engine, conn, index, mode, key, project_id)

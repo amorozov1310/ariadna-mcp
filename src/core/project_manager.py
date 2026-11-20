@@ -606,8 +606,9 @@ class ProjectManager:
                 # только закончится запрос, начатый до закрытия (Database.close
                 # ждёт его), а ещё его может ненадолго открыть антивирус.
                 if path == self.platform_help.root:
-                    from .platform_check import CACHE_FILE
-                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal', CACHE_FILE):
+                    from .platform_check import prune_report_archives
+                    prune_report_archives(index_files)
+                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'):
                         (path / name).unlink(missing_ok=True)
                 else:
                     rmtree_with_retry(path)
@@ -1010,32 +1011,32 @@ class ProjectManager:
         sync = partial(self.platform_help.sync_installed, default_search_roots(), background=False)
         self._start_platform_worker(sync, 'platform-help')
 
-    def warm_platform_checks(self, version: str = '') -> None:
-        """Прогреть отчёты для загруженной версии или для автовыбора после удаления."""
+    def warm_platform_checks(self, version: str = '', *, project_id: str | None = None) -> None:
+        """Прогреть отчёты после изменения справки или выбора версии в проекте."""
         from .platform_check import warm_ready_report
 
         def run():
             newest = self.platform_help.newest()
-            target = version or newest
+            projects = (self.get_project(project_id),) if project_id else self.list_projects()
+            target = (projects[0].platform_version if project_id else version) or newest
             index = self.platform_help.get(target) if target else None
             if index is None:
                 return
-            for project in self.list_projects():
-                if project.status != 'ready' or (not version and project.platform_version):
+            for project in projects:
+                if project.status != 'ready' or (not project_id and not version and project.platform_version):
                     continue
                 if (project.platform_version or newest) != target:
                     continue
                 try:
                     engine = self.get_search(project.id)
                     try:
-                        warm_ready_report(engine, index, self.platform_mode(project.id), project.id,
-                                          partial(self.platform_help_version, project.id))
+                        warm_ready_report(engine, index, self.platform_mode(project.id), project.id)
                     finally:
                         engine.db.close_thread_reader()
                 except Exception:
                     logger.exception('Проект %s: не удалось запустить проверку платформы', project.id)
 
-        self._start_platform_worker(run, f'platform-check-warm-{version or "auto"}')
+        self._start_platform_worker(run, f'platform-check-warm-{project_id or version or "auto"}')
 
     def _start_platform_worker(self, target, name: str) -> None:
         def run():
@@ -1602,28 +1603,34 @@ class ProjectManager:
 
             # Если справка сменилась во время прогрева, повторим подготовку
             # перед ready. Изменение в самом конце подхватит сверка после ready.
-            from .platform_check import ReportUnavailable, warm_ready_report, warm_report
+            from .platform_check import ReportUnavailable, prune_report_archives, warm_ready_report, warm_report
             ready_at = datetime.now().isoformat()
-            resolve_version = partial(self.platform_help_version, project_id)
             warmed_key = None
+            warmed_keys = set()
             for attempt in range(2):
                 try:
-                    version = resolve_version()
+                    version = self.platform_help_version(project_id)
                     index = self.platform_help.get(version) if version else None
                     if index is None:
                         break
                     if attempt == 0:
                         db.update_state(progress_phase='platform_check')
                     key = warm_report(self.get_search(project_id), index, self.platform_mode(project_id),
-                                      ready_at, resolve_version, warmed_key)
+                                      ready_at, warmed_key)
                     if key is None or key == warmed_key:
                         break
                     warmed_key = key
+                    warmed_keys.add(key)
                 except (ReportUnavailable, FileNotFoundError):
                     continue
                 except Exception:
                     logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
                     break
+
+            try:
+                prune_report_archives(db.db_path, keep=warmed_keys)
+            except OSError:
+                logger.exception('Проект %s: не удалось удалить архивы предыдущего индекса', project_id)
 
             total_stats.last_indexed = datetime.now().isoformat()
             total_stats.duration_sec = round(total_stats.duration_sec, 2)
@@ -1633,11 +1640,11 @@ class ProjectManager:
                              progress_total=0, index_duration_sec=total_stats.duration_sec, updated_at=ready_at)
             self._save_project_to_disk(project_id, project)
             try:
-                version = resolve_version()
+                version = self.platform_help_version(project_id)
                 index = self.platform_help.get(version) if version else None
                 if index is not None:
                     warm_ready_report(self.get_search(project_id), index, self.platform_mode(project_id),
-                                      project_id, resolve_version, warmed_key)
+                                      project_id, warmed_key)
             except FileNotFoundError:
                 pass  # Удаление справки запускает свой прогрев после смены версии.
             except Exception:
@@ -2042,6 +2049,7 @@ class ProjectManager:
 
     def close_all(self):
         """Close all open database connections."""
+        from .platform_check import wait_report_jobs
         # Фоновые переиндексации и сравнения (warm_diffs) работают с индексами —
         # дождаться их. Переиндексация пишет status='ready' чуть раньше, чем
         # отпускает соединение: закрыть его под ней — на Windows access
@@ -2062,6 +2070,8 @@ class ProjectManager:
                 thread.join()
             with self._db_lock:
                 pool = list(self._db_pool.values())
+                # Задачи уже держат свой Database и не обращаются к пулу.
+                wait_report_jobs(pool)
                 self._db_pool.clear()
             for db in pool:
                 db.retire()
