@@ -11,7 +11,7 @@ _LAST = 0x7fffffff
 def _zip(files):
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for name, text in files.items():
+        for name, text in files:
             archive.writestr(name, text)
     return out.getvalue()
 
@@ -41,12 +41,12 @@ def _container(items):
 
 def _book(pages):
     nodes = ['{1,0,0,{0,0,{0,1,{"ru","Учебный раздел"}},""}}']
-    files = {}
+    files = []
     for i, (path, name, page) in enumerate(pages, start=2):
         nodes.append('{%d,1,0,{0,0,{0,1,{"ru","%s"}},"/%s"}}' % (i, name, path))
-        files[path] = page
+        files.append((path, page))
     toc = '{' + ','.join([str(len(nodes)), *nodes]) + '}'
-    return _container({'Book': b'', 'FileStorage': _zip(files), 'PackBlock': _zip({'0': toc})})
+    return _container({'Book': b'', 'FileStorage': _zip(files), 'PackBlock': _zip([('0', toc)])})
 
 
 def context_book(description='Учебное описание.'):
@@ -63,6 +63,7 @@ def context_book(description='Учебное описание.'):
                 '<div class="V8SH_rubric">&lt;Аргумент&gt; (обязательный)</div>'
                 'Тип: Строка.<br>Учебный параметр.'
                 f'<p class="V8SH_chapter">Описание:</p>{type_line}{escape(description)}'
+                '<p class="V8SH_chapter">Возвращаемое значение:</p>Тип: Число.<br>Учебный результат.'
                 f'<p class="V8SH_chapter">Доступность:</p>{availability}.')
         if version:
             html += f'<p class="V8SH_chapter">Использование в версии:</p>{escape(version)}'
