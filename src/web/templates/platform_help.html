@@ -4,6 +4,7 @@
 <h1 class="page-title">Справка платформы</h1>
 {% if message %}<p class="notice notice-success" role="status">{{ message }}</p>{% endif %}
 {% if error %}<p class="notice notice-warning" role="alert">{{ error }}</p>{% endif %}
+{% if listing_error %}<p class="notice notice-warning" role="alert">{{ listing_error }}</p>{% endif %}
 <div class="card">
     <h2 class="section-title">Версии платформы</h2>
     {% for version, stage in status.building.items() %}
@@ -17,7 +18,7 @@
         <thead><tr><th>Версия</th><th>Записей</th><th>Размер</th><th>Состояние</th><th></th></tr></thead>
         <tbody>{% for item in versions %}
         <tr><td>{{ item.version }}</td><td>{{ item.entries }}</td><td>{{ "%.2f"|format(item.size / 1048576) }} МБ</td>
-            <td>{% if item.stale %}Индекс устарел{% else %}Готов{% endif %}</td>
+            <td>{% if item.corrupt %}Индекс повреждён{% elif item.stale %}Индекс устарел{% else %}Готов{% endif %}</td>
             <td><form method="post" action="/api/admin/platform-help/{{ item.version }}/delete"
                       data-confirm="Удалить справку {{ item.version }} для всех проектов?" data-confirm-action="Удалить">
                 <button class="btn btn-ghost" type="submit" aria-label="Удалить справку {{ item.version }}">Удалить</button>

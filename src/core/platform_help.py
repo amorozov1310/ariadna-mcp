@@ -60,6 +60,7 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import struct
 from collections.abc import Callable
 from contextlib import closing, contextmanager
@@ -68,6 +69,7 @@ from tempfile import TemporaryDirectory
 import threading
 import time
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -80,11 +82,14 @@ logger = logging.getLogger('ariadna')
 CONTEXT_FILE = 'shcntx_ru.hbk'
 QUERY_FILE = 'shquery_ru.hbk'
 INDEX_FILE = 'help.db'
-SCHEMA_VERSION = '1'
+SCHEMA_VERSION = '2'
+MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+UPLOAD_SIZE_ERROR = 'размер файла превышает 256 МБ'
 
 _LAST = 0x7fffffff
 _BLOCK_HEADER = 31                      # \r\n + 8 + ' ' + 8 + ' ' + 8 + ' \r\n'
 _MAX_PAGE_BYTES = 2 * 1024 * 1024       # страница справки больше — не справка
+_MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 _MAX_FILES = 200_000                    # защита от «zip-бомбы» в загруженном файле
 _VERSION_RE = re.compile(r'[0-9]+(?:\.[0-9]+){3}')
 
@@ -153,26 +158,36 @@ def read_container(data: bytes) -> dict[str, bytes]:
     return items
 
 
-def _zip(data: bytes, what: str) -> zipfile.ZipFile:
+@contextmanager
+def _zip(data: bytes, what: str):
     try:
         z = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
         raise HbkError(f'{what}: не zip') from None
-    if len(z.infolist()) > _MAX_FILES:
-        raise HbkError(f'{what}: слишком много файлов')
-    if sum(item.file_size for item in z.infolist()) > 512 * 1024 * 1024:
-        raise HbkError(f'{what}: слишком большой объём распакованной справки')
-    return z
+    with z:
+        members = z.infolist()
+        if len(members) > _MAX_FILES:
+            raise HbkError(f'{what}: слишком много файлов')
+        # Последняя запись с этим именем, как при поиске по имени в ZipFile.
+        # В бюджет и в разбор попадают одни и те же записи, каждая один раз.
+        entries = list({item.filename: item for item in members}.values())
+        if sum(item.file_size for item in entries) > _MAX_UNPACKED_BYTES:
+            raise HbkError(f'{what}: слишком большой объём распакованной справки')
+        yield z, entries
 
 
-def _read(z: zipfile.ZipFile, name: str, max_bytes: int = _MAX_PAGE_BYTES) -> str:
-    info = z.getinfo(name)
+def _read(z: zipfile.ZipFile, info: zipfile.ZipInfo, max_bytes: int = _MAX_PAGE_BYTES) -> str:
     if info.file_size > max_bytes:
         return ''
     try:
-        return z.read(info).decode('utf-8-sig', 'replace')
-    except (zipfile.BadZipFile, RuntimeError, OSError) as e:
-        raise HbkError(f'не удалось прочитать страницу справки: {name}') from e
+        with z.open(info) as member:
+            # Верхняя граница чтения совпадает с вкладом записи в общий бюджет.
+            data = member.read(info.file_size + 1)
+        if len(data) != info.file_size:
+            raise zipfile.BadZipFile('размер записи ZIP не совпадает с оглавлением')
+        return data.decode('utf-8-sig', 'replace')
+    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, OSError) as e:
+        raise HbkError(f'не удалось прочитать содержимое справки: {info.filename}') from e
 
 
 # ---------------------------------------------------------------- оглавление
@@ -296,8 +311,9 @@ _ITEM_FOLDERS = {'methods': 'method', 'properties': 'property', 'events': 'event
 _GLOBAL_EN = 'Global context'
 
 _CHAPTER = re.compile(r'<p class="V8SH_chapter">\s*(.*?)\s*</p>', re.S | re.I)
-_TAG = re.compile(r'<[^>]+>')
-_BR = re.compile(r'<\s*(br|/p|/div|/li|/h\d|/tr)\b[^>]*>', re.I)
+_TAG = re.compile(r'<[^>]+(?:>|$)')
+_BR = re.compile(r'<\s*(?:br|/p|/div|/li|/h\d|/tr)\b[^>]*(?:>|$)', re.I)
+_LI = re.compile(r'<\s*li\b[^>]*(?:>|$)', re.I)
 _NAME_PAIR = re.compile(r'^(.*?)\s*\(([^()]*)\)\s*$')
 _RUBRIC = re.compile(r'<div class="V8SH_rubric">(.*?)</div>', re.S | re.I)
 _SINCE = re.compile(r'начиная с версии\s+(\d+(?:\.\d+)+)', re.I)
@@ -306,9 +322,13 @@ _COMPAT = re.compile(r'совместимости с версией\s+(\d+(?:\.\
 
 def html_text(fragment: str) -> str:
     """Текст фрагмента страницы: теги — прочь, переносы — по <br>/<p>."""
-    text = _BR.sub('\n', fragment)
-    text = re.sub(r'<\s*li\b[^>]*>', '\n• ', text, flags=re.I)
-    text = _TAG.sub('', text)
+    def replace_closed(pattern: re.Pattern, replacement: str, text: str) -> str:
+        # Незакрытый хвост поглощается одним совпадением и остаётся текстом.
+        return pattern.sub(lambda m: replacement if m[0].endswith('>') else m[0], text)
+
+    text = replace_closed(_BR, '\n', fragment)
+    text = replace_closed(_LI, '\n• ', text)
+    text = replace_closed(_TAG, '', text)
     text = html_lib.unescape(text).replace('\xa0', ' ')
     lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in text.split('\n')]
     out: list[str] = []
@@ -517,31 +537,31 @@ def parse_query_page(page: str, path: str, titles: dict[str, str], section: str)
 def parse_hbk(data: bytes, book: str = 'context'):
     """Записи справки из файла .hbk (генератор Entry)."""
     items = read_container(data)
-    storage = _zip(items['FileStorage'], 'FileStorage')
     sections: dict[str, tuple[str, dict[str, str]]] = {}
     if 'PackBlock' in items:
+        with _zip(items['PackBlock'], 'PackBlock') as (pack, members):
+            toc = _read(pack, members[0], 32 * 1024 * 1024) if members else ''
         try:
-            pack = _zip(items['PackBlock'], 'PackBlock')
-            names = pack.namelist()
-            if names:
-                sections = _section_of(parse_toc(_read(pack, names[0], 32 * 1024 * 1024)))
+            sections = _section_of(parse_toc(toc))
         except HbkError as e:
             logger.warning("Справка платформы: оглавление не разобрано (%s)", e)
-    for name in storage.namelist():
-        if name.endswith('/') or '__categories__' in name or name.endswith('.st'):
-            continue
-        page = _read(storage, name)
-        if not page:
-            continue
-        section, titles = sections.get(name, ('', {}))
-        if book == 'query':
-            if name.endswith('root.html') and not titles:
+    with _zip(items['FileStorage'], 'FileStorage') as (storage, members):
+        for info in members:
+            name = info.filename
+            if name.endswith('/') or '__categories__' in name or name.endswith('.st'):
                 continue
-            entry = parse_query_page(page, name, titles, section)
-        else:
-            entry = parse_context_page(page, name, section)
-        if entry is not None:
-            yield entry
+            page = _read(storage, info)
+            if not page:
+                continue
+            section, titles = sections.get(name, ('', {}))
+            if book == 'query':
+                if name.endswith('root.html') and not titles:
+                    continue
+                entry = parse_query_page(page, name, titles, section)
+            else:
+                entry = parse_context_page(page, name, section)
+            if entry is not None:
+                yield entry
 
 
 # ---------------------------------------------------------------- индекс
@@ -556,7 +576,8 @@ CREATE TABLE entries (
     name_ru_cf TEXT NOT NULL, name_en_cf TEXT NOT NULL DEFAULT '',
     owner_ru_cf TEXT NOT NULL DEFAULT '', owner_en_cf TEXT NOT NULL DEFAULT '',
     variants TEXT NOT NULL DEFAULT '[]',
-    returns TEXT NOT NULL DEFAULT '', availability TEXT NOT NULL DEFAULT '',
+    returns TEXT NOT NULL DEFAULT '', returns_types TEXT NOT NULL DEFAULT '',
+    availability TEXT NOT NULL DEFAULT '',
     since TEXT NOT NULL DEFAULT '', compat TEXT NOT NULL DEFAULT '',
     usage TEXT NOT NULL DEFAULT '', value_type TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
@@ -577,6 +598,12 @@ def name_words(name: str) -> str:
     своими словами («начало месяца»)."""
     words = re.findall(r'[A-ZА-ЯЁ]?[a-zа-яё0-9]+|[A-ZА-ЯЁ]+(?![a-zа-яё])', name)
     return ' '.join([name] + words) if len(words) > 1 else name
+
+
+def _fts_fields(entry: Entry | HelpEntry) -> tuple[str, str, str]:
+    return (f'{name_words(entry.name_ru)} {name_words(entry.name_en)}',
+            f'{entry.owner_ru} {entry.owner_en}',
+            f'{entry.section} {entry.description[:2000]} {entry.returns[:300]}')
 
 
 def _write_index(sources: dict[str, bytes], out: Path, version: str, origin: str,
@@ -601,19 +628,17 @@ def _write_index(sources: dict[str, bytes], out: Path, version: str, origin: str
                 counts[e.kind] = counts.get(e.kind, 0) + 1
                 cur = conn.execute(
                     """INSERT INTO entries (kind, name_ru, name_en, owner_ru, owner_en, name_ru_cf,
-                           name_en_cf, owner_ru_cf, owner_en_cf, variants, returns, availability,
+                           name_en_cf, owner_ru_cf, owner_en_cf, variants, returns, returns_types, availability,
                            since, compat, usage, value_type, description, note, section, path, book)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (e.kind, e.name_ru, e.name_en, e.owner_ru, e.owner_en, e.name_ru.casefold(),
                      e.name_en.casefold(), e.owner_ru.casefold(), e.owner_en.casefold(),
-                     json.dumps(e.variants, ensure_ascii=False), e.returns, e.availability,
+                     json.dumps(e.variants, ensure_ascii=False), e.returns, e.returns_types, e.availability,
                      e.since, e.compat, e.usage, e.value_type, e.description, e.note, e.section,
                      e.path, e.book))
                 conn.execute(
                     "INSERT INTO entries_fts (rowid, names, owner, text) VALUES (?,?,?,?)",
-                    (cur.lastrowid, f'{name_words(e.name_ru)} {name_words(e.name_en)}',
-                     f'{e.owner_ru} {e.owner_en}',
-                     f'{e.section} {e.description[:2000]} {e.returns[:300]}'))
+                    (cur.lastrowid, *_fts_fields(e)))
             if total == before:
                 filename = CONTEXT_FILE if book == 'context' else QUERY_FILE
                 raise HbkError(f'в книге нет страниц справки, ожидается {filename}')
@@ -656,6 +681,15 @@ def read_meta(path: Path) -> dict[str, str]:
         return {}
 
 
+def _read_counts(meta: dict[str, str]) -> dict[str, int]:
+    counts = json.loads(meta['counts'])
+    if not isinstance(counts, dict) or not counts or any(
+            kind not in KINDS or type(count) is not int or count <= 0
+            for kind, count in counts.items()):
+        raise HbkError('неверное число записей по видам')
+    return counts
+
+
 # ---------------------------------------------------------------- поиск
 
 _KIND_ORDER = {'function': 0, 'type': 1, 'global_property': 2, 'method': 3, 'property': 4,
@@ -675,6 +709,7 @@ class HelpEntry:
     owner_en: str
     variants: list[dict]
     returns: str
+    returns_types: str
     availability: str
     since: str
     compat: str
@@ -708,8 +743,10 @@ class PlatformHelp:
 
     @staticmethod
     def _row(r: sqlite3.Row) -> HelpEntry:
+        # Справка первой схемы остаётся доступной до завершения пересборки.
+        returns_types = r['returns_types'] if 'returns_types' in r.keys() else ''
         return HelpEntry(r['id'], r['kind'], r['name_ru'], r['name_en'], r['owner_ru'], r['owner_en'],
-                         json.loads(r['variants'] or '[]'), r['returns'], r['availability'],
+                         json.loads(r['variants']), r['returns'], returns_types, r['availability'],
                          r['since'], r['compat'], r['usage'], r['value_type'], r['description'],
                          r['note'], r['section'], r['path'])
 
@@ -818,8 +855,10 @@ def format_entry(e: HelpEntry, full: bool = True) -> str:
         lines.append(f'Тип значения: {e.value_type}')
     if e.usage:
         lines.append(f'Использование: {e.usage}')
-    if e.returns:
-        lines.append(f'Возвращает: {_cut(e.returns.replace(chr(10), " "), 240)}')
+    if e.returns_types or e.returns:
+        description = _cut(e.returns.replace('\n', ' '), 240)
+        result = ' — '.join(part for part in (e.returns_types, description) if part)
+        lines.append(f'Возвращает: {result}')
     if e.availability:
         lines.append(f'Доступность: {e.availability}')
     if e.since:
@@ -831,6 +870,63 @@ def format_entry(e: HelpEntry, full: bool = True) -> str:
     if e.section and e.kind == 'query':
         lines.append(f'Раздел: {e.section}')
     return '\n'.join(lines)
+
+
+def _valid_variants(variants) -> bool:
+    if not isinstance(variants, list):
+        return False
+    for variant in variants:
+        if not isinstance(variant, dict) or not all(
+                isinstance(variant.get(key, ''), str) for key in ('title', 'syntax', 'description')):
+            return False
+        params = variant.get('params', [])
+        if not isinstance(params, list):
+            return False
+        for param in params:
+            if not isinstance(param, dict) or not isinstance(param.get('name'), str):
+                return False
+            types = param.get('types', [])
+            if (not isinstance(types, list) or not all(isinstance(t, str) for t in types)
+                    or not isinstance(param.get('description', ''), str)
+                    or (param.get('required') is not None and type(param['required']) is not bool)):
+                return False
+    return True
+
+
+def _validate_index(conn: sqlite3.Connection, version: str, counts: dict[str, int]) -> None:
+    if conn.execute("PRAGMA quick_check(1)").fetchone()[0] != 'ok':
+        raise HbkError('файл SQLite повреждён')
+    tables = dict(conn.execute("SELECT name, type FROM pragma_table_list WHERE schema='main'"))
+    if (tables.get('meta'), tables.get('entries'), tables.get('entries_fts')) != (
+            'table', 'table', 'virtual'):
+        raise HbkError('неверная схема таблиц справки')
+    meta = dict(conn.execute("SELECT key, value FROM meta"))
+    if meta.get('schema') != SCHEMA_VERSION or meta.get('version') != version:
+        raise HbkError('неверная схема или версия справки')
+    text_columns = set(HelpEntry.__dataclass_fields__) - {'id'}
+    text_columns.update({'book', 'name_ru_cf', 'name_en_cf', 'owner_ru_cf', 'owner_en_cf'})
+    columns = {col[1]: (col[2].upper(), col[3], col[5])
+               for col in conn.execute("PRAGMA table_info(entries)")}
+    if columns != {'id': ('INTEGER', 0, 1), **dict.fromkeys(text_columns, ('TEXT', 1, 0))}:
+        raise HbkError('неверная схема записей справки')
+    actual_counts = dict(conn.execute("SELECT kind, COUNT(*) FROM entries GROUP BY kind"))
+    if counts != actual_counts:
+        raise HbkError('число записей справки не совпадает с описанием индекса')
+    if conn.execute("SELECT COUNT(*) FROM entries_fts").fetchone()[0] != sum(counts.values()):
+        raise HbkError('число записей полнотекстового индекса не совпадает со справкой')
+    conn.execute("INSERT INTO entries_fts(entries_fts) VALUES ('integrity-check')")
+    conn.row_factory = sqlite3.Row
+    for row in conn.execute("""
+        SELECT e.*, f.names AS fts_names, f.owner AS fts_owner, f.text AS fts_text
+        FROM entries e LEFT JOIN entries_fts f ON f.rowid = e.id
+    """):
+        if any(not isinstance(row[key], str) for key in text_columns):
+            raise HbkError(f'запись {row["id"]}: неверные данные справки')
+        entry = PlatformHelp._row(row)
+        if not _valid_variants(entry.variants):
+            raise HbkError(f'запись {entry.id}: неверные варианты синтаксиса')
+        if (row['fts_names'], row['fts_owner'], row['fts_text']) != _fts_fields(entry):
+            raise HbkError(f'запись {entry.id}: полнотекстовый индекс не соответствует справке')
 
 
 # ---------------------------------------------------------------- хранилище версий
@@ -908,27 +1004,48 @@ class PlatformHelpStore:
 
     def versions(self) -> list[dict]:
         """Загруженные версии, новые сверху: версия, откуда, когда построен, записей."""
-        out = []
-        if self.root.is_dir():
-            for d in self.root.iterdir():
-                meta = read_meta(d / INDEX_FILE) if _VERSION_RE.fullmatch(d.name) else {}
-                if meta:
-                    try:
-                        size = (d / INDEX_FILE).stat().st_size
-                    except FileNotFoundError:
-                        continue  # версию удалили после чтения meta
-                    counts = json.loads(meta.get('counts') or '{}')
-                    out.append({'version': d.name, 'origin': meta.get('origin', ''),
-                                'built_at': meta.get('built_at', ''),
-                                'entries': sum(counts.values()), 'counts': counts,
-                                'stale': meta.get('fingerprint') != fingerprint()
-                                or meta.get('schema') != SCHEMA_VERSION,
-                                'size': size})
-        return sorted(out, key=lambda v: version_key(v['version']), reverse=True)
+        return self.version_listing()[0]
+
+    def version_listing(self) -> tuple[list[dict], str]:
+        """Список версий и сообщение об ошибке доступа к каталогу."""
+        try:
+            directories = list(self.root.iterdir())
+        except FileNotFoundError:
+            return [], ''
+        except OSError as e:
+            logger.warning('Не удалось прочитать каталог справки платформы: %s', e)
+            return [], 'Не удалось прочитать каталог справки платформы. Проверьте права доступа.'
+        versions = [info for d in directories if _VERSION_RE.fullmatch(d.name)
+                    if (info := self._version_info(d.name))]
+        return sorted(versions, key=lambda v: version_key(v['version']), reverse=True), ''
+
+    def _version_info(self, version: str) -> dict | None:
+        path = self.path(version)
+        size, meta, counts = 0, {}, {}
+        stamp = None
+        corrupt = False
+        try:
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            size = info.st_size
+            stamp = (info.st_dev, info.st_ino, info.st_mtime_ns, size)
+            meta = read_meta(path)
+            if meta.get('version') != version or not meta.get('schema'):
+                raise HbkError('неверная версия или схема справки')
+            counts = _read_counts(meta)
+        except FileNotFoundError:
+            return None
+        except (OSError, KeyError, TypeError, ValueError, RecursionError):
+            corrupt = True
+        return {'version': version, 'origin': meta.get('origin', ''),
+                'built_at': meta.get('built_at', ''),
+                'entries': sum(counts.values()), 'counts': counts, 'size': size,
+                'stale': meta.get('fingerprint') != fingerprint() or meta.get('schema') != SCHEMA_VERSION,
+                'corrupt': corrupt, '_file_stamp': stamp}
 
     def newest(self) -> str:
-        versions = self.versions()
-        return versions[0]['version'] if versions else ''
+        return next((v['version'] for v in self.versions() if not v['corrupt']), '')
 
     def get(self, version: str) -> PlatformHelp | None:
         path = self.path(version)
@@ -944,21 +1061,37 @@ class PlatformHelpStore:
         version = version or version_from_path(directory)
         if not version:
             raise ValueError(f'не удалось определить версию платформы по пути {directory}')
+        with self._operation(version, 'Чтение книг справки') as target:
+            return self._build_from_dir(directory, target, version, origin)
+
+    def _build_from_dir(self, directory: Path, target: Path, version: str, origin: str = '') -> dict:
         sources = {}
         for book, name in (('context', CONTEXT_FILE), ('query', QUERY_FILE)):
-            f = directory / name
-            if f.is_file():
-                sources[book] = f.read_bytes()
+            path = directory / name
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size > MAX_UPLOAD_BYTES:
+                raise HbkError(f'{name}: {UPLOAD_SIZE_ERROR}')
+            with path.open('rb') as stream:
+                # Дополнительный байт позволяет заметить рост книги после stat().
+                data = stream.read(size + 1)
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HbkError(f'{name}: {UPLOAD_SIZE_ERROR}')
+            if len(data) != size:
+                raise HbkError(f'{name}: размер файла изменился во время чтения')
+            sources[book] = data
         if 'context' not in sources:
             raise HbkError(f'в {directory} нет {CONTEXT_FILE}')
-        return self._build(version, sources, origin or str(directory))
+        return self._build(version, target, sources, origin or str(directory))
 
     def build_from_bytes(self, version: str, context: bytes, query: bytes | None = None,
                          origin: str = 'загружено') -> dict:
         sources = {'context': context}
         if query is not None:
             sources['query'] = query
-        return self._build(version, sources, origin)
+        with self._operation(version, 'Построение индекса') as target:
+            return self._build(version, target, sources, origin)
 
     def install_index(self, version: str, data: bytes) -> dict:
         """Готовый индекс справки (help.db, построенный другой Ариадной)."""
@@ -970,35 +1103,35 @@ class PlatformHelpStore:
             if meta.get('schema') != SCHEMA_VERSION:
                 raise HbkError('выберите help.db, построенный совместимой версией Ариадны')
             version = version or meta.get('version', '')
-            if not isinstance(version, str):
-                raise HbkError('в индексе не указана версия платформы')
+            if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
+                raise HbkError('в индексе не указана корректная версия платформы')
             if meta.get('version') != version:
                 raise HbkError(f'индекс построен для {meta.get("version")}, ожидалась версия {version}')
             with self._operation(version, 'Проверка индекса') as target:
                 try:
-                    with closing(sqlite3.connect(tmp.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
-                        conn.row_factory = sqlite3.Row
-                        if conn.execute("PRAGMA quick_check(1)").fetchone()[0] != 'ok':
-                            raise HbkError('файл SQLite повреждён')
-                        conn.execute("SELECT name_ru_cf, name_en_cf, owner_ru_cf, owner_en_cf FROM entries LIMIT 0")
-                        counts = dict(conn.execute("SELECT kind, COUNT(*) FROM entries GROUP BY kind"))
-                        if not counts or counts != json.loads(meta['counts']):
-                            raise HbkError('число записей справки не совпадает с описанием индекса')
-                        PlatformHelp._row(conn.execute("SELECT * FROM entries LIMIT 1").fetchone())
-                        conn.execute("SELECT rowid FROM entries_fts WHERE entries_fts MATCH 'тип' LIMIT 1").fetchone()
-                except (sqlite3.Error, KeyError, IndexError, TypeError, ValueError) as e:
+                    counts = _read_counts(meta)
+                    with closing(sqlite3.connect(tmp.resolve().as_uri() + '?mode=rw', uri=True)) as conn:
+                        _validate_index(conn, version, counts)
+                        conn.rollback()  # Команда проверки FTS не должна менять загруженный файл.
+                except (sqlite3.Error, KeyError, IndexError, TypeError, ValueError, RecursionError) as e:
                     raise HbkError(f'повреждён индекс справки: {e}') from e
                 replace_with_retry(tmp, target)
         return {'entries': sum(counts.values())}
 
     @contextmanager
-    def _operation(self, version: str, stage: str):
+    def _operation(self, version: str, stage: str, *, skip_if: Callable[[], bool] | None = None):
         path = self.path(version)
         with self._lock:
-            if version in self._building:
-                raise ValueError(f'справка {version} уже строится')
-            self._building[version] = stage
-            self._errors.pop(version, None)
+            building = version in self._building
+            skip = skip_if is not None and (building or skip_if())
+            if not skip:
+                if building:
+                    raise ValueError(f'справка {version} уже строится')
+                self._building[version] = stage
+                self._errors.pop(version, None)
+        if skip:
+            yield None
+            return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             yield path
@@ -1010,13 +1143,12 @@ class PlatformHelpStore:
             with self._lock:
                 self._building.pop(version, None)
 
-    def _build(self, version: str, sources: dict[str, bytes], origin: str) -> dict:
+    def _build(self, version: str, target: Path, sources: dict[str, bytes], origin: str) -> dict:
         def progress(message: str):
             with self._lock:
                 self._building[version] = message
 
-        with self._operation(version, 'Построение индекса') as target:
-            return build_index(sources, target, version, origin, progress)
+        return build_index(sources, target, version, origin, progress)
 
     def remove(self, version: str) -> bool:
         path = self.path(version)
@@ -1030,17 +1162,29 @@ class PlatformHelpStore:
                 path.parent.rmdir()
             return existed
 
+    def _skip_auto_build(self, version: str, previous: dict | None) -> bool:
+        current = self._version_info(version)
+        if current is None:
+            return False
+        # Между снимком и началом сборки мог быть загружен другой индекс,
+        # в том числе совместимый индекс с предыдущим отпечатком разборщика.
+        return (previous is None or current['_file_stamp'] != previous['_file_stamp']
+                or not (current['stale'] or current['corrupt']))
+
     def sync_installed(self, roots: list[Path] | None = None, background: bool = True) -> list[str]:
         """Найти установленные платформы и построить недостающие или устаревшие
-        индексы. Возвращает версии, которые будут построены."""
+        индексы. Возвращает версии, выбранные для проверки и сборки."""
         have = {v['version']: v for v in self.versions()}
         todo = [(v, d) for v, d in find_installed(roots).items()
-                if v not in have or have[v]['stale']]
+                if v not in have or have[v]['stale'] or have[v]['corrupt']]
 
         def run():
             for version, directory in todo:
                 try:
-                    self.build_from_dir(directory, version)
+                    with self._operation(version, 'Чтение книг справки',
+                                         skip_if=lambda: self._skip_auto_build(version, have.get(version))) as target:
+                        if target is not None:
+                            self._build_from_dir(directory, target, version)
                 except Exception:
                     logger.exception("Справка платформы %s не построена (%s)", version, directory)
 
