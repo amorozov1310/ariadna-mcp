@@ -26,6 +26,7 @@ alwaysApply: true
    | Реквизиты определённого типа, реквизиты форм | `search_attributes(query, type_filter)` |
    | Текст внутри кода (запросы, литералы, присваивания) | `search_code(query, file_pattern)` — подстрока, не regex |
    | Синтаксис и параметры метода или типа платформы | `platform_help(query, project_id)` для версии проекта, `kind="query"` для языка запросов |
+   | Проверка перед сменой платформы или режима совместимости | `check_platform_calls(project_id)`. Уточни типы с пометкой «Не проверено» по исходному коду |
    | Процедура по описанию своими словами | `semantic_search_code(query)`, затем `get_procedure_code(module_name, procedure_name)` |
 
 3. **Сверка.** Ответ основного сервера выглядит сомнительно (объект или
