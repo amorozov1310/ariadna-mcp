@@ -474,15 +474,18 @@ def _project_mode(pm, project_id):
 
 def _platform_help(pm: ProjectManager, args: dict) -> str:
     project_id = (args.get('project_id') or '').strip()
+    requested_version = (args.get('version') or '').strip()
     if project_id:
         try:
             project = pm.get_project(project_id)
         except KeyError:
-            return f'Error: проект «{project_id}» не найден'
+            if not requested_version:
+                return f'Error: проект «{project_id}» не найден'
+            project = None
     else:
         projects = pm.list_projects()
         project = projects[0] if len(projects) == 1 else None
-    help_index = _project_help(pm, project, (args.get('version') or '').strip())
+    help_index = _project_help(pm, project, requested_version)
     if isinstance(help_index, str):
         return help_index
     version = help_index.version
@@ -973,13 +976,20 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             return format_broken_calls(project_id, result, offset, max(1, int(limit_arg or 50)))
 
         case 'check_platform_calls':
+            if source_id and (error := _unknown_source_error(pm, project_id, source_id)):
+                return error
+            where = " AND source_id=?" if source_id else ""
+            modules = engine.db.read_conn().execute(
+                "SELECT 1 FROM modules WHERE file_path != ''" + where + " LIMIT 1",
+                (source_id,) if source_id else ())
+            if not modules.fetchone():
+                if source_id:
+                    return (f'В источнике нет модулей для проверки (source_id={source_id}). '
+                            'Добавьте выгрузку с модулями и выполните reindex.')
+                return 'В индексе нет модулей для проверки. Добавьте выгрузку с модулями и выполните reindex.'
             index = _project_help(pm, pm.get_project(project_id))
             if isinstance(index, str):
                 return index
-            if source_id and (error := _unknown_source_error(pm, project_id, source_id)):
-                return error
-            if not engine.db.read_conn().execute("SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
-                return 'В индексе нет модулей для проверки. Добавьте выгрузку с модулями и выполните reindex.'
             mode = _project_mode(pm, project_id)
             limit = max(1, int(args.get('limit', 50)))
             offset = max(0, offset)

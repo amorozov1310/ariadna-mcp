@@ -110,7 +110,7 @@ _RE_EXT_DIRECTIVE = re.compile(
 # объявление: без него такие процедуры пропадали из индекса целиком.
 _RE_PROC_START = re.compile(
     r'^\s*(?:(Асинх|Async)\s+)?(Процедура|Функция|Procedure|Function)\s+'
-    r'([А-Яа-яA-Za-z0-9_]+)\s*'
+    r'([А-Яа-яЁёA-Za-z0-9_]+)\s*'
     # Параметры — до закрывающей скобки вне строк: в значении по умолчанию
     # бывает строка со скобками (`Убрать = "()<>"`, кавычка внутри — "").
     r'\(((?:"(?:[^"]|"")*"|[^)"])*)\)\s*'
@@ -129,7 +129,7 @@ _RE_MODULE_VAR_DECL = re.compile(
 # Multi-line signature start: has opening ( but no closing ) on same line
 _RE_PROC_START_MULTILINE = re.compile(
     r'^\s*(?:(Асинх|Async)\s+)?(Процедура|Функция|Procedure|Function)\s+'
-    r'([А-Яа-яA-Za-z0-9_]+)\s*'
+    r'([А-Яа-яЁёA-Za-z0-9_]+)\s*'
     r'\([^)]*$',  # Opening paren, params, but NO closing paren
     re.IGNORECASE
 )
@@ -776,7 +776,7 @@ def _parse_param_names(params: str) -> set[str]:
             continue
         part = re.sub(r'^(?:Знач|Val|ByVal)\s+', '', part, flags=re.IGNORECASE)
         name = part.split('=')[0].strip()
-        m = re.match(r'^([А-Яа-яA-Za-z][А-Яа-яA-Za-z0-9_]*)$', name)
+        m = re.match(r'^([А-Яа-яЁёA-Za-z_][А-Яа-яЁёA-Za-z0-9_]*)$', name)
         if m:
             names.add(m.group(1).lower())
     return names

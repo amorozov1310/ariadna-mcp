@@ -791,16 +791,12 @@ def _cut(text: str, n: int) -> str:
 
 def compatibility_warning(since: str, compat: str, mode: str) -> str:
     """Ограничения из раздела «Использование в версии» для режима проекта."""
-    if not mode:
+    minimum = compat or since
+    if not mode or not minimum or version_key(minimum) <= version_key(mode):
         return ''
-    limits = []
-    if since and version_key(since) > version_key(mode):
-        limits.append(f'появился в {since}')
-    if compat and compat != since and version_key(compat) > version_key(mode):
-        limits.append(f'требует режима совместимости {compat} или новее')
-    if not limits:
-        return ''
-    return ', '.join(limits) + f', а у конфигурации режим совместимости {mode}'
+    reason = (f'требует режима совместимости {compat} или новее' if compat
+              else f'появился в {since}')
+    return reason + f', а у конфигурации режим совместимости {mode}'
 
 
 def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:

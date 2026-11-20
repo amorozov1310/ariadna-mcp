@@ -75,6 +75,23 @@ def context_book(description='Учебное описание.'):
          'ValueTable', 'Доступен начиная с версии 8.3.25.', 'Тонкий клиент, сервер')
     page('objects/Global context/methods/ModeExample.html', 'ПримерРежима', 'ModeExample',
          version='Доступен в режиме совместимости с версией 8.3.26 и последующими.')
+    page('objects/Global context/methods/StrTemplate.html', 'СтрШаблон', 'StrTemplate',
+         version='Доступен начиная с версии 8.3.6. Доступен в режиме совместимости с версией 8.3.5 и последующими.')
+    page('objects/Structure/methods/Property.html', 'Свойство', 'Property', 'Структура', 'Structure')
+    page('objects/Array/methods/Count.html', 'Количество', 'Count', 'Массив', 'Array')
+    page('objects/ConstantManager/methods/Get.html', 'Получить', 'Get',
+         'КонстантаМенеджер.<Имя константы>', 'ConstantManager.<Constant Name>')
+    page('objects/Global context/properties/Catalogs.html', 'Справочники', 'Catalogs')
+    page('objects/ConfigurationMetadataObject.html', 'ОбъектМетаданныхКонфигурация',
+         'ConfigurationMetadataObject')
+    page('objects/XMLCanonicalizingWriter.html', 'КаноническаяЗаписьXML', 'XMLCanonicalizingWriter')
+    page('objects/Global context/properties/Metadata.html', 'Метаданные', 'Metadata',
+         value_type='ОбъектМетаданныхКонфигурация')
+    page('objects/Global context/properties/ExternalDataProcessors.html',
+         'ВнешниеОбработки', 'ExternalDataProcessors', value_type='ВнешниеОбработкиМенеджер',
+         availability='Сервер, толстый клиент, внешнее соединение')
+    page('objects/ExternalDataProcessorsManager/methods/Connect.html', 'Подключить', 'Connect',
+         'ВнешниеОбработкиМенеджер', 'ExternalDataProcessorsManager', availability='Сервер, внешнее соединение')
     for ru, en in [('Пустая', 'Empty'), ('ИзСтрок', 'FromRows')]:
         page(f'objects/ValueTable/ctors/{en}.html', ru, en, 'ТаблицаЗначений', 'ValueTable')
     for ru, en in [('СправочникМенеджер', 'CatalogManager'), ('СправочникОбъект', 'CatalogObject'),
