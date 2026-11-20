@@ -756,7 +756,8 @@ class ProjectManager:
             counts['calls'] = conn.execute(
                 """SELECT COUNT(*) FROM calls c JOIN procedures p ON p.id = c.caller_id
                    JOIN modules m ON m.id = p.module_id
-                   WHERE m.source_id=? AND c.callee_kind != 'manager_object'""",
+                   WHERE m.source_id=? AND (c.callee_kind != 'manager_object' OR EXISTS
+                         (SELECT 1 FROM calls_resolved cr WHERE cr.call_id = c.id))""",
                 (source_id,)).fetchone()[0]
         except Exception:
             pass  # DB not indexed yet — a files-only preview is still useful
@@ -1497,9 +1498,6 @@ class ProjectManager:
                 source.indexed_at = datetime.now().isoformat()
                 progress['done'] += len(walked.get(source.id, []))
 
-            total_stats = self._calc_stats_from_db(db)
-            total_stats.duration_sec = duration_sec
-
             # Resolve the call graph (1.2) — recomputed in full every time,
             # regardless of full vs. partial reindex: it's cheap (table
             # scans + dict joins, no per-call queries) and a partial reindex
@@ -1515,6 +1513,9 @@ class ProjectManager:
                 db.update_state(progress_phase='resolving')
                 indexer.resolve_calls()
                 db.set_graph_resolved(resolver)
+
+            total_stats = self._calc_stats_from_db(db)
+            total_stats.duration_sec = duration_sec
 
             # Поисковые карточки процедур — только для изменившихся модулей
             # (src/core/cards.py). Вспомогательный индекс: его сбой пишется в
@@ -1931,7 +1932,8 @@ class ProjectManager:
             total_modules=conn.execute("SELECT COUNT(*) FROM modules").fetchone()[0],
             total_procedures=conn.execute("SELECT COUNT(*) FROM procedures").fetchone()[0],
             total_calls=conn.execute(
-                "SELECT COUNT(*) FROM calls WHERE callee_kind != 'manager_object'").fetchone()[0],
+                """SELECT COUNT(*) FROM calls c WHERE c.callee_kind != 'manager_object' OR EXISTS
+                         (SELECT 1 FROM calls_resolved cr WHERE cr.call_id = c.id)""").fetchone()[0],
         )
 
     # ============================================

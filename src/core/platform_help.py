@@ -826,16 +826,30 @@ def _cut(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n].rstrip() + '…'
 
 
-def _compatibility_conflict(since: str, compat: str) -> bool:
-    return bool(since and compat and version_key(since) > version_key(compat))
+# У этих функций без нижней границы в справке режим проверен в Конфигураторе
+# 8.3.27.2170 после обновления конфигурации БД. Регулярный поиск компилируется
+# с 8.3.9. Четыре клиентские функции компилируются в том числе в 8.2.13.
+_VERIFIED_MIN_MODES = {
+    ('strfindbyregularexpression', '8.3.23'): '8.3.9',
+    ('doqueryboxasync', '8.3.18'): '',
+    ('beginattachingcomputerinformationextension', '8.3.18'): '',
+    ('begininstallingcomputerinformationextension', '8.3.18'): '',
+    ('begingettingnetworkadaptersinformation', '8.3.18'): '',
+}
 
 
-def compatibility_warning(since: str, compat: str, mode: str) -> str:
+def minimum_compatibility_mode(since: str, compat: str, global_function_en: str = '') -> str:
+    """Нижняя граница режима с учётом проверенных особенностей платформы."""
+    if not compat:
+        return _VERIFIED_MIN_MODES.get((global_function_en.casefold(), since), since)
+    return max(since, compat, key=version_key)
+
+
+def compatibility_warning(min_mode: str, mode: str) -> str:
     """Ограничения из раздела «Использование в версии» для режима проекта."""
-    if (not mode or not compat or _compatibility_conflict(since, compat)
-            or version_key(compat) <= version_key(mode)):
+    if not mode or not min_mode or version_key(min_mode) <= version_key(mode):
         return ''
-    return (f'требует режима совместимости {compat} или новее, '
+    return (f'требует режима совместимости {min_mode} или новее, '
             f'а у конфигурации режим совместимости {mode}')
 
 
@@ -843,19 +857,10 @@ def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:
     """Карточка записи справки для агента: сжато, длинное описание обрезано."""
     head = e.full_ru + (f' ({e.full_en})' if e.full_en and e.full_en != e.full_ru else '')
     lines = [f'{head} — {KINDS.get(e.kind, e.kind)}']
-    warning = compatibility_warning(e.since, e.compat, mode)
+    min_mode = minimum_compatibility_mode(e.since, e.compat, e.name_en if e.kind == 'function' else '')
+    warning = compatibility_warning(min_mode, mode)
     if warning:
         lines.append(f'Недоступно в режиме проекта: элемент {warning}.')
-    conflict = _compatibility_conflict(e.since, e.compat)
-    if conflict:
-        if (e.kind == 'function'
-                and (e.name_ru.casefold() == 'стршаблон' or e.name_en.casefold() == 'strtemplate')
-                and (e.since, e.compat) == ('8.3.6', '8.3.5')):
-            lines.append('В справке указан режим 8.3.5, фактически требуется 8.3.6 '
-                         '(см. примечания к выпуску 8.3.6 и руководство разработчика 1С).')
-        else:
-            lines.append(f'В справке указан режим {e.compat}, а элемент появился в версии '
-                         f'{e.since}. Минимальный режим требует проверки на платформе.')
     if not full:
         syntax = next((v['syntax'] for v in e.variants if v.get('syntax')), '')
         if syntax:
@@ -888,10 +893,9 @@ def format_entry(e: HelpEntry, full: bool = True, mode: str = '') -> str:
     if e.availability:
         lines.append(f'Доступность: {e.availability}')
     if e.since:
-        lines.append(f'С версии {e.since}' + (f' (режим совместимости {e.compat} и новее)'
-                                             if e.compat and not conflict else ''))
-    elif e.compat:
-        lines.append(f'Режим совместимости {e.compat} и новее')
+        lines.append(f'С версии {e.since}')
+    if min_mode:
+        lines.append(f'Режим совместимости {min_mode} и новее')
     if e.description:
         lines.append(f'Описание: {_cut(e.description, 600)}')
     if e.note:

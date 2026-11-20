@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.core import platform_check
+from src.core.platform_help import compatibility_warning, minimum_compatibility_mode
 from src.core.project_manager import ProjectManager
 from src.mcp_server.tools import execute_tool
 from tests.fixtures.generate_platform_help import _book, context_book
@@ -37,7 +38,7 @@ def test_platform_calls(project):
     assert 'режим совместимости 8.3.24' in result
     assert 'CommonModules/Пример/Ext/Module.bsl:3 — Ошибка' in result
     assert 'НесуществующийВызов()' in result
-    assert 'Таблица.cOuNt()' not in result
+    assert 'Module.bsl:5 — Предупреждение — метод требует режима совместимости 8.3.25' in result
     assert 'Module.bsl:6 — Ошибка' in result  # СтрНайти есть только в глобальном контексте.
     assert 'Module.bsl:7 — Не проверено' in result and 'Получатель.НетМетода()' in result
     assert result.count('доступен только на сервере') == 3
@@ -50,7 +51,7 @@ def test_help_mode_by_project(project):
     pm, source = project
     pm.create_project('other', 'Другой')
     args = {'query': 'ValueTable.Count', 'version': VERSION}
-    assert 'Недоступно' not in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
+    assert 'Недоступно' in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', args)
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', dict(args, project_id='other'))
     config = source / 'Configuration.xml'
@@ -72,7 +73,7 @@ def test_pages_and_missing_help(project):
     first = check(limit=1, offset=-1, source_id='sample')
     assert 'offset=1' in first and 'НесуществующийВызов()' in first and 'cOuNt' not in first
     second = check(limit=0, offset=1)
-    assert 'offset=2' in second and 'Таблица.СтрНайти()' in second and 'НесуществующийВызов' not in second
+    assert 'offset=2' in second and 'Таблица.cOuNt()' in second and 'НесуществующийВызов' not in second
     assert 'записей больше нет' in check(offset=50)
     assert 'урезан до 500' in check(limit=1000)
     assert check(source_id='other').startswith('Error:')
@@ -109,10 +110,10 @@ EndProcedure
     pm.reindex('demo')
     result = execute_tool(pm, 'check_platform_calls', {})
     assert 'Module.bsl:4 — Не проверено' in result and 'ExampleTable.Unknown()' in result
-    assert 'Module.bsl:6' not in result
+    assert 'Module.bsl:6 — Предупреждение — метод требует режима совместимости 8.3.25' in result
     assert 'Module.bsl:9 — Не проверено' in result and 'T.AfterBranch()' in result
     assert 'StrFind' not in result and 'Пример.Внутренняя' not in result
-    assert 'Module.bsl:17' not in result
+    assert 'Module.bsl:17 — Предупреждение — получатель' in result
     assert 'Module.bsl:19 — Ошибка' in result and 'ОпечаткаВМодуле()' in result
     module.unlink()
     assert 'нет исходного текста' in execute_tool(pm, 'check_platform_calls', {})
@@ -184,10 +185,11 @@ def test_managers_of_additional_metadata_types(project, directory, collection):
     assert 'Замечаний нет' in execute_tool(pm, 'check_platform_calls', {})
 
 
-@pytest.mark.parametrize('mode', [
-    'Version8_3_6', 'Version8_3_5', 'Version8_3_4', 'Version8_3_7', 'DontUse', '',
+@pytest.mark.parametrize(('mode', 'unavailable'), [
+    ('Version8_3_6', False), ('Version8_3_5', True), ('Version8_3_4', True),
+    ('Version8_3_7', False), ('DontUse', False), ('', False),
 ])
-def test_conflicting_compatibility_in_both_tools(project, mode):
+def test_conflicting_compatibility_in_both_tools(project, mode, unavailable):
     pm, source = project
     config = source / 'Configuration.xml'
     xml = config.read_text(encoding='utf-8')
@@ -198,9 +200,52 @@ def test_conflicting_compatibility_in_both_tools(project, mode):
     pm.reindex('demo')
     calls = execute_tool(pm, 'check_platform_calls', {})
     help_text = execute_tool(pm, 'platform_help', {'query': 'СтрШаблон'})
-    assert 'Замечаний нет' in calls
-    assert 'Недоступно' not in help_text
-    assert 'В справке указан режим 8.3.5, фактически требуется 8.3.6' in help_text
+    assert ('требует режима совместимости 8.3.6' in calls) == unavailable
+    assert ('Замечаний нет' in calls) != unavailable
+    assert ('Недоступно' in help_text) == unavailable
+
+
+@pytest.mark.parametrize(('since', 'compat', 'mode', 'min_mode'), [
+    ('8.3.6', '', '8.3.5', '8.3.6'),
+    ('8.3.6', '', '8.3.6', ''),
+    ('8.3.6', '', '8.3.7', ''),
+    ('8.3.6', '8.3.10', '8.3.7', '8.3.10'),
+    ('8.3.6', '8.3.10', '8.3.10', ''),
+])
+def test_minimum_compatibility_mode(since, compat, mode, min_mode):
+    warning = compatibility_warning(minimum_compatibility_mode(since, compat), mode)
+    expected = (f'требует режима совместимости {min_mode} или новее, '
+                f'а у конфигурации режим совместимости {mode}') if min_mode else ''
+    assert warning == expected
+
+
+@pytest.mark.parametrize(('mode', 'regex_unavailable'), [('8_3_8', True), ('8_3_9', False), ('8_3_17', False)])
+def test_verified_platform_compatibility_in_both_tools(project, mode, regex_unavailable):
+    pm, source = project
+    functions = [
+        ('СтрНайтиПоРегулярномуВыражению', 'StrFindByRegularExpression', '8.3.23'),
+        ('ВопросАсинх', 'DoQueryBoxAsync', '8.3.18'),
+        ('НачатьПодключениеРасширенияПолученияИнформацииОКомпьютере',
+         'BeginAttachingComputerInformationExtension', '8.3.18'),
+        ('НачатьУстановкуРасширенияПолученияИнформацииОКомпьютере',
+         'BeginInstallingComputerInformationExtension', '8.3.18'),
+        ('НачатьПолучениеИнформацииОСетевыхАдаптерах', 'BeginGettingNetworkAdaptersInformation', '8.3.18'),
+    ]
+    pm.platform_help.build_from_bytes(VERSION, _book([
+        (f'objects/Global context/methods/{en}.html', ru,
+         f'<h1>{ru} ({en})</h1><p class="V8SH_chapter">Использование в версии:</p>'
+         f'Доступен начиная с версии {since}.') for ru, en, since in functions
+    ]))
+    config = source / 'Configuration.xml'
+    config.write_text(config.read_text(encoding='utf-8').replace('8_3_24', mode), encoding='utf-8')
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl',
+                  ''.join(f'{en}();\n' for _, en, _ in functions))
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {})
+    assert result.count('— Предупреждение') == int(regex_unavailable)
+    for i, (ru, _, _) in enumerate(functions):
+        help_text = execute_tool(pm, 'platform_help', {'query': ru})
+        assert ('Недоступно' in help_text) == (i == 0 and regex_unavailable)
 
 
 @pytest.mark.parametrize(('opening', 'closing'), [('#If Server Then', '#EndIf'),
@@ -220,6 +265,29 @@ EndProcedure
     result = execute_tool(pm, 'check_platform_calls', {})
     assert 'Module.bsl:6 — Не проверено' in result
     assert '— Ошибка' not in result
+
+
+@pytest.mark.parametrize('second', ['Count', 'Add'])
+def test_preprocessor_can_split_call_after_dot(project, second):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', f'''Procedure Check()
+    T = New Array;
+    T.
+    #If Server Then
+        Count();
+    #Else
+        {second}();
+    #EndIf
+EndProcedure
+''')
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {})
+    if second == 'Count':
+        assert 'Замечаний нет' in result
+    else:
+        for line in (5, 7):
+            assert f'Module.bsl:{line} — Не проверено' in result
+        assert '— Ошибка' not in result
 
 
 def test_property_chain_requires_known_receiver_and_documented_member(project):
@@ -247,7 +315,7 @@ EndProcedure
     ('Толстый клиент', False), ('Client', False), ('', False),
 ])
 def test_client_availability_list(availability, warn):
-    assert bool(platform_check._restrictions([('', '', availability)], '', True, 'метод')) == warn
+    assert bool(platform_check._restrictions([('', availability)], '', True, 'метод')) == warn
 
 
 def test_external_processor_connect_on_client(project):
@@ -293,6 +361,40 @@ EndProcedure
     for line in (3, 7, 12):
         assert f'Module.bsl:{line} — Предупреждение' in result
     for line in (5, 14, 21):
+        assert f'Module.bsl:{line} —' not in result
+
+
+def test_client_context_crosses_procedure_boundaries_and_nested_branches(project):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', '''#Если Клиент Тогда
+Процедура Первая()
+    ВнешниеОбработки.Подключить(Путь);
+    #Если Сервер Тогда
+        ВнешниеОбработки.Подключить(Путь);
+    #ИначеЕсли (ТонкийКлиент Или ВебКлиент) И Не Сервер Тогда
+        ВнешниеОбработки.Подключить(Путь);
+        #Если ТонкийКлиент Тогда
+            ВнешниеОбработки.Подключить(Путь);
+        #КонецЕсли
+    #Иначе
+        ВнешниеОбработки.Подключить(Путь);
+    #КонецЕсли
+    ВнешниеОбработки.Подключить(Путь);
+КонецПроцедуры
+Процедура Вторая()
+    ВнешниеОбработки.Подключить(Путь);
+КонецПроцедуры
+#Иначе
+Процедура Третья()
+    ВнешниеОбработки.Подключить(Путь);
+КонецПроцедуры
+#КонецЕсли
+''')
+    pm.reindex('demo')
+    result = execute_tool(pm, 'check_platform_calls', {})
+    for line in (3, 7, 9, 12, 14, 17):
+        assert f'Module.bsl:{line} — Предупреждение' in result
+    for line in (5, 21):
         assert f'Module.bsl:{line} —' not in result
 
 
@@ -366,6 +468,38 @@ EndProcedure
     assert [(item['line'], item.get('missing_object')) for item in missing] == [
         (2, True), (3, True), (4, True),
     ]
+
+
+def test_incremental_reindex_resolves_manager_added_after_caller(project):
+    pm, source = project
+    caller = _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', '''Procedure Check()
+    Catalogs.Добавленный.Метод();
+    Catalogs.Добавленный.FindByCode("X");
+EndProcedure
+''')
+    pm.reindex('demo')
+    assert len(pm.broken_calls('demo')['missing']) == 2
+    assert 'Ошибка — объект метаданных' in execute_tool(pm, 'check_platform_calls', {})
+    caller_mtime = caller.stat().st_mtime_ns
+
+    config = source / 'Configuration.xml'
+    config.write_text(config.read_text(encoding='utf-8').replace(
+        '<Catalog>Пример</Catalog>', '<Catalog>Пример</Catalog><Catalog>Добавленный</Catalog>'),
+        encoding='utf-8')
+    catalog = source / 'Catalogs/Пример.xml'
+    catalog.with_name('Добавленный.xml').write_text(
+        catalog.read_text(encoding='utf-8').replace('Пример', 'Добавленный'),
+        encoding='utf-8')
+    _write_module(source, 'Catalogs/Добавленный/Ext/ManagerModule.bsl',
+                  'Процедура Метод() Экспорт\nКонецПроцедуры\n')
+    pm.reindex('demo')
+    assert caller.stat().st_mtime_ns == caller_mtime
+    assert not pm.broken_calls('demo')['missing']
+    assert 'Замечаний нет' in execute_tool(pm, 'check_platform_calls', {})
+    tree = execute_tool(pm, 'get_call_tree', {'module_name': 'ОбщийМодуль.Пример.Модуль',
+                                             'procedure_name': 'Check', 'direction': 'down'})
+    assert 'Справочник.Добавленный.МодульМенеджера.Метод' in tree
+    assert 'FindByCode' not in tree
 
 
 def test_filter_and_counts_cover_whole_report_across_pages(project):
@@ -586,7 +720,8 @@ def test_form_attribute_and_object_table_shadow_global_property(project):
     pm.reindex('demo')
     result = execute_tool(pm, 'check_platform_calls', {})
     assert 'Form/Module.bsl:3 — Не проверено' in result
-    assert 'Form/Module.bsl:7 — Ошибка' in result
+    assert 'Form/Module.bsl:7 — Предупреждение — получатель' in result
+    assert 'Ошибка — в справке нет метода типа таблицазначений' in result
     assert 'ObjectModule.bsl:2 — Не проверено' in result
 
 
@@ -652,7 +787,7 @@ Metadata.Typo();
     xml = config.read_text(encoding='utf-8')
     config.write_text(xml.replace('Version8_3_24', 'Version8_3_19'), encoding='utf-8')
     restricted = execute_tool(pm, 'check_platform_calls', {})
-    assert '— Предупреждение' not in restricted
+    assert restricted.count('требует режима совместимости 8.3.20') == 2
 
 
 def test_global_property_cannot_be_called(project):

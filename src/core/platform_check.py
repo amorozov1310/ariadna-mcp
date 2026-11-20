@@ -22,7 +22,7 @@ from .bsl_parser import (_BSL_TOKEN, _RE_MODULE_VAR_DECL, _form_context_vars,
 from .bsl_reference import module_context_vars
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
 from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, indexed_manager_objects
-from .platform_help import compatibility_warning, version_key
+from .platform_help import compatibility_warning, minimum_compatibility_mode, version_key
 
 
 _COLLECTIONS = {k.casefold(): ru for k, (ru, _) in OBJECT_TYPE_MAP.items()}
@@ -40,8 +40,9 @@ _BRANCHES = set('иначе else иначеесли elsif конецесли end
                 'конеццикла enddo исключение except конецпопытки endtry'.split())
 _STATEMENT_BOUNDARIES = set('; : тогда then иначе else цикл do попытка try исключение except'.split())
 _CONDITIONAL = re.compile(r'^\s*#\s*(if|если|elsif|иначеесли|else|иначе|endif|конецесли)\b([^/]*)')
-_CLIENT_TEST = {'client then', 'клиент тогда'}
-_SERVER_TEST = {'server then', 'сервер тогда'}
+_IF = {'if', 'если'}
+_ELSE = {'else', 'иначе'}
+_ENDIF = {'endif', 'конецесли'}
 _CLIENT_DIRECTIVES = {'&наклиенте', '&atclient'}
 _SERVER_DIRECTIVES = {'&насервере', '&atserver', '&насерверебезконтекста', '&atservernocontext'}
 _SERVER_CONTEXTS = {
@@ -78,6 +79,133 @@ class _Call:
     # None — имя может быть глобальным, '' — локальная переменная неизвестного типа.
     binding: str | None
     client: bool
+    split_receiver: bool = False
+
+
+_CLIENT_TARGETS = (
+    ('thinclient', 'тонкийклиент'), ('webclient', 'вебклиент'),
+    ('thickclientmanagedapplication', 'толстыйклиентуправляемоеприложение'),
+    ('thickclientordinaryapplication', 'толстыйклиентобычноеприложение'),
+    ('mobileclient', 'мобильныйклиент'), ('mobileappclient', 'мобильноеприложениеклиент'),
+)
+_SERVER_TARGETS = (
+    ('server', 'сервер'), ('mobileappserver', 'мобильноеприложениесервер'),
+    ('mobilestandaloneserver', 'мобильныйавтономныйсервер'),
+)
+_TARGETS = (*_CLIENT_TARGETS, *_SERVER_TARGETS, ('externalconnection', 'внешнеесоединение'))
+_CLIENT = (1 << len(_CLIENT_TARGETS)) - 1
+_SERVER = ((1 << len(_SERVER_TARGETS)) - 1) << len(_CLIENT_TARGETS)
+_ALL_TARGETS = (1 << len(_TARGETS)) - 1
+_SYMBOLS = {name: 1 << i for i, aliases in enumerate(_TARGETS) for name in aliases}
+_SYMBOLS.update(dict.fromkeys(('client', 'atclient', 'клиент', 'наклиенте'), _CLIENT))
+_SYMBOLS.update(dict.fromkeys(('server', 'atserver', 'сервер', 'насервере'), _SERVER))
+_CONDITION_TOKEN = re.compile(r'\w+|[^\s]')
+
+
+@lru_cache(maxsize=512)
+def _condition_targets(expression):
+    """Маски сред, где условие может быть истинным или ложным."""
+    tokens = iter(_CONDITION_TOKEN.findall(expression))
+    token = next(tokens, '')
+
+    def consume():
+        nonlocal token
+        value, token = token, next(tokens, '')
+        return value
+
+    def atom():
+        value = consume()
+        if value in {'not', 'не'}:
+            yes, no = atom()
+            return no, yes
+        if value == '(':
+            result = disjunction()
+            if consume() != ')':
+                raise ValueError
+            return result
+        if not value.isidentifier():
+            raise ValueError
+        mask = _SYMBOLS.get(value)
+        return (_ALL_TARGETS, _ALL_TARGETS) if mask is None else (mask, _ALL_TARGETS ^ mask)
+
+    def conjunction():
+        yes, no = atom()
+        while token in {'and', 'и'}:
+            consume()
+            right_yes, right_no = atom()
+            yes, no = yes & right_yes, no | right_no
+        return yes, no
+
+    def disjunction():
+        yes, no = conjunction()
+        while token in {'or', 'или'}:
+            consume()
+            right_yes, right_no = conjunction()
+            yes, no = yes | right_yes, no & right_no
+        return yes, no
+
+    try:
+        result = disjunction()
+        if token in {'then', 'тогда'} and not next(tokens, ''):
+            return result
+    except (ValueError, RecursionError):
+        pass
+    return _ALL_TARGETS, _ALL_TARGETS
+
+
+class _Preprocessor:
+    """Текущая ветка и среды, оставшиеся для следующих веток каждого #Если."""
+
+    def __init__(self):
+        self.targets = _ALL_TARGETS
+        self.stack = []
+
+    def switch(self, branch, expression):
+        if branch in _IF:
+            self.stack.append((self.targets, self.targets))
+        if not self.stack:
+            return
+        if branch in _ENDIF:
+            self.targets, _ = self.stack.pop()
+            return
+        outer, remaining = self.stack[-1]
+        yes, no = (_ALL_TARGETS, 0) if branch in _ELSE else _condition_targets(expression.strip())
+        self.targets = remaining & yes
+        self.stack[-1] = outer, remaining & no
+
+
+def _split_receivers(words):
+    """Восстанавливает связь после точки, которую разделили ветки #Если."""
+    previous = {-1}
+    stack, followers, split = [], defaultdict(set), {}
+    for i, word in enumerate(words):
+        if word.lstrip().startswith('#'):
+            if condition := _CONDITIONAL.match(word):
+                branch = condition[1]
+                if branch in _IF:
+                    stack.append((previous, set(), False))
+                elif stack:
+                    entry, exits, has_else = stack[-1]
+                    exits.update(previous)
+                    if branch in _ENDIF:
+                        stack.pop()
+                        previous = exits if has_else else exits | entry
+                    else:
+                        previous = entry
+                        stack[-1] = entry, exits, branch in _ELSE
+            continue
+        dots = {p for p in previous if p >= 0 and words[p] == '.'}
+        for dot in dots:
+            followers[dot].add(i)
+        if dots and previous != {i - 1}:
+            split[i] = next(iter(dots)) if len(previous) == 1 else None
+        previous = {i}
+    # Тип получателя можно перенести через развилку только при одном и том же
+    # имени метода во всех ветках, которые продолжают выражение после точки.
+    stable = {dot for dot in set(split.values()) - {None}
+              if len({words[h] for h in followers[dot]}) == 1
+              and all(words[h + 1:h + 2] == ['('] for h in followers[dot])}
+    return {head: dot if dot in stable else None for head, dot in split.items()}
 
 
 class _Vocabulary:
@@ -108,43 +236,48 @@ class _Vocabulary:
                         self.owners.update(owners)
                         if any('<' in name for name in names):
                             self.dynamic_owners.update(owners)
+                min_mode = minimum_compatibility_mode(since, compat, en if kind == 'function' else '')
+                entry = (min_mode, availability)
                 for name in names:
                     if kind == 'global_property':
                         self.properties[name] = value_type.casefold() if value_type.isidentifier() else ''
-                        self.property_entries[name].append((since, compat, availability))
+                        self.property_entries[name].append(entry)
                     elif kind == 'property':
                         for owner in owners:
                             self.member_properties[owner, name].add(
-                                (value_type.casefold(), since, compat, availability))
+                                (value_type.casefold(), *entry))
                     else:
                         for owner in owners:
-                            self.members[owner, name].append((since, compat, availability))
+                            self.members[owner, name].append(entry)
         for owners, names, since, availability in _METHODS_OUTSIDE_HELP:
             if since and version_key(since) > version_key(index.version):
                 continue
             for owner in owners:
                 if not owner or owner in self.owners:
                     for name in names:
-                        self.members.setdefault((owner, name), [(since, '', availability)])
+                        self.members.setdefault((owner, name), [(since, availability)])
 
 
-def _sites(body, first_line, params, bindings, context):
+def _sites(body, first_line, params, bindings, context, preprocessor):
     """Вызовы с позицией в тексте, получателем и доказанным типом переменной."""
     tokens = [m for m in _BSL_TOKEN.finditer(body) if not m[0].startswith('//')]
     words = [m[0].casefold() for m in tokens]
     stack, pairs = [], {}
+    has_split = False
     for i, word in enumerate(words):
         if word == '(':
             stack.append(i)
         elif word == ')' and stack:
             pairs[stack.pop()] = i
+        elif word == '.' and i + 1 < len(words) and words[i + 1].lstrip().startswith('#'):
+            has_split = True
+    split = _split_receivers(words) if has_split else {}
+    split_dots = set(split.values()) - {None}
     # В том числе многострочная сигнатура и скобки в строках по умолчанию.
     start = 0
     if params is not None:
         signature = words.index('(') if '(' in words else -1
-        if signature not in pairs:
-            return
-        start = pairs[signature] + 1
+        start = pairs[signature] + 1 if signature in pairs else len(words)
         if start < len(words) and words[start] in {'экспорт', 'export'}:
             start += 1
     newlines = [m.start() for m in re.finditer('\n', body)]
@@ -152,11 +285,14 @@ def _sites(body, first_line, params, bindings, context):
     locals_ = _parse_param_names(params or '') | bindings
     assignments = {}
     execute_pending = False
-    scopes = []
-    client = context is True
-    may_run_on_client = context is not False
-    for i in range(start, len(words) - 1):
-        word, after = words[i:i + 2]
+    dot_calls = {}
+    procedure_targets = _ALL_TARGETS if context is None else _CLIENT if context else _ALL_TARGETS ^ _CLIENT
+    for i, word in enumerate(words):
+        if word.lstrip().startswith('#') and (condition := _CONDITIONAL.match(word)):
+            preprocessor.switch(*condition.groups())
+        if i < start or i + 1 == len(words):
+            continue
+        after = words[i + 1]
         before = words[i - 1] if i else ''
         if i in assignments:
             var, owner = assignments.pop(i)
@@ -167,24 +303,12 @@ def _sites(body, first_line, params, bindings, context):
         # Через развилки, метки и директивы препроцессора тип не переносим.
         if before != '.' and (word in _BRANCHES or word.lstrip().startswith(('#', '~'))):
             types.clear()
-        if word.lstrip().startswith('#') and (condition := _CONDITIONAL.match(word)):
-            # Только простые условия доказывают, что ветка клиентская.
-            branch, test = condition[1], ' '.join(condition[2].split())
-            if branch in {'if', 'если'}:
-                scopes.append((client, may_run_on_client, True))
-            if scopes:
-                outer_client, outer_possible, remaining = scopes[-1]
-                if branch in {'endif', 'конецесли'}:
-                    scopes.pop()
-                    client, may_run_on_client = outer_client, outer_possible
-                else:
-                    possible = outer_possible and remaining
-                    may_run_on_client = possible and test not in _SERVER_TEST
-                    client = possible and test in _CLIENT_TEST
-                    if branch in {'else', 'иначе'}:
-                        client = outer_client and possible
-                    if test in _CLIENT_TEST:
-                        scopes[-1] = outer_client, outer_possible, False
+        if i in split_dots:
+            j = i - 1
+            while j >= 2 and words[j - 1] == '.' and words[j - 2].isidentifier():
+                j -= 2
+            if j >= 0 and words[j].isidentifier() and (not j or words[j - 1] != '.'):
+                dot_calls[i] = (words[j:i:2], types.get(words[j], '' if words[j] in locals_ else None))
         if not word.isidentifier():
             continue
         # Директива может разрывать выражение. Сомнение в границе оператора
@@ -213,7 +337,7 @@ def _sites(body, first_line, params, bindings, context):
         elif before in {'(', ','} and after in {')', ','}:
             # Переменная в позиции аргумента может быть изменена по ссылке.
             types.pop(word, None)
-        if after != '(' or (before != '.' and (word in _KEYWORDS or before in _NEW)):
+        if after != '(' or (before != '.' and i not in split and (word in _KEYWORDS or before in _NEW)):
             continue
         j = i
         while j >= 2 and words[j - 1] == '.' and words[j - 2].isidentifier():
@@ -225,12 +349,16 @@ def _sites(body, first_line, params, bindings, context):
             # Для цепочки после результата выражения показываем исходную строку.
             receiver = ['…', *receiver]
             offset = body.rfind('\n', 0, offset) + 1
+        ambiguous = i in split and split[i] not in dot_calls
+        if i in split and not ambiguous:
+            receiver, binding = dot_calls[split[i]]
         end = tokens[pairs.get(i + 1, i + 1)].end()
         snippet = ' '.join(body[offset:min(end, offset + 160)].split())
         if offset + 160 < end:
             snippet += '…'
+        targets = preprocessor.targets & procedure_targets
         yield _Call(first_line + bisect_right(newlines, tokens[i].start()), snippet, word,
-                    receiver, binding, client)
+                    receiver, binding, bool(targets) and not targets & ~_CLIENT, ambiguous)
 
 
 @lru_cache(maxsize=128)
@@ -242,11 +370,11 @@ def _server_only(availability):
 def _restrictions(entries, mode, client, subject):
     reasons = []
     if mode and entries:
-        warnings = [compatibility_warning(since, compat, mode) for since, compat, _ in entries]
+        warnings = [compatibility_warning(min_mode, mode) for min_mode, _ in entries]
         if all(warnings):
             reasons.append(subject + ' ' + warnings[0])
-    if client and entries and all(_server_only(a) for _, _, a in entries):
-        if all(a.strip().casefold() in {'сервер', 'server'} for _, _, a in entries):
+    if client and entries and all(_server_only(a) for _, a in entries):
+        if all(a.strip().casefold() in {'сервер', 'server'} for _, a in entries):
             reasons.append(f'{subject} доступен только на сервере, а вызов выполняется на клиенте')
         else:
             reasons.append(f'{subject} недоступен на клиенте, а вызов выполняется на клиенте')
@@ -254,6 +382,8 @@ def _restrictions(entries, mode, client, subject):
 
 
 def _diagnosis(call, module, declarations, globals_, objects, vocab, mode):
+    if call.split_receiver:
+        return 'Не проверено — препроцессор разделяет получателя и имя метода'
     name, receiver = call.name, call.receiver
     owner = ''
     implicit = False
@@ -388,9 +518,10 @@ class _Report:
         for line in lines[:header_end]:
             if match := _RE_MODULE_VAR_DECL.match(line.lstrip()):
                 bindings.update(part.split()[0].casefold() for part in match[1].split(',') if part.strip())
+        preprocessor = _Preprocessor()
         for first, body, params, directive, context in _regions(lines, procedures):
             visible = bindings | _form_context_vars(directive, form_attrs)
-            for call in _sites(body, first, params, visible, context):
+            for call in _sites(body, first, params, visible, context, preprocessor):
                 message = _diagnosis(call, mod['name_cf'], self.declarations,
                                      self.globals, self.objects, self.vocab, self.mode)
                 if message:
