@@ -442,12 +442,24 @@ Catalogs.Проба.GetPredefinedItemName(Ссылка);
 Запись.УстановитьСтроку(ТипКаноническогоXML.КаноническийXML);
 Writer = New XMLCanonicalizingWriter;
 Writer.SetString(ТипКаноническогоXML.КаноническийXML);
+ОбработкаСтрокиXML.УдалитьНедопустимыеСимволыXML("Проба");
+XMLStringProcessing.DeleteDisallowedXMLCharacters("Проба");
+Преобразователь = Новый ПреобразованиеXSL;
+Преобразователь.ЗагрузитьИзСтроки("Проба");
+Преобразователь.LoadFromString("Проба");
+ПолучитьИнформациюОСетевыхАдаптерах();
+GetNetworkAdaptersInformation();
 Metadata.Typo();
 ''')
     pm.reindex('demo')
     result = execute_tool(pm, 'check_platform_calls', {})
-    assert result.count('— Ошибка') == 1 and 'Module.bsl:11 — Ошибка' in result
+    assert result.count('— Ошибка') == 1 and 'Module.bsl:18 — Ошибка' in result
     assert 'Metadata.Typo()' in result
+    config = source / 'Configuration.xml'
+    xml = config.read_text(encoding='utf-8')
+    config.write_text(xml.replace('Version8_3_24', 'Version8_3_19'), encoding='utf-8')
+    restricted = execute_tool(pm, 'check_platform_calls', {})
+    assert restricted.count('метод появился в 8.3.20') == 2
 
 
 def test_global_property_cannot_be_called(project):

@@ -20,7 +20,7 @@ from .bsl_parser import _RE_MODULE_VAR_DECL, _form_context_vars, _parse_param_na
 from .bsl_reference import module_context_vars
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
 from .metadata_model import OBJECT_TYPE_MAP
-from .platform_help import compatibility_warning
+from .platform_help import compatibility_warning, version_key
 
 
 _COLLECTIONS = {k.casefold(): ru for k, (ru, _) in OBJECT_TYPE_MAP.items()}
@@ -52,11 +52,18 @@ _SERVER_CONTEXTS = {
 # проверены вызовом в учебной базе на 8.3.27.2170.
 _METHODS_OUTSIDE_HELP = (
     (('справочникменеджер', 'catalogmanager'),
-     ('получитьимяпредопределенного', 'getpredefineditemname'), 'Сервер, толстый клиент, внешнее соединение'),
+     ('получитьимяпредопределенного', 'getpredefineditemname'), '', 'Сервер, толстый клиент, внешнее соединение'),
     (('объектметаданныхконфигурация', 'configurationmetadataobject'),
-     ('представление', 'presentation', 'полноеимя', 'fullname'), ''),
+     ('представление', 'presentation', 'полноеимя', 'fullname'), '', ''),
     (('каноническаязаписьxml', 'xmlcanonicalizingwriter'),
-     ('установитьстроку', 'setstring'), ''),
+     ('установитьстроку', 'setstring'), '', ''),
+    (('менеджеробработкистрокиxml', 'xmlstringprocessingmanager'),
+     ('удалитьнедопустимыесимволыxml', 'deletedisallowedxmlcharacters'), '8.3.20', ''),
+    (('преобразованиеxsl', 'xsltransform'),
+     ('загрузитьизстроки', 'loadfromstring', 'загрузитьизузла', 'loadfromnode',
+      'загрузитьизфайла', 'loadfromfile'), '', 'Тонкий клиент, сервер, толстый клиент, внешнее соединение'),
+    (('',), ('получитьинформациюосетевыхадаптерах', 'getnetworkadaptersinformation'),
+     '8.3.18', 'Тонкий клиент, веб-клиент, толстый клиент'),
 )
 
 
@@ -103,11 +110,13 @@ class _Vocabulary:
                     else:
                         for owner in owners:
                             self.members[owner, name].append((since, compat, availability))
-        for owners, names, availability in _METHODS_OUTSIDE_HELP:
+        for owners, names, since, availability in _METHODS_OUTSIDE_HELP:
+            if since and version_key(since) > version_key(index.version):
+                continue
             for owner in owners:
-                if owner in self.owners:
+                if not owner or owner in self.owners:
                     for name in names:
-                        self.members.setdefault((owner, name), [('', '', availability)])
+                        self.members.setdefault((owner, name), [(since, '', availability)])
 
 
 def _without_deletions(source):

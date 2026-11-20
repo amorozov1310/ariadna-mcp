@@ -85,6 +85,10 @@ def context_book(description='Учебное описание.'):
     page('objects/ConfigurationMetadataObject.html', 'ОбъектМетаданныхКонфигурация',
          'ConfigurationMetadataObject')
     page('objects/XMLCanonicalizingWriter.html', 'КаноническаяЗаписьXML', 'XMLCanonicalizingWriter')
+    page('objects/XSLTransform.html', 'ПреобразованиеXSL', 'XSLTransform')
+    page('objects/XMLStringProcessingManager.html', 'МенеджерОбработкиСтрокиXML', 'XMLStringProcessingManager')
+    page('objects/Global context/properties/XMLStringProcessing.html',
+         'ОбработкаСтрокиXML', 'XMLStringProcessing', value_type='МенеджерОбработкиСтрокиXML')
     page('objects/Global context/properties/Metadata.html', 'Метаданные', 'Metadata',
          value_type='ОбъектМетаданныхКонфигурация')
     page('objects/Global context/properties/ExternalDataProcessors.html',
