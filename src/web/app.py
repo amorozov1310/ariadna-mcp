@@ -18,7 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from ..core.db import IndexRemovedError
 from ..core.manifest import project_manifest as build_manifest, project_readiness, readiness
 from ..core.project_manager import ProjectManager, ProjectNotFoundError
-from ..security import NetworkLicenseMiddleware, web_allowed_hosts
+from ..security import LOCAL_BIND_NOTICE, NetworkLicenseMiddleware, web_allowed_hosts
 
 logger = logging.getLogger('ariadna')
 
@@ -357,5 +357,7 @@ def _network_license_valid() -> bool:
 
 
 templates.env.globals['network_license_valid'] = _network_license_valid
+templates.env.globals['local_bind_notice'] = LOCAL_BIND_NOTICE
 # Добавляем после middleware авторизации, чтобы запрос сначала проверялся здесь.
-app.add_middleware(NetworkLicenseMiddleware, license_valid=_network_license_valid)
+app.add_middleware(NetworkLicenseMiddleware, license_valid=_network_license_valid,
+                   check_local_interface=lambda: getattr(app.state, 'check_local_interface', False))

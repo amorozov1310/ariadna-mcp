@@ -33,6 +33,7 @@ import sys
 import threading
 from dataclasses import asdict, dataclass
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 
 from .core.fsretry import replace_with_retry
@@ -122,31 +123,32 @@ def check(info: LicenseInfo, released: date | None = None) -> LicenseState:
 
 
 class LicenseStore:
-    """Ключ в `<data_dir>/license.key`; перечитывается при изменении файла."""
+    """Ключ в `<data_dir>/license.key`; подпись проверяется при изменении содержимого."""
 
     def __init__(self, data_dir: str | Path):
         self.path = Path(data_dir) / FILENAME
         self._lock = threading.Lock()
-        self._mtime = None
+        self._digest: bytes | None = None
         self._state = LicenseState('none', 'ключа нет — командный режим не включён')
 
     def state(self) -> LicenseState:
         with self._lock:
             try:
-                mtime = self.path.stat().st_mtime_ns
+                content = self.path.read_bytes()
             except FileNotFoundError:
-                mtime = None
+                content = None
             except OSError as e:
                 return LicenseState('invalid', f'ключ не принят: {e}')
-            if mtime != self._mtime:
-                self._mtime = mtime
-                if mtime is None:
+            digest = sha256(content).digest() if content is not None else None
+            if digest != self._digest:
+                if content is None:
                     self._state = LicenseState('none', 'ключа нет — командный режим не включён')
                 else:
                     try:
-                        self._state = check(parse(self.path.read_text(encoding='utf-8')))
+                        self._state = check(parse(content.decode('utf-8')))
                     except (LicenseError, OSError, UnicodeDecodeError) as e:
                         self._state = LicenseState('invalid', f'ключ не принят: {e}')
+                self._digest = digest
             return self._state
 
     def install(self, text: str) -> LicenseState:

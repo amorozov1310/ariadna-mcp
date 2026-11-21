@@ -30,7 +30,7 @@ RUN mkdir -p /data/projects /index
 ENV DATA_DIR=/data
 # Внутри контейнера — на всех интерфейсах (проброс портов); наружу порты
 # открывает только BIND_ADDR в docker-compose.yml (по умолчанию 127.0.0.1).
-# Без Docker по умолчанию 127.0.0.1 (src/main.py:_listen_addr).
+# Без Docker по умолчанию 127.0.0.1 (src/main.py).
 ENV LISTEN_ADDR=0.0.0.0
 ENV MCP_HTTP_PORT=9879
 ENV WEB_PORT=9878
