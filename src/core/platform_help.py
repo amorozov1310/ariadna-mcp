@@ -694,9 +694,63 @@ def _read_counts(meta: dict[str, str]) -> dict[str, int]:
 
 _KIND_ORDER = {'function': 0, 'type': 1, 'global_property': 2, 'method': 3, 'property': 4,
                'ctor': 5, 'event': 6, 'query': 7}
-_MANAGER_TYPES = {plural.casefold(): (ru + 'Менеджер').casefold()
-                  for plural, (ru, _) in OBJECT_TYPE_MAP.items()}
+COLLECTION_KINDS = {plural.casefold(): ru.casefold()
+                    for plural, (ru, _) in OBJECT_TYPE_MAP.items()}
+COLLECTION_MANAGER_TYPES = {plural.casefold(): ((ru + 'Менеджер').casefold(), (en + 'Manager').casefold())
+                            for plural, (ru, en) in OBJECT_TYPE_MAP.items()}
 _WORD = re.compile(r'[\wёЁ]+')
+_CONSTRUCTOR = re.compile(r'(?:новый|new)\s+([^\s()][^()]*)(?:\(.*\))?', re.S)
+
+# Методы платформы, отсутствующие в shcntx. GetPredefinedItemName оставлен
+# для совместимости (описание изменений платформы 8.3.3). Остальные методы
+# проверены вызовом в учебной базе на 8.3.27.2170.
+_METHODS_OUTSIDE_HELP = (
+    (('справочникменеджер', 'catalogmanager',
+      'планвидовхарактеристикменеджер', 'chartofcharacteristictypesmanager',
+      'плансчетовменеджер', 'chartofaccountsmanager',
+      'планвидоврасчетаменеджер', 'chartofcalculationtypesmanager'),
+     ('получитьимяпредопределенного', 'getpredefineditemname'), '', 'Сервер, толстый клиент, внешнее соединение'),
+    (('объектметаданныхконфигурация', 'configurationmetadataobject'),
+     ('представление', 'presentation', 'полноеимя', 'fullname'), '', ''),
+    (('каноническаязаписьxml', 'xmlcanonicalizingwriter'),
+     ('установитьстроку', 'setstring'), '', ''),
+    (('менеджеробработкистрокиxml', 'xmlstringprocessingmanager'),
+     ('удалитьнедопустимыесимволыxml', 'deletedisallowedxmlcharacters'), '8.3.20', ''),
+    (('преобразованиеxsl', 'xsltransform'),
+     ('загрузитьизстроки', 'loadfromstring', 'загрузитьизузла', 'loadfromnode',
+      'загрузитьизфайла', 'loadfromfile'), '', 'Тонкий клиент, сервер, толстый клиент, внешнее соединение'),
+    (('',), ('получитьинформациюосетевыхадаптерах', 'getnetworkadaptersinformation'),
+     '8.3.18', 'Тонкий клиент, веб-клиент, толстый клиент'),
+)
+
+
+def owner_type(owner: str) -> str:
+    """Тип владельца из справки без шаблона имени объекта метаданных."""
+    return owner.partition('.<')[0]
+
+
+def _owner_names(owner: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Точные имена RU/EN и имена типов, для которых подходят страницы с шаблоном."""
+    root, _, item = owner.partition('.')
+    if root.isidentifier() and item.isidentifier():
+        if managers := COLLECTION_MANAGER_TYPES.get(root):
+            return managers, managers
+        return (owner, owner), (root, root)
+    return (owner, owner), (owner, owner)
+
+
+def methods_outside_help(version: str):
+    """Известные вызовы без страницы справки, доступные в указанной версии."""
+    for owners, names, since, availability in _METHODS_OUTSIDE_HELP:
+        if not since or version_key(since) <= version_key(version):
+            yield owners, names, since, availability
+
+
+def is_method_outside_help(owner: str, name: str, version: str) -> bool:
+    _, types = _owner_names(owner.casefold())
+    name = name.casefold()
+    return any(name in names and any(t in owners for t in types)
+               for owners, names, _, _ in methods_outside_help(version))
 
 
 @dataclass
@@ -752,8 +806,8 @@ class PlatformHelp:
 
     def search(self, query: str, kind: str | None = None, limit: int = 10,
                offset: int = 0) -> tuple[list[HelpEntry], bool]:
-        """Поиск: точное «Тип.Метод» / имя (RU или EN), иначе — по словам
-        (имена, разделы, описание). Возвращает (страница, есть ли продолжение)."""
+        """Точное имя (RU или EN) с приоритетом BSL, затем поиск по словам.
+        Возвращает (страница, есть ли продолжение)."""
         with closing(sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             return self._search(conn, query, kind, max(1, limit), max(0, offset))
@@ -764,19 +818,16 @@ class PlatformHelp:
             return [], False
         cf = query.casefold()
         kind = KIND_ALIASES.get((kind or '').strip().casefold(), kind)
-        ctor = re.fullmatch(r'(?:новый|new)\s+(.+)', cf)
+        ctor = _CONSTRUCTOR.fullmatch(cf)
         owner, dot, name = cf.rpartition('.')
         if ctor:
             if kind and kind != 'ctor':
                 return [], False
-            owner, name, kind = ctor[1], '', 'ctor'
+            owner, name, kind = ctor[1].strip(), '', 'ctor'
         elif dot:
-            owner, name = owner.strip(), name.strip()
+            owner, name = '.'.join(part.strip() for part in owner.split('.')), name.strip()
             if not owner or not name:
                 return [], False
-            collection, sep, obj = owner.partition('.')
-            if sep and obj.isidentifier() and collection in _MANAGER_TYPES:
-                owner = _MANAGER_TYPES[collection]
 
         conditions, params = [], []
         if kind:
@@ -785,11 +836,19 @@ class PlatformHelp:
         if owner:
             conditions.append("""(owner_ru_cf = ? OR owner_en_cf = ? OR
                                   owner_ru_cf LIKE ? ESCAPE '!' OR owner_en_cf LIKE ? ESCAPE '!')""")
-            pattern = owner.replace('!', '!!').replace('%', '!%').replace('_', '!_') + '.<%>'
-            params.extend([owner, owner, pattern, pattern])
+            exact, template = _owner_names(owner)
+            params.extend(exact)
+            params.extend(t.replace('!', '!!').replace('%', '!%').replace('_', '!_') + '.<%>'
+                          for t in template)
         if name:
             conditions.append('(name_ru_cf = ? OR name_en_cf = ?)')
             params.extend([name, name])
+            if not kind and not owner:
+                # У одноимённой функции языка запросов отдельная карточка (kind="query").
+                conditions.append("""(kind != 'query' OR NOT EXISTS (
+                    SELECT 1 FROM entries WHERE kind != 'query' AND (name_ru_cf = ? OR name_en_cf = ?)
+                ))""")
+                params.extend([name, name])
         where = ' AND '.join(conditions)
         order = "CASE kind " + ' '.join(f"WHEN '{k}' THEN {v}" for k, v in _KIND_ORDER.items()) + " END"
         rows = conn.execute(f"SELECT * FROM entries WHERE {where} ORDER BY {order}, owner_ru_cf, id "

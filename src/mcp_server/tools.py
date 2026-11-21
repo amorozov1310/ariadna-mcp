@@ -14,8 +14,8 @@ import sqlite3
 from ..core.parser_fingerprint import index_uses_old_parser
 from ..core.platform_check import (LEVELS, ReportUnavailable, check_calls, check_index,
                                    old_index_message)
-from ..core.platform_help import KINDS, KIND_ALIASES, format_entry
-from ..core.project_manager import ProjectManager, ReindexInProgressError
+from ..core.platform_help import KINDS, KIND_ALIASES, format_entry, is_method_outside_help
+from ..core.project_manager import PROJECT_GONE, ProjectManager, ReindexInProgressError
 from ..core.search import format_search_results, format_object_details
 from . import semantic_search
 
@@ -471,6 +471,32 @@ def _project_help(pm: ProjectManager, project, version: str = ''):
     return help_index
 
 
+def _help_miss_hint(pm: ProjectManager, project, query: str, version: str, kind: str) -> str:
+    parts = [part.strip() for part in query.removesuffix('()').split('.')]
+    if kind not in ('', 'function', 'method') or not all(part.isidentifier() for part in parts):
+        return ''
+    name = parts[-1]
+    owner = '.'.join(parts[:-1])
+    if project and project.index_stats.total_procedures:
+        try:
+            matches = pm.get_search(project.id).search_procedures(name, module_filter=owner or None,
+                                                                  exact=True, limit=6)
+        except PROJECT_GONE:
+            matches = []
+        if matches:
+            locations = ', '.join(
+                f'«{row["module_name"]}» (строка {row["start_line"]})'
+                for row in matches[:5]
+            )
+            more = ' и другие' if len(matches) > 5 else ''
+            modules = 'модуле' if len(matches) == 1 else 'модулях'
+            return (f' В индексе проекта «{project.id}» найдено объявление «{matches[0]["name"]}» '
+                    f'в {modules} {locations}{more}. Используйте search_procedures или search_code.')
+    if (not kind or kind == ('method' if owner else 'function')) and is_method_outside_help(owner, name, version):
+        return ' Этот вызов относится к платформе и отсутствует в синтакс-помощнике.'
+    return ' Вероятно, это процедура конфигурации. Ищите через search_procedures или search_code.'
+
+
 def _platform_help(pm: ProjectManager, args: dict) -> str:
     project_id = (args.get('project_id') or '').strip()
     requested_version = (args.get('version') or '').strip()
@@ -505,10 +531,9 @@ def _platform_help(pm: ProjectManager, args: dict) -> str:
     if not entries:
         if offset:
             return f'Справка {version}: при offset={offset} записей больше нет.'
-        msg = f'В справке платформы {version} нет записи «{query}».'
-        if all(part.isidentifier() for part in query.removesuffix('()').split('.')):
-            msg += ' Вероятно, это метод конфигурации. Ищите через search_procedures или search_code.'
-        return msg
+        hint = _help_miss_hint(pm, project if project_id else None, query, version,
+                               KIND_ALIASES.get(kind, kind))
+        return f'В справке платформы {version} нет записи «{query}».' + hint
     mode = pm.platform_mode(project.id) if project else ''
     parts = [f'Справка платформы {version}', *(format_entry(e, mode=mode) for e in entries)]
     if more:

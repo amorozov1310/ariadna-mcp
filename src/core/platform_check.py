@@ -33,17 +33,17 @@ from .bsl_reference import module_context_vars
 from .db import IndexRemovedError
 from .fsretry import replace_with_retry, retry_on_permission_error
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
-from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, canonicalize_kind, indexed_manager_objects
+from .metadata_model import MANAGER_OBJECT_KINDS, canonicalize_kind, indexed_manager_objects
 from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
-from .platform_help import (compatibility_warning, fingerprint as help_fingerprint,
-                            minimum_compatibility_mode, read_meta, version_key)
+from .platform_help import (COLLECTION_KINDS, COLLECTION_MANAGER_TYPES, compatibility_warning,
+                            fingerprint as help_fingerprint, methods_outside_help,
+                            minimum_compatibility_mode, owner_type, read_meta)
 from .xml_walker import IO_THREADS
 
 
 logger = logging.getLogger('ariadna')
 
 
-_COLLECTIONS = {k.casefold(): ru.casefold() for k, (ru, _) in OBJECT_TYPE_MAP.items()}
 _KEYWORDS = set("""
     если if тогда then иначе else иначеесли elsif конецесли endif для for каждого each
     из in по to цикл do конеццикла enddo пока while попытка try исключение except
@@ -78,29 +78,6 @@ _SERVER_CONTEXTS = {
     'server', 'external connection', 'mobile application (server)', 'mobile standalone server',
     'интеграция', 'integration',
 }
-# Методы платформы, отсутствующие в shcntx. GetPredefinedItemName оставлен
-# для совместимости (описание изменений платформы 8.3.3). Остальные методы
-# проверены вызовом в учебной базе на 8.3.27.2170.
-_METHODS_OUTSIDE_HELP = (
-    (('справочникменеджер', 'catalogmanager',
-      'планвидовхарактеристикменеджер', 'chartofcharacteristictypesmanager',
-      'плансчетовменеджер', 'chartofaccountsmanager',
-      'планвидоврасчетаменеджер', 'chartofcalculationtypesmanager'),
-     ('получитьимяпредопределенного', 'getpredefineditemname'), '', 'Сервер, толстый клиент, внешнее соединение'),
-    (('объектметаданныхконфигурация', 'configurationmetadataobject'),
-     ('представление', 'presentation', 'полноеимя', 'fullname'), '', ''),
-    (('каноническаязаписьxml', 'xmlcanonicalizingwriter'),
-     ('установитьстроку', 'setstring'), '', ''),
-    (('менеджеробработкистрокиxml', 'xmlstringprocessingmanager'),
-     ('удалитьнедопустимыесимволыxml', 'deletedisallowedxmlcharacters'), '8.3.20', ''),
-    (('преобразованиеxsl', 'xsltransform'),
-     ('загрузитьизстроки', 'loadfromstring', 'загрузитьизузла', 'loadfromnode',
-      'загрузитьизфайла', 'loadfromfile'), '', 'Тонкий клиент, сервер, толстый клиент, внешнее соединение'),
-    (('',), ('получитьинформациюосетевыхадаптерах', 'getnetworkadaptersinformation'),
-     '8.3.18', 'Тонкий клиент, веб-клиент, толстый клиент'),
-)
-
-
 @dataclass
 class _Call:
     line: int
@@ -263,7 +240,7 @@ class _Vocabulary:
                     continue
                 owners = {''}
                 if kind in ('method', 'property'):
-                    owners = {s.partition('.<')[0] for s in (owner_ru, owner_en) if s}
+                    owners = {owner_type(s) for s in (owner_ru, owner_en) if s}
                     if kind == 'method':
                         self.owners.update(owners)
                         if any('<' in name for name in names):
@@ -281,9 +258,7 @@ class _Vocabulary:
                     else:
                         for owner in owners:
                             self.members[owner, name].append(entry)
-        for owners, names, since, availability in _METHODS_OUTSIDE_HELP:
-            if since and version_key(since) > version_key(index.version):
-                continue
+        for owners, names, since, availability in methods_outside_help(index.version):
             for owner in owners:
                 if not owner or owner in self.owners:
                     for name in names:
@@ -302,9 +277,9 @@ def _metadata_lookup(words, roots, aliases):
                 if kind.isidentifier() and name.isidentifier():
                     return f'{canonicalize_kind(kind).casefold()}.{name}'
         case [root, '.', collection, '.', method, '(', arg, ')'] if (
-                root in roots and collection in _COLLECTIONS and method in {'найти', 'find'}):
+                root in roots and collection in COLLECTION_KINDS and method in {'найти', 'find'}):
             if arg.startswith('"') and arg.endswith('"') and arg[1:-1].isidentifier():
-                return f'{_COLLECTIONS[collection]}.{arg[1:-1]}'
+                return f'{COLLECTION_KINDS[collection]}.{arg[1:-1]}'
 
 
 def _metadata_condition(words, roots, aliases):
@@ -328,11 +303,11 @@ def _metadata_condition(words, roots, aliases):
         case [undef, '<', '>', *lookup] if undef in _UNDEFINED:
             return _metadata_lookup(lookup, roots, aliases), not negated
         case [root, '.', collection, '.', method, '(', *arg, ')'] if (
-                root in roots and collection in _COLLECTIONS and method in {'содержит', 'contains'}):
-            kind = _COLLECTIONS[collection]
+                root in roots and collection in COLLECTION_KINDS and method in {'содержит', 'contains'}):
+            kind = COLLECTION_KINDS[collection]
             match arg:
                 case [arg_root, '.', arg_collection, '.', name] if (
-                        arg_root in roots and _COLLECTIONS.get(arg_collection) == kind
+                        arg_root in roots and COLLECTION_KINDS.get(arg_collection) == kind
                         and name.isidentifier()):
                     obj = f'{kind}.{name}'
                 case _:
@@ -367,8 +342,8 @@ def _metadata_guards(words, start, locals_):
         if before == '.':
             continue
         active = condition_facts if i <= skip_through else facts
-        if active and word in _COLLECTIONS and words[i + 1:i + 6:2] == ['.', '.', '(']:
-            if f'{_COLLECTIONS[word]}.{words[i + 2]}' in active:
+        if active and word in COLLECTION_KINDS and words[i + 1:i + 6:2] == ['.', '.', '(']:
+            if f'{COLLECTION_KINDS[word]}.{words[i + 2]}' in active:
                 guards.add(i + 4)
         if i <= skip_through:
             continue
@@ -534,8 +509,8 @@ def _sites(body, first_line, params, bindings, context, preprocessor, objects):
             snippet += '…'
         targets = preprocessor.targets & procedure_targets
         optional_object = False
-        if objects is not None and binding is None and len(receiver) == 2 and receiver[0] in _COLLECTIONS:
-            kind = _COLLECTIONS[receiver[0]]
+        if objects is not None and binding is None and len(receiver) == 2 and receiver[0] in COLLECTION_KINDS:
+            kind = COLLECTION_KINDS[receiver[0]]
             if kind in MANAGER_OBJECT_KINDS and f'{kind}.{receiver[1]}' not in objects:
                 if guards is None:
                     guards = _metadata_guards(words, start, parameters | bindings)
@@ -580,8 +555,8 @@ def _diagnosis(call, module, declarations, globals_, objects, vocab, mode):
             owner = module.split('.')[0] + 'объект'
         elif '.' in module and not module.startswith('общиймодуль.'):
             implicit = True
-    elif len(receiver) == 2 and receiver[0] in _COLLECTIONS and call.binding is None:
-        kind = _COLLECTIONS[receiver[0]]
+    elif len(receiver) == 2 and receiver[0] in COLLECTION_KINDS and call.binding is None:
+        kind = COLLECTION_KINDS[receiver[0]]
         obj = f'{kind}.{receiver[1]}'
         manager = f'{obj}.модульменеджера'
         if manager in declarations:
@@ -593,7 +568,7 @@ def _diagnosis(call, module, declarations, globals_, objects, vocab, mode):
             if call.optional_object:
                 return f'Предупреждение — {missing} (необязательная зависимость)'
             return f'Ошибка — {missing}'
-        owner = kind + 'менеджер'
+        owner = COLLECTION_MANAGER_TYPES[receiver[0]][0]
     elif len(receiver) == 1:
         if f'общиймодуль.{receiver[0]}.модуль' in declarations and call.binding is None:
             return ''  # Вызовы общих модулей проверяет find_broken_calls.

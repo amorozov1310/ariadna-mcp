@@ -65,26 +65,36 @@ def test_hbk_pages_and_toc():
     assert variant['syntax'] == 'СтрНайти(<Аргумент>)'
     assert variant['params'] == [dict(name='Аргумент', required=True, types=['Строка'],
                                       description='Учебный параметр.')]
-    query, = ph.parse_hbk(query_book(), 'query')
+    query, select = ph.parse_hbk(query_book(), 'query')
     assert query.name_ru == 'СтрНайти' and query.variants[0]['syntax'] == 'СтрНайти(А, Б)'
+    assert select.name_en == 'Select'
 
 
-def test_exact_precedes_prefix_across_pages(store):
+def test_exact_name_excludes_similar_pages_and_query_language(store):
     index = store.get(NEW)
-    for offset, expected, more in [(0, ['function'], True), (1, ['query'], False), (2, [], False)]:
-        entries, has_more = index.search('сТРнайТИ()', limit=1, offset=offset)
-        assert [e.kind for e in entries] == expected and has_more == more
+    for query in ('сТРнайТИ', 'sTRfIND()'):
+        entries, more = index.search(query, limit=1)
+        assert [(e.kind, e.name_en) for e in entries] == [('function', 'StrFind')]
+        assert not more and index.search(query, offset=1) == ([], False)
+        assert [e.name_en for e in index.search(query, kind='method')[0]] == ['SearchExample']
     assert [e.kind for e in index.search('strfind', kind='запрос')[0]] == ['query']
+    assert [e.kind for e in index.search('ВЫБРАТЬ')[0]] == ['query']
     assert index.search('учебное описание')[0]
     assert index.search('.') == ([], False)
     assert index.search('ФорматироватьСтроку') == ([], False)
 
 
-@pytest.mark.parametrize('query', ['Новый ТаблицаЗначений', 'NEW ValueTable()'])
+@pytest.mark.parametrize('query', [
+    'Новый ТаблицаЗначений', 'NEW ValueTable()', '  Новый ТаблицаЗначений (Строки(1))  ',
+])
 def test_constructor_query(store, query):
-    entries, more = store.get(NEW).search(query)
+    index = store.get(NEW)
+    entries, more = index.search(query)
     assert len(entries) == 2 and not more
     assert all(e.kind == 'ctor' and e.owner_en == 'ValueTable' for e in entries)
+    assert index.search(query, limit=1) == (entries[:1], True)
+    assert index.search(query, limit=1, offset=1) == (entries[1:], False)
+    assert index.search('ТаблицаЗначений', limit=1)[0][0].kind == 'type'
 
 
 @pytest.mark.parametrize(('owner', 'expected'), [
@@ -93,14 +103,59 @@ def test_constructor_query(store, query):
     ('РегистрыСведений.Пример', 'InformationRegisterManager'),
     ('InformationRegisters.Demo', 'InformationRegisterManager'),
     ('Перечисления.Пример', 'EnumManager'), ('Enums.Demo', 'EnumManager'),
-    ('ПланыОбмена.Пример', 'ExchangePlanManager'), ('СправочникОбъект', 'CatalogObject'),
-    ('CatalogObject', 'CatalogObject'), ('СправочникОбъект.<Имя объекта>', 'CatalogObject'),
+    ('ПланыОбмена.Пример', 'ExchangePlanManager'), ('ExchangePlans.Demo', 'ExchangePlanManager'),
+    ('ПланыВидовРасчета.Пример', 'ChartOfCalculationTypesManager'),
+    ('ChartsOfCalculationTypes.Demo', 'ChartOfCalculationTypesManager'),
+    ('СправочникМенеджер', 'CatalogManager'), ('СправочникМенеджер.Пример', 'CatalogManager'),
+    ('CatalogManager', 'CatalogManager'), ('CatalogManager . Demo', 'CatalogManager'),
+    ('СправочникМенеджер.<Имя справочника>', 'CatalogManager'),
+    ('СправочникОбъект', 'CatalogObject'), ('CatalogObject', 'CatalogObject'),
+    ('СправочникОбъект.Пример', 'CatalogObject'), ('CatalogObject.Demo', 'CatalogObject'),
+    ('СправочникСсылка', 'CatalogRef'), ('CatalogRef.Demo', 'CatalogRef'),
 ])
 def test_owner_resolution(store, owner, expected):
     name = 'НайтиПоКоду' if not owner.isascii() else 'FindByCode'
     entries, more = store.get(NEW).search(owner.swapcase() + '.' + name)
-    assert [e.owner_en for e in entries] == [expected + '.<Object name>']
+    assert [e.owner_en.partition('.<')[0] for e in entries] == [expected]
     assert not more
+
+
+def test_missing_procedure_in_project(help_client):
+    _, pm = help_client
+    pm.platform_help.build_from_bytes(NEW, context_book())
+    pm.create_project('demo', 'Демо')
+    source = pm.projects_dir / 'demo' / 'sources' / 'sample' / 'xml'
+    module = source / 'CommonModules' / 'УчебныйМодуль' / 'Ext' / 'Module.bsl'
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        'Функция ФорматироватьСтроку(Текст) Экспорт\n'
+        '    Возврат Текст;\n'
+        'КонецФункции\n'
+        'Процедура ДругоеИмяПример()\n'
+        'КонецПроцедуры\n',
+        encoding='utf-8',
+    )
+    pm.add_source('demo', 'sample', 'Основная')
+    pm.reindex('demo')
+
+    def ask(query, **args):
+        return execute_tool(pm, 'platform_help', {'query': query, **args})
+
+    for query in ('форМАТИровАтьСтроку ()', 'УчебныйМодуль.ФорматироватьСтроку'):
+        msg = ask(query, project_id='demo')
+        assert 'В справке платформы' in msg and 'нет записи' in msg
+        assert 'ОбщийМодуль.УчебныйМодуль.Модуль' in msg and 'ФорматироватьСтроку' in msg
+        assert 'search_procedures' in msg and 'search_code' in msg
+
+    for query, args in [('ФорматироватьСтроку', {}), ('ДругоеИмя', {'project_id': 'demo'}),
+                        ('ЧужойМодуль.ФорматироватьСтроку', {'project_id': 'demo'})]:
+        msg = ask(query, **args)
+        assert 'Вероятно, это процедура конфигурации' in msg
+        assert 'search_procedures' in msg and 'search_code' in msg
+        assert 'ОбщийМодуль.УчебныйМодуль.Модуль' not in msg
+
+    outside = ask('Справочники.Демо.ПолучитьИмяПредопределенного', project_id='demo')
+    assert 'относится к платформе' in outside and 'search_procedures' not in outside
 
 
 def test_discovery_rebuild_and_failed_replacement(tmp_path, store):
@@ -175,8 +230,9 @@ def test_web_and_mcp_share_versions(tmp_path, monkeypatch):
     pm.create_project('second', 'Второй')
     assert NEW in ask() and OLD in ask(project_id='demo') and NEW in ask(project_id='demo', version=NEW)
     msg = ask(query='ФорматироватьСтроку', project_id='demo')
-    assert OLD in msg and 'метод конфигурации' in msg and 'search_code' in msg
-    assert 'offset=1' in ask(limit=1) and 'язык запросов' in ask(offset=1)
+    assert OLD in msg and 'процедура конфигурации' in msg and 'search_code' in msg
+    assert 'offset=1' not in ask(limit=1) and 'записей больше нет' in ask(offset=1)
+    assert 'язык запросов' in ask(kind='query')
     missing = ask(version='8.3.1.1')
     assert not missing.startswith('Error:') and 'не загружена' in missing
     # Невыбранная необязательная книга в обычной HTML-форме приходит с filename="".
