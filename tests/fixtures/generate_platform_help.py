@@ -107,12 +107,21 @@ def context_book(description='Учебное описание.'):
          'ВнешниеОбработкиМенеджер', 'ExternalDataProcessorsManager', availability='Сервер, внешнее соединение')
     for ru, en in [('Пустая', 'Empty'), ('ИзСтрок', 'FromRows')]:
         page(f'objects/ValueTable/ctors/{en}.html', ru, en, 'ТаблицаЗначений', 'ValueTable')
-    for ru, en in [('СправочникМенеджер', 'CatalogManager'), ('СправочникОбъект', 'CatalogObject'),
-                   ('ДокументМенеджер', 'DocumentManager'), ('ПланОбменаМенеджер', 'ExchangePlanManager'),
-                   ('РегистрСведенийМенеджер', 'InformationRegisterManager'),
-                   ('ПеречислениеМенеджер', 'EnumManager')]:
+    for ru, en, ru_item, en_item in [
+        ('СправочникМенеджер', 'CatalogManager', 'справочника', 'Catalog'),
+        ('СправочникОбъект', 'CatalogObject', 'справочника', 'Catalog'),
+        ('СправочникСсылка', 'CatalogRef', 'справочника', 'Catalog'),
+        ('ДокументМенеджер', 'DocumentManager', 'документа', 'Document'),
+        ('ПланОбменаМенеджер', 'ExchangePlanManager', 'плана обмена', 'Exchange plan'),
+        ('ПланВидовРасчетаМенеджер', 'ChartOfCalculationTypesManager',
+         'плана видов расчета', 'Chart of calculation types'),
+        ('РегистрСведенийМенеджер', 'InformationRegisterManager', 'регистра сведений', 'Information register'),
+        ('ПеречислениеМенеджер', 'EnumManager', 'перечисления', 'Enum'),
+    ]:
         page(f'objects/{en}/methods/FindByCode.html', 'НайтиПоКоду', 'FindByCode',
-             ru + '.<Имя объекта>', en + '.<Object name>')
+             f'{ru}.<Имя {ru_item}>', f'{en}.<{en_item} name>')
+    page('objects/Array/methods/SimilarToStrFind.html', 'ПримерПоиска', 'SearchExample',
+         'Массив', 'Array', value_type='СтрНайти StrFind')
     page('objects/ValueTable/events/Changed.html', 'Изменение', 'Changed', 'ТаблицаЗначений', 'ValueTable')
     page('objects/ValueTable/properties/Rows.html', 'Строки', 'Rows', 'ТаблицаЗначений', 'ValueTable')
     page('objects/Global context/properties/Example.html', 'Пример', 'Example')
@@ -122,5 +131,8 @@ def context_book(description='Учебное описание.'):
 
 
 def query_book():
-    return _book([('StrFind', 'СтрНайти', '<h1>Учебная функция</h1><p>СтрНайти(А, Б)</p>'
-                   '<p>Учебная функция языка запросов.</p>')])
+    return _book([
+        ('StrFind', 'СтрНайти', '<h1>Учебная функция</h1><p>СтрНайти(А, Б)</p>'
+         '<p>Учебная функция языка запросов.</p>'),
+        ('KeyWordsSelect.html', 'ВЫБРАТЬ', '<h1>Учебное слово</h1><p>Учебный оператор.</p>'),
+    ])

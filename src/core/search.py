@@ -847,7 +847,7 @@ class SearchEngine:
 
     def search_procedures(self, query: str, module_filter: str | None = None,
                           export_only: bool = False, source_id: str | None = None,
-                          limit: int = 30, offset: int = 0) -> list[dict]:
+                          limit: int = 30, offset: int = 0, *, exact: bool = False) -> list[dict]:
         """Search procedures/functions by name (D5: case-insensitive).
 
         Параметры приводятся через casefold в Python до SQL: casefold(?) в
@@ -856,12 +856,17 @@ class SearchEngine:
         """
         conn = self.db.read_conn()
         query_cf = query.casefold()
-        conditions = ["p.name_cf LIKE '%' || ? || '%'"]
+        conditions = ["p.name_cf = ?" if exact else "p.name_cf LIKE '%' || ? || '%'"]
         params: list = [query_cf]
 
         if module_filter:
-            conditions.append("m.name_cf LIKE '%' || ? || '%'")
-            params.append(module_filter.casefold())
+            module_cf = module_filter.casefold()
+            if exact:
+                conditions.append("m.name_cf IN (?, ?)")
+                params.extend([module_cf, f'общиймодуль.{module_cf}.модуль'])
+            else:
+                conditions.append("m.name_cf LIKE '%' || ? || '%'")
+                params.append(module_cf)
         if export_only:
             conditions.append("p.is_export = 1")
         if source_id:
