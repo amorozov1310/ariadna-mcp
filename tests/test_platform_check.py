@@ -508,6 +508,56 @@ EndProcedure
     assert 'объекта метаданных нет' in execute_tool(pm, 'find_broken_calls', {'source_id': 'sample'})
 
 
+@pytest.mark.parametrize(('code', 'level'), [
+    pytest.param('Если Метаданные.Справочники.Найти("Проба") = Неопределено Тогда '
+                 'Возврат Неопределено; КонецЕсли; {call}', 'warning', id='early-return'),
+    pytest.param('Если Metadata.FindByFullName("Catalog.Проба") <> Undefined Тогда '
+                 'Число = 1; Иначе ВызватьИсключение "Проба"; КонецЕсли; {call}',
+                 'warning', id='else-raises'),
+    pytest.param('МД = Метаданные.Справочники.Найти("ПРОБА"); '
+                 'Если Неопределено = МД Тогда Возврат Неопределено; КонецЕсли; {call}',
+                 'warning', id='lookup-variable'),
+    pytest.param('Если Metadata.Catalogs.Contains(Metadata.FindByFullName("Справочник.Проба")) Тогда '
+                 '{call} КонецЕсли;', 'warning', id='membership-branch'),
+    pytest.param('Пока Истина Цикл '
+                 'Если Метаданные.Справочники.Найти("Проба") = Неопределено Тогда '
+                 'Продолжить; КонецЕсли; {call} КонецЦикла;', 'warning', id='continue'),
+    pytest.param('{call}', 'error', id='unguarded'),
+    pytest.param('Если Метаданные.Справочники.Найти("Проба") = Неопределено Тогда '
+                 'СтрНайти("Нет объекта", "Нет"); КонецЕсли; {call}', 'error', id='no-exit'),
+    pytest.param('Если Метаданные.Документы.Найти("Проба") = Неопределено Тогда '
+                 'Возврат Неопределено; КонецЕсли; {call}', 'error', id='other-collection'),
+    pytest.param('Если Метаданные.Справочники.Найти("Проба") = Неопределено Тогда '
+                 'Если Флаг Тогда Возврат Неопределено; КонецЕсли; КонецЕсли; {call}',
+                 'error', id='conditional-exit'),
+    pytest.param('Попытка Если Метаданные.Справочники.Найти("Проба") = Неопределено Тогда '
+                 'ВызватьИсключение "Проба"; КонецЕсли; Исключение Флаг = Ложь; КонецПопытки; {call}',
+                 'error', id='caught-exception'),
+    pytest.param('Если Флаг Тогда МД = Метаданные.Справочники.Найти("Проба"); Возврат МД; '
+                 'ИначеЕсли МД = Неопределено Тогда Возврат МД; КонецЕсли; {call}',
+                 'error', id='other-branch-assignment'),
+    pytest.param('Если Метаданные.Справочники.Найти("Проба") = Неопределено Тогда\n'
+                 '#Если Сервер Тогда\nВозврат Неопределено;\n#КонецЕсли\nКонецЕсли; {call}',
+                 'error', id='conditional-compilation'),
+])
+def test_missing_metadata_guard(project, code, level):
+    pm, source = project
+    call = 'Справочники.Проба.ПолучитьСсылку(Ключ)'
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl',
+                  'Функция Проверка(Флаг, Ключ)\n'
+                  + code.format(call=f'Возврат {call};') + '\nКонецФункции\n')
+    pm.reindex('demo')
+    result = _ready_check(pm, level=level)
+    message = 'объект метаданных справочник.проба отсутствует в выгрузке'
+    if level == 'warning':
+        message = f'Предупреждение — {message} (необязательная зависимость)'
+    else:
+        message = f'Ошибка — {message}'
+    assert f'{message}\n  {call}' in result
+    other_level = 'error' if level == 'warning' else 'warning'
+    assert call not in _ready_check(pm, level=other_level)
+
+
 def test_broken_calls_detects_manager_removed_on_incremental_reindex(project):
     pm, source = project
     manager = _write_module(source, 'Catalogs/Пример/Ext/ManagerModule.bsl',
@@ -1552,6 +1602,19 @@ Metadata.Typo();
     config.write_text(xml.replace('Version8_3_24', 'Version8_3_19'), encoding='utf-8')
     restricted = _ready_check(pm)
     assert restricted.count('требует режима совместимости 8.3.20') == 2
+
+
+def test_predefined_item_name_on_chart_managers(project):
+    pm, source = project
+    _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', '''ПланыВидовХарактеристик.Проба.ПолучитьИмяПредопределенного(Ссылка);
+ChartsOfCharacteristicTypes.Проба.GetPredefinedItemName(Ссылка);
+ПланыСчетов.Проба.ПолучитьИмяПредопределенного(Ссылка);
+ChartsOfAccounts.Проба.GetPredefinedItemName(Ссылка);
+ПланыВидовРасчета.Проба.ПолучитьИмяПредопределенного(Ссылка);
+ChartsOfCalculationTypes.Проба.GetPredefinedItemName(Ссылка);
+''')
+    pm.reindex('demo')
+    assert 'Замечаний нет' in _ready_check(pm)
 
 
 def test_global_property_cannot_be_called(project):

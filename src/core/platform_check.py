@@ -33,7 +33,7 @@ from .bsl_reference import module_context_vars
 from .db import IndexRemovedError
 from .fsretry import replace_with_retry, retry_on_permission_error
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
-from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, indexed_manager_objects
+from .metadata_model import MANAGER_OBJECT_KINDS, OBJECT_TYPE_MAP, canonicalize_kind, indexed_manager_objects
 from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
 from .platform_help import (compatibility_warning, fingerprint as help_fingerprint,
                             minimum_compatibility_mode, read_meta, version_key)
@@ -43,7 +43,7 @@ from .xml_walker import IO_THREADS
 logger = logging.getLogger('ariadna')
 
 
-_COLLECTIONS = {k.casefold(): ru for k, (ru, _) in OBJECT_TYPE_MAP.items()}
+_COLLECTIONS = {k.casefold(): ru.casefold() for k, (ru, _) in OBJECT_TYPE_MAP.items()}
 _KEYWORDS = set("""
     если if тогда then иначе else иначеесли elsif конецесли endif для for каждого each
     из in по to цикл do конеццикла enddo пока while попытка try исключение except
@@ -59,8 +59,18 @@ _BRANCHES = set('иначе else иначеесли elsif конецесли end
 _STATEMENT_BOUNDARIES = set('; : тогда then иначе else цикл do попытка try исключение except'.split())
 _CONDITIONAL = re.compile(r'^\s*#\s*(if|если|elsif|иначеесли|else|иначе|endif|конецесли)\b([^/]*)')
 _IF = {'if', 'если'}
+_ELSIF = {'elsif', 'иначеесли'}
 _ELSE = {'else', 'иначе'}
 _ENDIF = {'endif', 'конецесли'}
+_THEN = {'then', 'тогда'}
+_IF_BRANCHES = _IF | _ELSIF | _ELSE | _ENDIF
+_OPTIONAL_BLOCK = {'цикл': 'loop', 'do': 'loop', 'попытка': 'try', 'try': 'try'}
+_OPTIONAL_END = {'конеццикла': 'loop', 'enddo': 'loop', 'конецпопытки': 'try', 'endtry': 'try'}
+_EXCEPT = {'исключение', 'except'}
+_METADATA = {'метаданные', 'metadata'}
+_UNDEFINED = {'неопределено', 'undefined'}
+_EXIT = {'возврат', 'return', 'вызватьисключение', 'raise',
+         'продолжить', 'continue', 'прервать', 'break'}
 _CLIENT_DIRECTIVES = {'&наклиенте', '&atclient'}
 _SERVER_DIRECTIVES = {'&насервере', '&atserver', '&насерверебезконтекста', '&atservernocontext'}
 _SERVER_CONTEXTS = {
@@ -72,7 +82,10 @@ _SERVER_CONTEXTS = {
 # для совместимости (описание изменений платформы 8.3.3). Остальные методы
 # проверены вызовом в учебной базе на 8.3.27.2170.
 _METHODS_OUTSIDE_HELP = (
-    (('справочникменеджер', 'catalogmanager'),
+    (('справочникменеджер', 'catalogmanager',
+      'планвидовхарактеристикменеджер', 'chartofcharacteristictypesmanager',
+      'плансчетовменеджер', 'chartofaccountsmanager',
+      'планвидоврасчетаменеджер', 'chartofcalculationtypesmanager'),
      ('получитьимяпредопределенного', 'getpredefineditemname'), '', 'Сервер, толстый клиент, внешнее соединение'),
     (('объектметаданныхконфигурация', 'configurationmetadataobject'),
      ('представление', 'presentation', 'полноеимя', 'fullname'), '', ''),
@@ -98,6 +111,7 @@ class _Call:
     binding: str | None
     client: bool
     split_receiver: bool = False
+    optional_object: bool = False
 
 
 _CLIENT_TARGETS = (
@@ -276,7 +290,149 @@ class _Vocabulary:
                         self.members.setdefault((owner, name), [(since, availability)])
 
 
-def _sites(body, first_line, params, bindings, context, preprocessor):
+def _metadata_lookup(words, roots, aliases):
+    """Полное имя объекта, который ищет выражение."""
+    match words:
+        case [alias]:
+            return aliases.get(alias)
+        case [root, '.', method, '(', arg, ')'] if (
+                root in roots and method in {'найтипополномуимени', 'findbyfullname'}):
+            if arg.startswith('"') and arg.endswith('"'):
+                kind, _, name = arg[1:-1].partition('.')
+                if kind.isidentifier() and name.isidentifier():
+                    return f'{canonicalize_kind(kind).casefold()}.{name}'
+        case [root, '.', collection, '.', method, '(', arg, ')'] if (
+                root in roots and collection in _COLLECTIONS and method in {'найти', 'find'}):
+            if arg.startswith('"') and arg.endswith('"') and arg[1:-1].isidentifier():
+                return f'{_COLLECTIONS[collection]}.{arg[1:-1]}'
+
+
+def _metadata_condition(words, roots, aliases):
+    """Объект и значение условия, из которого следует его наличие."""
+    negated = False
+    while words:
+        if words[0] in {'не', 'not'}:
+            negated = not negated
+            words = words[1:]
+        elif words[0] == '(' and words[-1] == ')':
+            words = words[1:-1]
+        else:
+            break
+    match words:
+        case [*lookup, '=', undef] if undef in _UNDEFINED:
+            return _metadata_lookup(lookup, roots, aliases), negated
+        case [undef, '=', *lookup] if undef in _UNDEFINED:
+            return _metadata_lookup(lookup, roots, aliases), negated
+        case [*lookup, '<', '>', undef] if undef in _UNDEFINED:
+            return _metadata_lookup(lookup, roots, aliases), not negated
+        case [undef, '<', '>', *lookup] if undef in _UNDEFINED:
+            return _metadata_lookup(lookup, roots, aliases), not negated
+        case [root, '.', collection, '.', method, '(', *arg, ')'] if (
+                root in roots and collection in _COLLECTIONS and method in {'содержит', 'contains'}):
+            kind = _COLLECTIONS[collection]
+            match arg:
+                case [arg_root, '.', arg_collection, '.', name] if (
+                        arg_root in roots and _COLLECTIONS.get(arg_collection) == kind
+                        and name.isidentifier()):
+                    obj = f'{kind}.{name}'
+                case _:
+                    obj = _metadata_lookup(arg, roots, aliases)
+            if obj and obj.partition('.')[0] == kind:
+                return obj, not negated
+    return None, False
+
+
+def _join_guards(left, right):
+    if left is None:
+        return right
+    return left if right is None else left & right
+
+
+def _metadata_guards(words, start, locals_):
+    """Позиции вызовов, до которых можно дойти лишь при наличии объекта."""
+    roots = _METADATA - locals_
+    if not roots.intersection(words) or '~' in words:
+        return set()
+    guards = set()
+    # None — ветка завершилась. В точке слияния учитываем только ветки,
+    # которые доходят до неё, и только общие для них проверки.
+    facts, stack, aliases = set(), [], {}
+    skip_through = start - 1
+    condition_facts = None
+    exiting = False
+    for i in range(start, len(words)):
+        word = words[i]
+        before = words[i - 1] if i else ''
+        after = words[i + 1] if i + 1 < len(words) else ''
+        if before == '.':
+            continue
+        active = condition_facts if i <= skip_through else facts
+        if active and word in _COLLECTIONS and words[i + 1:i + 6:2] == ['.', '.', '(']:
+            if f'{_COLLECTIONS[word]}.{words[i + 2]}' in active:
+                guards.add(i + 4)
+        if i <= skip_through:
+            continue
+        directive = _CONDITIONAL.match(word) if word.lstrip().startswith('#') else None
+        branch = directive[1] if directive else ''
+        if exiting and (word in _IF_BRANCHES | _EXCEPT or word in _OPTIONAL_END or branch or word == ';'):
+            facts, exiting = None, False
+        if word in _IF_BRANCHES:
+            if word in _IF:
+                stack.append(('if', facts, None))
+            if not stack or stack[-1][0] != 'if':
+                return set()
+            _, remaining, complete = stack.pop()
+            if word not in _IF:
+                complete = _join_guards(complete, facts)
+                aliases.clear()
+            if word in _ENDIF:
+                facts = _join_guards(complete, remaining)
+            elif word in _ELSE:
+                facts = remaining
+                stack.append(('if', None, complete))
+            else:
+                skip_through = next((j for j in range(i + 1, len(words)) if words[j] in _THEN),
+                                    len(words))
+                obj, when_true = _metadata_condition(words[i + 1:skip_through], roots, aliases)
+                facts = condition_facts = remaining
+                if obj and remaining is not None:
+                    if when_true:
+                        facts = remaining | {obj}
+                    else:
+                        remaining = remaining | {obj}
+                stack.append(('if', remaining, complete))
+            aliases.clear()
+        elif word in _OPTIONAL_BLOCK or branch in _IF:
+            stack.append((_OPTIONAL_BLOCK.get(word, '#if'), facts, None))
+            aliases.clear()
+        elif word in _OPTIONAL_END or word in _EXCEPT or branch:
+            block = _OPTIONAL_END.get(word, 'try' if word in _EXCEPT else '#if')
+            if not stack or stack[-1][0] != block:
+                return set()
+            facts = stack[-1][1]
+            if word in _OPTIONAL_END or branch in _ENDIF:
+                stack.pop()
+            aliases.clear()
+        elif i == start or before in _STATEMENT_BOUNDARIES or before.lstrip().startswith('#'):
+            if word in _EXIT:
+                exiting = True  # В выражении Возврат ещё могут быть вызовы.
+            elif word in _EXECUTE:
+                aliases.clear()
+            elif word in _VAR or (after == '=' and word.isidentifier()):
+                end = next((j for j in range(i + 1, len(words)) if words[j] == ';'), len(words))
+                if word in _VAR:
+                    roots.difference_update(words[i + 1:end])
+                else:
+                    roots.discard(word)
+                    aliases.pop(word, None)
+                    if word not in locals_ and (obj := _metadata_lookup(words[i + 2:end], roots, aliases)):
+                        aliases[word] = obj
+        if before in {'(', ','} and after in {')', ','}:
+            aliases.pop(word, None)  # Аргумент мог измениться по ссылке.
+    return guards
+
+
+def _sites(body, first_line, params, bindings, context, preprocessor, objects):
     """Вызовы с позицией в тексте, получателем и доказанным типом переменной."""
     tokens = [m for m in _BSL_TOKEN.finditer(body) if not m[0].startswith('//')]
     words = [m[0].casefold() for m in tokens]
@@ -300,7 +456,9 @@ def _sites(body, first_line, params, bindings, context, preprocessor):
             start += 1
     newlines = [m.start() for m in re.finditer('\n', body)]
     types = {}
-    locals_ = _parse_param_names(params or '') | bindings
+    parameters = _parse_param_names(params or '')
+    locals_ = parameters | bindings
+    guards = None
     assignments = {}
     execute_pending = False
     dot_calls = {}
@@ -375,8 +533,15 @@ def _sites(body, first_line, params, bindings, context, preprocessor):
         if offset + 160 < end:
             snippet += '…'
         targets = preprocessor.targets & procedure_targets
+        optional_object = False
+        if objects is not None and binding is None and len(receiver) == 2 and receiver[0] in _COLLECTIONS:
+            kind = _COLLECTIONS[receiver[0]]
+            if kind in MANAGER_OBJECT_KINDS and f'{kind}.{receiver[1]}' not in objects:
+                if guards is None:
+                    guards = _metadata_guards(words, start, parameters | bindings)
+                optional_object = i in guards
         yield _Call(first_line + bisect_right(newlines, tokens[i].start()), snippet, word,
-                    receiver, binding, bool(targets) and not targets & ~_CLIENT, ambiguous)
+                    receiver, binding, bool(targets) and not targets & ~_CLIENT, ambiguous, optional_object)
 
 
 @lru_cache(maxsize=128)
@@ -416,7 +581,7 @@ def _diagnosis(call, module, declarations, globals_, objects, vocab, mode):
         elif '.' in module and not module.startswith('общиймодуль.'):
             implicit = True
     elif len(receiver) == 2 and receiver[0] in _COLLECTIONS and call.binding is None:
-        kind = _COLLECTIONS[receiver[0]].casefold()
+        kind = _COLLECTIONS[receiver[0]]
         obj = f'{kind}.{receiver[1]}'
         manager = f'{obj}.модульменеджера'
         if manager in declarations:
@@ -424,7 +589,10 @@ def _diagnosis(call, module, declarations, globals_, objects, vocab, mode):
             if name in procedures:
                 return '' if procedures[name] else 'Ошибка — метод менеджера без «Экспорт»'
         elif kind in MANAGER_OBJECT_KINDS and objects is not None and obj not in objects:
-            return f'Ошибка — объект метаданных {obj} отсутствует в выгрузке'
+            missing = f'объект метаданных {obj} отсутствует в выгрузке'
+            if call.optional_object:
+                return f'Предупреждение — {missing} (необязательная зависимость)'
+            return f'Ошибка — {missing}'
         owner = kind + 'менеджер'
     elif len(receiver) == 1:
         if f'общиймодуль.{receiver[0]}.модуль' in declarations and call.binding is None:
@@ -585,7 +753,7 @@ class _Report:
             self.sources[sid] = (start, end)
             start = end
 
-    def _module_findings(self, mod, procedures, bindings, form_attrs, diagnosis, path, form, stat):
+    def _module_findings(self, mod, procedures, bindings, form_attrs, diagnosis, objects, path, form, stat):
         where = f"@{mod['source_id']} {mod['file_path']}"
         try:
             if path and mod['stat'] != stat and mod['file_hash'] != module_file_hash(path, form):
@@ -605,7 +773,7 @@ class _Report:
         preprocessor = _Preprocessor()
         for first, body, params, directive, context in _regions(lines, procedures):
             visible = bindings | _form_context_vars(directive, form_attrs)
-            for call in _sites(body, first, params, visible, context, preprocessor):
+            for call in _sites(body, first, params, visible, context, preprocessor, objects):
                 message = diagnosis(call, mod['name_cf'])
                 if message:
                     level = _LEVEL_BY_LABEL[message.partition(' — ')[0]]
@@ -653,7 +821,7 @@ class _Report:
             inputs.append(snapshot)
             self.starts.append(self.count)
             for level, msg in self._module_findings(mod, procedures, bindings, form_attrs,
-                                                    diagnosis, *snapshot):
+                                                    diagnosis, objects, *snapshot):
                 self.positions[level].append(self.count)
                 self.count += 1
                 block.append(msg)

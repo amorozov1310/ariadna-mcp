@@ -89,6 +89,10 @@ def context_book(description='Учебное описание.'):
     page('objects/Global context/properties/Catalogs.html', 'Справочники', 'Catalogs')
     page('objects/ConfigurationMetadataObject.html', 'ОбъектМетаданныхКонфигурация',
          'ConfigurationMetadataObject')
+    for ru, en in [('ПланВидовХарактеристикМенеджер', 'ChartOfCharacteristicTypesManager'),
+                   ('ПланСчетовМенеджер', 'ChartOfAccountsManager'),
+                   ('ПланВидовРасчетаМенеджер', 'ChartOfCalculationTypesManager')]:
+        page(f'objects/{en}.html', ru, en)
     page('objects/XMLCanonicalizingWriter.html', 'КаноническаяЗаписьXML', 'XMLCanonicalizingWriter')
     page('objects/XSLTransform.html', 'ПреобразованиеXSL', 'XSLTransform')
     page('objects/XMLStringProcessingManager.html', 'МенеджерОбработкиСтрокиXML', 'XMLStringProcessingManager')
