@@ -698,6 +698,10 @@ COLLECTION_KINDS = {plural.casefold(): ru.casefold()
                     for plural, (ru, _) in OBJECT_TYPE_MAP.items()}
 COLLECTION_MANAGER_TYPES = {plural.casefold(): ((ru + 'Менеджер').casefold(), (en + 'Manager').casefold())
                             for plural, (ru, en) in OBJECT_TYPE_MAP.items()}
+# В отчёте конфигурации коллекция называется «Критерии», а свойство
+# глобального контекста в коде — «КритерииОтбора».
+COLLECTION_KINDS['критерииотбора'] = COLLECTION_KINDS['критерии']
+COLLECTION_MANAGER_TYPES['критерииотбора'] = COLLECTION_MANAGER_TYPES['критерии']
 _WORD = re.compile(r'[\wёЁ]+')
 _CONSTRUCTOR = re.compile(r'(?:новый|new)\s+([^\s()][^()]*)(?:\(.*\))?', re.S)
 

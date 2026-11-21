@@ -120,6 +120,14 @@ def test_owner_resolution(store, owner, expected):
     assert not more
 
 
+def test_filter_criteria_collection_name():
+    from src.core.platform_help import COLLECTION_KINDS, COLLECTION_MANAGER_TYPES
+    assert COLLECTION_KINDS['критерииотбора'] == 'критерийотбора'
+    assert COLLECTION_MANAGER_TYPES['критерииотбора'] == ('критерийотбораменеджер',
+                                                          'filtercriterionmanager')
+    assert COLLECTION_MANAGER_TYPES['filtercriteria'] == COLLECTION_MANAGER_TYPES['критерииотбора']
+
+
 def test_missing_procedure_in_project(help_client):
     _, pm = help_client
     pm.platform_help.build_from_bytes(NEW, context_book())
