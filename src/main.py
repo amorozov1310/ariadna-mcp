@@ -49,14 +49,6 @@ def _index_dir() -> str | None:
     return os.environ.get('INDEX_DIR') or None
 
 
-def _listen_addr() -> str:
-    """Адрес, на котором слушают Web UI и MCP. Авторизации нет, поэтому по
-    умолчанию только эта машина (127.0.0.1) — как и порты Docker (BIND_ADDR).
-    В контейнере Dockerfile задаёт LISTEN_ADDR=0.0.0.0: иначе не работает
-    проброс портов, а наружу их по-прежнему открывает только BIND_ADDR."""
-    return os.environ.get('LISTEN_ADDR', '127.0.0.1')
-
-
 def build_shared_state(data_dir: str):
     """Один ProjectManager на процесс — общий для Web UI и MCP: один реестр
     и один пул индексов. Раньше у каждого сервера (Web UI, MCP SSE и HTTP)
@@ -85,7 +77,7 @@ def build_shared_state(data_dir: str):
     return pm
 
 
-def main():
+def main(*, in_docker: bool = False):
     data_dir = os.environ.get('DATA_DIR', '/data')
     mcp_http_port = int(os.environ.get('MCP_HTTP_PORT', '9879'))
     web_port = int(os.environ.get('WEB_PORT', '9878'))
@@ -93,13 +85,27 @@ def main():
     _quiet_proactor_connection_reset()
     pm = build_shared_state(data_dir)
 
+    from .license import LicenseStore
+    from .security import LOCAL_BIND_NOTICE, is_loopback_address
+
+    host = os.environ.get('LISTEN_ADDR', '0.0.0.0' if in_docker else '127.0.0.1')
+    check_local_interface = not in_docker and not is_loopback_address(host)
+    listen_addr_overridden = check_local_interface and not LicenseStore(data_dir).state().valid
+    if listen_addr_overridden:
+        host = '127.0.0.1'
+        logger.warning(LOCAL_BIND_NOTICE)
+        check_local_interface = False
+
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Index directory: {_index_dir() or data_dir + '/projects'}")
     logger.info(f"MCP streamable HTTP port: {mcp_http_port}")
     logger.info(f"Web UI port: {web_port}")
 
     # Web UI — в фоновом потоке.
-    web_thread = threading.Thread(target=_start_web, args=(pm, web_port), daemon=True)
+    web_thread = threading.Thread(
+        target=_start_web, args=(pm, web_port, host), daemon=True,
+        kwargs={'listen_addr_overridden': listen_addr_overridden,
+                'check_local_interface': check_local_interface})
     web_thread.start()
     logger.info(f"Web UI starting on :{web_port}")
 
@@ -108,10 +114,11 @@ def main():
     # перезапускает (restart: unless-stopped); упавший в фоне MCP оставил бы
     # «живой» контейнер без MCP — healthcheck проверяет только Web UI.
     logger.info(f"MCP streamable HTTP starting on :{mcp_http_port}")
-    _start_mcp_streamable_http(pm, mcp_http_port)
+    _start_mcp_streamable_http(pm, mcp_http_port, host, check_local_interface=check_local_interface)
 
 
-def _start_web(pm, port: int):
+def _start_web(pm, port: int, host: str = '127.0.0.1', *,
+               listen_addr_overridden: bool = False, check_local_interface: bool = False):
     """Start FastAPI Web UI with uvicorn — с общим ProjectManager процесса.
     Объект app, а не строка "src.web.app:app": uvicorn импортировал бы модуль
     сам, и set_pm мог бы попасть не в тот экземпляр приложения."""
@@ -119,9 +126,11 @@ def _start_web(pm, port: int):
         import uvicorn
         from .web import app as web_app
         web_app.set_pm(pm)
+        web_app.app.state.listen_addr_overridden = listen_addr_overridden
+        web_app.app.state.check_local_interface = check_local_interface
         uvicorn.run(
             web_app.app,
-            host=_listen_addr(),
+            host=host,
             port=port,
             log_level="warning",
         )
@@ -138,7 +147,8 @@ def _idle_forever():
         time.sleep(60)
 
 
-def _start_mcp_streamable_http(pm, port: int):
+def _start_mcp_streamable_http(pm, port: int, host: str = '127.0.0.1', *,
+                              check_local_interface: bool = False):
     """MCP-сервер на транспорте streamable HTTP (/mcp) — блокирующий вызов.
 
     Защита от DNS rebinding — transport_security SDK: внутри контейнера
@@ -155,18 +165,20 @@ def _start_mcp_streamable_http(pm, port: int):
         mcp = create_mcp_server(pm)
 
         from .auth import MCPAuthMiddleware, TokenStore
-        from .security import mcp_transport_security
+        from .security import NetworkLicenseMiddleware, mcp_transport_security
         app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
         tokens = TokenStore(pm.data_dir)
         if tokens.enabled():
             logger.info("Авторизация по токенам включена (%d токенов, лицензия: %s)",
                         len(tokens.list()), tokens.license.state().message)
-        elif os.environ.get('MCP_ALLOWED_HOSTS'):
+        elif os.environ.get('MCP_ALLOWED_HOSTS') and tokens.license.state().valid:
             logger.warning("Ариадна открыта для других машин (MCP_ALLOWED_HOSTS), но токенов нет — "
                            "доступ без авторизации. Создайте токен администратора: "
                            "python -m src.auth create --name <имя> --role admin")
-        uvicorn.run(MCPAuthMiddleware(app, tokens), host=_listen_addr(), port=port,
-                    log_level="warning")
+        app = NetworkLicenseMiddleware(MCPAuthMiddleware(app, tokens),
+                                       license_valid=lambda: tokens.license.state().valid, mcp=True,
+                                       check_local_interface=lambda: check_local_interface)
+        uvicorn.run(app, host=host, port=port, log_level="warning")
 
     except ImportError as e:
         logger.warning(f"MCP dependencies missing ({e}) — running Web UI only")

@@ -18,7 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from ..core.db import IndexRemovedError
 from ..core.manifest import project_manifest as build_manifest, project_readiness, readiness
 from ..core.project_manager import ProjectManager, ProjectNotFoundError
-from ..security import web_allowed_hosts
+from ..security import LOCAL_BIND_NOTICE, NetworkLicenseMiddleware, web_allowed_hosts
 
 logger = logging.getLogger('ariadna')
 
@@ -337,7 +337,7 @@ from .routes_playground import router as playground_router
 from .routes_glossary import router as glossary_router
 from .routes_diff import router as diff_router
 from .routes_checks import router as checks_router
-from .routes_auth import router as auth_router
+from .routes_auth import router as auth_router, tokens as auth_tokens
 from .routes_update import router as update_router
 from .routes_platform_help import router as platform_help_router
 
@@ -350,3 +350,14 @@ app.include_router(checks_router)
 app.include_router(auth_router)
 app.include_router(update_router)
 app.include_router(platform_help_router)
+
+
+def _network_license_valid() -> bool:
+    return auth_tokens().license.state().valid
+
+
+templates.env.globals['network_license_valid'] = _network_license_valid
+templates.env.globals['local_bind_notice'] = LOCAL_BIND_NOTICE
+# Добавляем после middleware авторизации, чтобы запрос сначала проверялся здесь.
+app.add_middleware(NetworkLicenseMiddleware, license_valid=_network_license_valid,
+                   check_local_interface=lambda: getattr(app.state, 'check_local_interface', False))

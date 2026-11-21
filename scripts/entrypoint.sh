@@ -13,4 +13,5 @@ mkdir -p "${DATA_DIR:-/data}/projects"
 if [ -n "${INDEX_DIR}" ]; then mkdir -p "${INDEX_DIR}"; fi
 
 cd /app
-exec python3 -m src.main
+# В контейнере адрес публикации портов задаёт Docker на хосте.
+exec python3 -c 'from src.main import main; main(in_docker=True)'

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -40,14 +41,26 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def native_server():
+def native_server(request, monkeypatch):
     """Сервер без Docker, как при разработке: python -m src.main."""
     live_check = _load_live_check()
     web_port, mcp_port = _free_port(), _free_port()
     with tempfile.TemporaryDirectory() as tmpdir:
         env = {**os.environ, 'DATA_DIR': os.path.join(tmpdir, 'data'), 'WEB_PORT': str(web_port),
                'MCP_HTTP_PORT': str(mcp_port), 'LISTEN_ADDR': '127.0.0.1',
+               'MCP_ALLOWED_HOSTS': 'ariadna.lan',
                'PYTHONIOENCODING': 'utf-8'}
+        command = [sys.executable, '-m', 'src.main']
+        licensed = getattr(request, 'param', None)
+        if licensed is not None:
+            env['LISTEN_ADDR'] = '0.0.0.0'
+        if licensed:
+            from src import license
+            from tests.license_helper import install_team_license
+
+            install_team_license(monkeypatch, env['DATA_DIR'])
+            command = [sys.executable, '-c', 'import sys; from src import license, main; '
+                       'license.PUBLIC_KEY = sys.argv[1]; main.main()', license.PUBLIC_KEY]
         platform = Path(tmpdir) / 'platform' / '8.3.27.1' / 'bin'
         platform.mkdir(parents=True)
         (platform / 'shcntx_ru.hbk').write_bytes(context_book())
@@ -56,7 +69,7 @@ def native_server():
         env.pop('INDEX_DIR', None)
         log_path = os.path.join(tmpdir, 'server.log')
         with open(log_path, 'w', encoding='utf-8') as log:
-            proc = subprocess.Popen([sys.executable, '-m', 'src.main'], cwd=ROOT, env=env,
+            proc = subprocess.Popen(command, cwd=ROOT, env=env,
                                     stdout=log, stderr=subprocess.STDOUT)
             ctx = live_check.LiveContext(web=f'http://127.0.0.1:{web_port}',
                                          mcp=f'http://127.0.0.1:{mcp_port}/mcp', quick=True)
@@ -65,13 +78,14 @@ def native_server():
                 while True:
                     try:
                         if ctx.web_get('/health').status_code == 200:
-                            break
+                            with socket.create_connection(('127.0.0.1', mcp_port), timeout=1):
+                                break
                     except Exception:
                         pass
                     if proc.poll() is not None or time.time() > deadline:
                         pytest.fail("сервер не поднялся:\n" + Path(log_path).read_text(encoding='utf-8'))
                     time.sleep(0.3)
-                yield live_check, ctx, log_path
+                yield live_check, ctx, log_path, licensed
             finally:
                 proc.terminate()
                 try:
@@ -82,7 +96,11 @@ def native_server():
 
 
 def test_live_check_passes_and_cleans_up(native_server, capsys):
-    live_check, ctx, log_path = native_server
+    live_check, ctx, log_path, _ = native_server
+    response = ctx.web_get('/login', headers={'Host': 'ariadna.lan'})
+    assert response.status_code == 400 and 'лицензионный ключ' in response.text
+    assert ctx.web_get('/health', headers={'Host': 'localhost:9878'}).json() == {'status': 'ok'}
+    assert 'Локальный режим' in ctx.web_get('/').text
     # Проект «владельца»: live_check читает его (--project) и не трогает.
     ctx.create_project('owner')
     ctx.reindex_web('owner')
@@ -110,3 +128,23 @@ def test_live_check_reports_unreachable_server(capsys):
     code = live_check.main(['--web', f'http://127.0.0.1:{port}', '--mcp', f'http://127.0.0.1:{port}/mcp'])
     assert code == 2
     assert 'недоступен' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('native_server', [False, True], indirect=True, ids=['free', 'licensed'])
+def test_native_wide_listen_addr_depends_on_license(native_server):
+    _, ctx, _, licensed = native_server
+    with socket.socket() as probe:
+        try:
+            probe.bind(('127.0.0.2', 0))
+        except OSError:
+            pytest.skip('ОС не поддерживает второй петлевой IPv4-адрес')
+
+    # Вторая петля проверяет широкую привязку без зависимости от адресов LAN.
+    for url in (ctx.web, ctx.mcp):
+        addr = ('127.0.0.2', urlsplit(url).port)
+        if licensed:
+            with socket.create_connection(addr, timeout=1):
+                pass
+        else:
+            with pytest.raises((ConnectionRefusedError, TimeoutError)):
+                socket.create_connection(addr, timeout=1).close()
