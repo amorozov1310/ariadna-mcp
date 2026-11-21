@@ -1,9 +1,9 @@
 """
-Лицензия командного режима (docs/license.md).
+Лицензия сетевого доступа и командного режима (docs/license.md).
 
 Локально, для одного человека, Ариадна бесплатна: без ключа можно создать
-один токен администратора (закрыть свой сервер). Командный режим — второй и
-следующие личные токены — требует ключа.
+один токен администратора (закрыть свой сервер). Сетевой доступ и командный
+режим (второй и следующие личные токены) требуют ключа.
 
 Ключ — подписанный текстовый блок:
 
@@ -136,6 +136,8 @@ class LicenseStore:
                 mtime = self.path.stat().st_mtime_ns
             except FileNotFoundError:
                 mtime = None
+            except OSError as e:
+                return LicenseState('invalid', f'ключ не принят: {e}')
             if mtime != self._mtime:
                 self._mtime = mtime
                 if mtime is None:
@@ -143,7 +145,7 @@ class LicenseStore:
                 else:
                     try:
                         self._state = check(parse(self.path.read_text(encoding='utf-8')))
-                    except (LicenseError, OSError) as e:
+                    except (LicenseError, OSError, UnicodeDecodeError) as e:
                         self._state = LicenseState('invalid', f'ключ не принят: {e}')
             return self._state
 

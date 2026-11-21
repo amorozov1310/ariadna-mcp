@@ -212,6 +212,11 @@
 </header>
 
 <main id="main" tabindex="-1" class="{% block container_class %}container{% endblock %}">
+    {% if nav_section != 'license' and not network_license_valid() %}
+    <div class="notice">
+        <div>Локальный режим. {% if can_admin %}<a href="/admin/license">Лицензия для доступа из сети</a>{% endif %}</div>
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
 </main>
 

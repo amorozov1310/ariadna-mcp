@@ -50,8 +50,7 @@ def _index_dir() -> str | None:
 
 
 def _listen_addr() -> str:
-    """Адрес, на котором слушают Web UI и MCP. Авторизации нет, поэтому по
-    умолчанию только эта машина (127.0.0.1) — как и порты Docker (BIND_ADDR).
+    """Web UI и MCP по умолчанию слушают 127.0.0.1 — как и порты Docker (BIND_ADDR).
     В контейнере Dockerfile задаёт LISTEN_ADDR=0.0.0.0: иначе не работает
     проброс портов, а наружу их по-прежнему открывает только BIND_ADDR."""
     return os.environ.get('LISTEN_ADDR', '127.0.0.1')
@@ -92,6 +91,13 @@ def main():
 
     _quiet_proactor_connection_reset()
     pm = build_shared_state(data_dir)
+
+    from .license import LicenseStore
+    if _listen_addr() not in ('127.0.0.1', '::1', 'localhost') and not LicenseStore(data_dir).state().valid:
+        logger.warning(
+            "Без действующей лицензии Web UI и MCP принимают только локальный Host. "
+            "Для доступа только с этой машины оставьте BIND_ADDR=127.0.0.1 в Docker "
+            "или LISTEN_ADDR=127.0.0.1 при запуске без Docker.")
 
     logger.info(f"Data directory: {data_dir}")
     logger.info(f"Index directory: {_index_dir() or data_dir + '/projects'}")
@@ -155,18 +161,19 @@ def _start_mcp_streamable_http(pm, port: int):
         mcp = create_mcp_server(pm)
 
         from .auth import MCPAuthMiddleware, TokenStore
-        from .security import mcp_transport_security
+        from .security import NetworkLicenseMiddleware, mcp_transport_security
         app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
         tokens = TokenStore(pm.data_dir)
         if tokens.enabled():
             logger.info("Авторизация по токенам включена (%d токенов, лицензия: %s)",
                         len(tokens.list()), tokens.license.state().message)
-        elif os.environ.get('MCP_ALLOWED_HOSTS'):
+        elif os.environ.get('MCP_ALLOWED_HOSTS') and tokens.license.state().valid:
             logger.warning("Ариадна открыта для других машин (MCP_ALLOWED_HOSTS), но токенов нет — "
                            "доступ без авторизации. Создайте токен администратора: "
                            "python -m src.auth create --name <имя> --role admin")
-        uvicorn.run(MCPAuthMiddleware(app, tokens), host=_listen_addr(), port=port,
-                    log_level="warning")
+        app = NetworkLicenseMiddleware(MCPAuthMiddleware(app, tokens),
+                                       license_valid=lambda: tokens.license.state().valid, mcp=True)
+        uvicorn.run(app, host=_listen_addr(), port=port, log_level="warning")
 
     except ImportError as e:
         logger.warning(f"MCP dependencies missing ({e}) — running Web UI only")

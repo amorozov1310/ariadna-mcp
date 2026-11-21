@@ -67,27 +67,66 @@ def test_compose_publishes_ports_on_loopback_by_default():
 # Защита от DNS rebinding
 # ============================================
 
-from src.security import allowed_hosts, web_allowed_hosts
+from src.security import NetworkLicenseMiddleware, allowed_hosts, web_allowed_hosts
+from tests.license_helper import install_team_license
 
 
 def test_allowed_hosts_default_and_env_extension():
-    assert allowed_hosts({}) == ['127.0.0.1:*', 'localhost:*', '[::1]:*']
+    assert allowed_hosts({}) == [
+        '127.0.0.1', 'localhost', '[::1]', '127.0.0.1:*', 'localhost:*', '[::1]:*']
     hosts = allowed_hosts({'MCP_ALLOWED_HOSTS': ' 192.168.1.10 , ariadna.lan:19879,,'})
-    assert hosts[:3] == ['127.0.0.1:*', 'localhost:*', '[::1]:*']
+    assert hosts[:6] == allowed_hosts({})
     assert '192.168.1.10' in hosts and '192.168.1.10:*' in hosts
     assert 'ariadna.lan:19879' in hosts and 'ariadna.lan:19879:*' not in hosts
     assert web_allowed_hosts({'MCP_ALLOWED_HOSTS': '192.168.1.10'}) == \
         ['127.0.0.1', 'localhost', '[::1]', '192.168.1.10']
 
 
-def test_web_ui_rejects_foreign_host_and_health_works():
+@pytest.mark.parametrize('host', ['127.0.0.1', '127.0.0.1:19878', 'localhost',
+                                  '[::1]', '[::1]:19878', 'localhost:9878'])
+def test_network_license_allows_loopback_without_checking_key(host):
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from src.web.app import app
-    client = TestClient(app)
-    assert client.get('/health', headers={'Host': 'evil.example'}).status_code == 400
-    assert client.get('/health', headers={'Host': 'evil.example:19878'}).status_code == 400
-    for host in ('127.0.0.1:19878', 'localhost:19878', 'localhost:9878', '[::1]:19878'):
-        assert client.get('/health', headers={'Host': host}).status_code == 200, host
+
+    def unexpected_license_check():
+        pytest.fail('Для локального Host ключ не требуется')
+
+    app = FastAPI()
+    app.add_middleware(NetworkLicenseMiddleware, license_valid=unexpected_license_check)
+    assert TestClient(app).get('/openapi.json', headers={'Host': host}).status_code == 200
+
+
+@pytest.mark.parametrize('host', ['192.168.1.10:19878', 'ariadna.lan', 'localhost.evil.example',
+                                  '127.0.0.1:abc', '[::1].evil.example'])
+def test_network_license_requires_valid_key_for_other_hosts(tmp_path, monkeypatch, host):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.license import LicenseStore
+
+    app = FastAPI()
+    store = LicenseStore(tmp_path)
+    app.add_middleware(NetworkLicenseMiddleware, license_valid=lambda: store.state().valid)
+    client = TestClient(app, headers={'Host': host, 'Accept': 'application/json'})
+    assert client.get('/openapi.json').json()['error'] == 'license_required'
+    install_team_license(monkeypatch, tmp_path)
+    assert client.get('/openapi.json').status_code == 200
+
+
+def test_web_ui_rejects_foreign_host_and_health_works(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.web import app as web
+    monkeypatch.setattr(web, '_pm', ProjectManager(tmp_path))
+    client = TestClient(web.app)
+    for path in ('/', '/login', '/static/style.css', '/health', '/ready'):
+        denied = client.get(path, headers={'Host': 'ariadna.lan:19878'})
+        assert denied.status_code == 400
+        assert 'лицензионный ключ' in denied.text and 'docs/license.md' in denied.text
+        assert client.get(path, headers={'Host': 'localhost:9878'}).status_code == 200
+    denied = client.get('/api/projects/demo/manifest', headers={'Host': '192.168.1.10:19878'})
+    assert denied.json()['error'] == 'license_required'
+    assert client.get('/health', headers={'Host': '[::1]:19878'}).status_code == 200
+    license_page = client.get('/admin/license', headers={'Host': '127.0.0.1:19878'})
+    assert 'Для доступа из сети установите ключ.' in license_page.text
 
 
 _INIT = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
@@ -158,24 +197,44 @@ def test_mcp_streamable_http_rejection_does_not_raise(monkeypatch, caplog):
             pm.close_all()
 
 
-def test_main_wires_transport_security(monkeypatch):
-    """main.py собирает приложения MCP с защитой: чужой Host — 421."""
+def test_main_wires_network_license_and_transport_security(tmp_path, monkeypatch):
+    """Даже разрешённый в SDK сетевой Host требует действующий ключ."""
     pytest.importorskip("mcp.server.mcpserver")
     import uvicorn
     from fastapi.testclient import TestClient
     from src import main as main_module
+    from src.license import LicenseStore, issue
+
     captured = {}
     monkeypatch.setattr(uvicorn, 'run', lambda app, **kw: captured.setdefault('app', app))
-    monkeypatch.delenv('MCP_ALLOWED_HOSTS', raising=False)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pm = ProjectManager(tmpdir)
-        try:
-            main_module._start_mcp_streamable_http(pm, 0)
-            with TestClient(captured['app'], raise_server_exceptions=False) as client:
-                resp = client.post('/mcp', json=_INIT, headers={**_MCP_HEADERS, 'Host': 'evil.example:1'})
-                assert resp.status_code == 421, resp.text
-        finally:
-            pm.close_all()
+    monkeypatch.setenv('MCP_ALLOWED_HOSTS', 'ariadna.lan:19879')
+    pm = ProjectManager(tmp_path)
+    store = LicenseStore(tmp_path)
+    main_module._start_mcp_streamable_http(pm, 0)
+    with TestClient(captured['app']) as client:
+        def initialize(host):
+            return client.post('/mcp', json=_INIT, headers={**_MCP_HEADERS, 'Host': host})
+
+        remote = 'ariadna.lan:19879'
+        denied = initialize(remote)
+        assert denied.status_code == 421
+        assert denied.json()['error'] == 'license_required'
+        assert 'лицензионный ключ' in denied.json()['detail']
+        assert denied.json()['docs'].endswith('/docs/license.md')
+        for host in ('127.0.0.1:19879', 'localhost', '[::1]:19879'):
+            assert initialize(host).status_code == 200
+
+        key = install_team_license(monkeypatch, tmp_path)
+        assert initialize(remote).status_code == 200
+        assert initialize('ariadna.lan:19880').status_code == 421
+        store.install(issue(key, 'Тестовая команда', 10, '2000-01-01'))
+        assert initialize(remote).json()['error'] == 'license_required'
+        store.install(issue(key, 'Тестовая команда', 10, '2099-12-31'))
+        assert initialize(remote).status_code == 200
+        store.path.write_bytes(b'\xff')
+        assert initialize(remote).json()['error'] == 'license_required'
+        store.path.unlink()
+        assert initialize(remote).json()['error'] == 'license_required'
 
 
 # ============================================
@@ -293,7 +352,7 @@ def test_sse_transport_is_gone():
     assert '9879' in (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
 
 
-def test_main_blocks_on_mcp_and_runs_web_ui_in_thread(monkeypatch):
+def test_main_blocks_on_mcp_and_runs_web_ui_in_thread(tmp_path, monkeypatch, caplog):
     """main(): Web UI — в фоновом потоке, MCP (streamable HTTP) — в основном,
     блокирующий: его падение завершает процесс."""
     from src import main as main_module
@@ -304,16 +363,18 @@ def test_main_blocks_on_mcp_and_runs_web_ui_in_thread(monkeypatch):
     monkeypatch.setattr(main_module, '_start_mcp_streamable_http',
                         lambda pm, port: calls.append(('mcp', port, threading.current_thread())))
     monkeypatch.setattr(main_module, '_quiet_proactor_connection_reset', lambda: None)
+    monkeypatch.setattr(main_module, 'build_shared_state', lambda data_dir: object())
     monkeypatch.delenv('MCP_HTTP_PORT', raising=False)
     monkeypatch.delenv('WEB_PORT', raising=False)
     monkeypatch.delenv('INDEX_DIR', raising=False)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        monkeypatch.setenv('DATA_DIR', tmpdir)
-        main_module.main()
-        assert web_started.wait(10)
+    monkeypatch.setenv('LISTEN_ADDR', '0.0.0.0')
+    monkeypatch.setenv('DATA_DIR', str(tmp_path))
+    main_module.main()
+    assert web_started.wait(10)
     mcp = [c for c in calls if c[0] == 'mcp']
     assert mcp == [('mcp', 9879, threading.main_thread())]
     assert ('web', 9878) in calls
+    assert 'Без действующей лицензии Web UI и MCP принимают только локальный Host' in caplog.text
 
 
 def test_docker_image_listens_on_all_interfaces():

@@ -47,6 +47,7 @@ def native_server():
     with tempfile.TemporaryDirectory() as tmpdir:
         env = {**os.environ, 'DATA_DIR': os.path.join(tmpdir, 'data'), 'WEB_PORT': str(web_port),
                'MCP_HTTP_PORT': str(mcp_port), 'LISTEN_ADDR': '127.0.0.1',
+               'MCP_ALLOWED_HOSTS': 'ariadna.lan',
                'PYTHONIOENCODING': 'utf-8'}
         platform = Path(tmpdir) / 'platform' / '8.3.27.1' / 'bin'
         platform.mkdir(parents=True)
@@ -83,6 +84,10 @@ def native_server():
 
 def test_live_check_passes_and_cleans_up(native_server, capsys):
     live_check, ctx, log_path = native_server
+    response = ctx.web_get('/login', headers={'Host': 'ariadna.lan'})
+    assert response.status_code == 400 and 'лицензионный ключ' in response.text
+    assert ctx.web_get('/health', headers={'Host': 'localhost:9878'}).json() == {'status': 'ok'}
+    assert 'Локальный режим' in ctx.web_get('/').text
     # Проект «владельца»: live_check читает его (--project) и не трогает.
     ctx.create_project('owner')
     ctx.reindex_web('owner')
