@@ -27,7 +27,8 @@ COOKIE = 'ariadna_token'
 _NEW_COOKIE = 'ariadna_new_token'       # только что созданный токен — показать один раз
 _COOKIE_MAX_AGE = 30 * 24 * 3600
 
-_PUBLIC = re.compile(r'^/(health$|login$|logout$|static/|favicon)')
+# Текст лицензионного соглашения открыт и до входа: условия видны любому.
+_PUBLIC = re.compile(r'^/(health$|login$|logout$|license/agreement$|static/|favicon)')
 # Действия администратора: проекты, источники, их настройки, токены.
 # Обновление выгрузки существующего источника (…/sources/<id>/refresh — робот
 # выгрузки, docs/update.md) — не админское: проекты и источники не меняются.
