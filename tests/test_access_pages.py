@@ -68,11 +68,11 @@ def test_license_form_folded_when_key_valid(web, monkeypatch):
     pm, client = web
     page = client.get('/admin/license').text
     assert '<h1 class="page-title">Лицензия</h1>' in page
-    assert '<details class="disclosure" open>' in page and 'Установить ключ' in page
+    assert '<details class="card disclosure" open>' in page and 'Установить ключ' in page
     install_team_license(monkeypatch, pm.data_dir, users=5)
     page = client.get('/admin/license').text
     assert 'действует' in page and '5 пользователей' in page
-    assert '<details class="disclosure" >' in page and 'Заменить ключ' in page
+    assert '<details class="card disclosure" >' in page and 'Заменить ключ' in page
     assert lic is not None
 
 
