@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 
+from .code_fingerprints import bundled_fingerprints
 from .db import Database
 from .register_info import object_properties
 from .knowledge_sources import query_refs
@@ -73,6 +74,9 @@ class Indexer:
         """Отпечаток кода resolve_calls: его правка делает сохранённый граф
         устаревшим (graph_state.resolver). Пусто — исходника нет, граф
         пересчитывается всегда."""
+        bundled = bundled_fingerprints().get('resolver')
+        if bundled is not None:
+            return bundled
         try:
             source = inspect.getsource(Indexer.resolve_calls)
         except (OSError, TypeError):

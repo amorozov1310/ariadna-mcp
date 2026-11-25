@@ -9,10 +9,12 @@
 
 import os
 import re
+from importlib.metadata import PackageNotFoundError, distribution
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 from ..auth import ROLES, TokenStore, bearer
 from .. import __version__
@@ -183,6 +185,25 @@ def revoke_token(request: Request, token_id: str):
 
 
 # ---------------------------------------------------------------- лицензия
+
+@router.get('/license/agreement', response_class=PlainTextResponse)
+def license_agreement():
+    path = Path(__file__).resolve().parents[2] / 'LICENSE'
+    if path.is_file():
+        return FileResponse(path, media_type='text/plain')
+
+    # В установленном колесе LICENSE лежит в каталоге .dist-info/licenses.
+    try:
+        package = distribution('ariadna')
+    except PackageNotFoundError:
+        raise HTTPException(404, 'Файл лицензионного соглашения не найден') from None
+    for file in package.files or ():
+        if file.parts[-2:] == ('licenses', 'LICENSE'):
+            path = Path(package.locate_file(file))
+            if path.is_file():
+                return FileResponse(path, media_type='text/plain')
+    raise HTTPException(404, 'Файл лицензионного соглашения не найден')
+
 
 @router.get('/admin/license', response_class=HTMLResponse)
 def license_page(request: Request, error: str = '', installed: str = ''):

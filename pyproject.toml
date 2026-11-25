@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "ariadna"
 dynamic = ["version"]
 description = "MCP server for fast 1C configuration metadata search and BSL code analysis"
 requires-python = ">=3.11"
+license = "LicenseRef-Ariadna"
+license-files = ["LICENSE"]
 
 dependencies = [
     # Этап 6: migrated off the low-level Server API (list_tools()/call_tool()

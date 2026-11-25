@@ -126,6 +126,16 @@ def web():
             pm.close_all()
 
 
+def test_web_license_agreement(web):
+    _, client = web
+    assert 'href="/license/agreement"' in client.get('/admin/license').text
+
+    agreement = client.get('/license/agreement')
+    assert agreement.status_code == 200
+    assert agreement.headers['content-type'] == 'text/plain; charset=utf-8'
+    assert agreement.content == (Path(__file__).resolve().parents[1] / 'LICENSE').read_bytes()
+
+
 def test_web_license_page_and_install(web, monkeypatch):
     pm, client = web
     key = make_keypair(monkeypatch)

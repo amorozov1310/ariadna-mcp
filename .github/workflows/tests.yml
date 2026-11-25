@@ -64,6 +64,22 @@ jobs:
           echo "Сервер не ответил на /health за 120 с"
           exit 1
 
+      - name: Проверить байт-код и лицензию в образе
+        run: |
+          sources=$(docker compose exec -T ariadna find /app -name '*.py')
+          test -z "$sources"
+          status=0
+          license=$(docker compose exec -T ariadna python -m src.license show) || status=$?
+          test "$status" -eq 1
+          grep -q '^none:' <<< "$license"
+          curl -fsS http://127.0.0.1:19878/license/agreement | cmp LICENSE -
+          fingerprints='from src.core.indexer import Indexer
+          from src.core.platform_check import _report_fingerprint
+          print(_report_fingerprint(), Indexer.resolver_fingerprint())'
+          native=$(python -c "$fingerprints")
+          image=$(docker compose exec -T ariadna python -c "$fingerprints")
+          test "$image" = "$native"
+
       - name: live_check (полный режим)
         env:
           PYTHONIOENCODING: utf-8
@@ -169,6 +185,9 @@ jobs:
           for path in ('/', '/static/style.css', '/static/fonts/golos-text-400-cyrillic.woff2'):
               r = client.get(path)
               assert r.status_code == 200, (path, r.status_code, r.text[:300])
+          agreement = client.get('/license/agreement')
+          assert agreement.status_code == 200, agreement.status_code
+          assert agreement.content == (Path(os.environ['EXPECTED_VERSION_FILE']).parents[1] / 'LICENSE').read_bytes()
           # Разрешённый IPv6-адрес с портом: со Starlette < 1.7 здесь был 400.
           r = TestClient(app, headers={'Host': '[::1]:19878'}).get('/health')
           assert r.status_code == 200, ('[::1]', r.status_code)

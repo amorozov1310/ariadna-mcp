@@ -37,6 +37,7 @@
         <dt>Эта версия</dt><dd>{{ version }}, вышла {{ released.strftime('%d.%m.%Y') }}</dd>
         {% if state.info %}<dt>Номер ключа</dt><dd class="mono">{{ state.info.id }}</dd>{% endif %}
     </dl>
+    <p><a href="/license/agreement">Лицензионное соглашение</a></p>
 
     {# Действующий ключ заменять незачем — форма свёрнута. #}
     <details class="disclosure" {% if not state.valid or error %}open{% endif %}>
