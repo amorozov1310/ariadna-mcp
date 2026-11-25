@@ -27,6 +27,8 @@ import inspect
 import logging
 from pathlib import Path
 
+from .code_fingerprints import bundled_fingerprints
+
 logger = logging.getLogger('ariadna')
 
 _HERE = Path(__file__).parent
@@ -40,8 +42,11 @@ def _normalize(text: str) -> str:
 
 
 def compute_parser_fingerprint() -> str:
-    """Без кэша. Пустая строка — исходников нет (например, только .pyc):
-    тогда отпечаток не сравнивается и поведение прежнее."""
+    """Отпечаток из исходников или из данных сборки Docker-образа.
+    Пустая строка — исходников прочитать не удалось."""
+    bundled = bundled_fingerprints().get('parser')
+    if bundled is not None:
+        return bundled
     from .indexer import Indexer
     h = hashlib.sha256()
     try:

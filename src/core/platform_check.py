@@ -30,6 +30,7 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 from .bsl_parser import (_BSL_TOKEN, _RE_MODULE_VAR_DECL, _form_context_vars,
                          _parse_param_names, read_bsl_text, without_deletions)
 from .bsl_reference import module_context_vars
+from .code_fingerprints import bundled_fingerprints
 from .db import IndexRemovedError
 from .fsretry import replace_with_retry, retry_on_permission_error
 from .indexer import form_xml_for_module, module_file_hash, module_file_stat
@@ -921,8 +922,11 @@ class _Report:
 
 @cache
 def _report_fingerprint():
-    code = Path(__file__).read_text(encoding='utf-8').replace('\r\n', '\n')
-    return hashlib.sha256(code.encode()).hexdigest(), parser_fingerprint(), help_fingerprint()
+    report = bundled_fingerprints().get('report')
+    if report is None:
+        code = Path(__file__).read_text(encoding='utf-8').replace('\r\n', '\n')
+        report = hashlib.sha256(code.encode()).hexdigest()
+    return report, parser_fingerprint(), help_fingerprint()
 
 
 def _file_identity(path):

@@ -131,6 +131,7 @@ def test_login_logout_and_safe_next(web):
     assert client.get('/projects/p1').status_code == 200
     client.get('/logout')
     assert client.get('/projects/p1', follow_redirects=False).status_code == 303
+    assert client.get('/license/agreement', follow_redirects=False).status_code == 200   # соглашение открыто
 
 
 # ---------------------------------------------------------------- MCP

@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .code_fingerprints import bundled_fingerprints
 from .fsretry import replace_with_retry, retry_on_permission_error
 from .metadata_model import OBJECT_TYPE_MAP
 
@@ -101,6 +102,9 @@ class HbkError(ValueError):
 @cache
 def fingerprint() -> str:
     """Отпечаток разборщика: хеш этого модуля без учёта окончаний строк."""
+    bundled = bundled_fingerprints().get('help')
+    if bundled is not None:
+        return bundled
     text = Path(__file__).read_text(encoding='utf-8').replace('\r\n', '\n')
     return hashlib.sha1(text.encode('utf-8')).hexdigest()[:16]
 

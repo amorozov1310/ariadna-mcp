@@ -12,16 +12,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 # scripts/docker_requirements.py, своего списка здесь нет.
 # Колёса обновляются при изменении зависимостей (из корня репозитория):
 #   docker run --rm -v "$PWD:/repo" -w /repo python:3.12-slim sh docker-wheels/fetch.sh
-COPY pyproject.toml .
-COPY scripts/docker_requirements.py scripts/
-COPY docker-wheels/ /tmp/wheels/
-RUN python scripts/docker_requirements.py install > /tmp/requirements.txt && \
+RUN --mount=type=bind,source=pyproject.toml,target=/app/pyproject.toml \
+    --mount=type=bind,source=scripts/docker_requirements.py,target=/app/scripts/docker_requirements.py \
+    --mount=type=bind,source=docker-wheels,target=/tmp/wheels \
+    python scripts/docker_requirements.py install > /tmp/requirements.txt && \
     pip install --no-cache-dir --no-index --find-links=/tmp/wheels \
         -r /tmp/requirements.txt && \
-    rm -rf /tmp/wheels /tmp/requirements.txt
+    rm /tmp/requirements.txt
 
-# App code
+FROM base AS bytecode
 COPY src/ src/
+RUN python -B -m src.core.code_fingerprints && \
+    python -m compileall -b -f -q --invalidation-mode unchecked-hash src && \
+    find src -type f -name '*.py' -delete && \
+    find src -type d -name '__pycache__' -prune -exec rm -rf {} +
+
+FROM base
+# Слой с исходниками остаётся на стадии сборки. Файлы данных копируются вместе с .pyc.
+COPY --from=bytecode /app/src/ src/
+COPY LICENSE .
 
 # Create data directory
 RUN mkdir -p /data/projects /index

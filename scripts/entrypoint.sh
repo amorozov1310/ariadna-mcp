@@ -7,6 +7,7 @@ echo "  Data:    ${DATA_DIR:-/data}"
 echo "  Index:   ${INDEX_DIR:-${DATA_DIR:-/data}/projects}"
 echo "  MCP:     :${MCP_HTTP_PORT:-9879}/mcp"
 echo "  Web UI:  :${WEB_PORT:-9878}"
+echo "  Лицензионное соглашение: /app/LICENSE"
 echo "============================================"
 
 mkdir -p "${DATA_DIR:-/data}/projects"
