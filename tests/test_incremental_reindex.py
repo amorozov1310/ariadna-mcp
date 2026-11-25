@@ -106,6 +106,9 @@ def test_changed_file_is_reparsed_not_duplicated():
             "SELECT p.name FROM procedures p JOIN modules m ON m.id=p.module_id "
             "WHERE m.name LIKE '%ЦеныСервер%'")}
         assert names == {'РассчитатьЦену', 'НоваяПроцедура'}, names
+        module_id = conn.execute(
+            "SELECT id FROM modules WHERE name LIKE '%ЦеныСервер%'").fetchone()[0]
+        assert db.read_module_text(module_id) == content
         db.close()
 
 
@@ -124,9 +127,9 @@ def test_removed_file_is_cleaned_up():
 
         conn = db.conn
         before_modules = _count(conn, 'modules')
-        assert conn.execute(
-            "SELECT COUNT(*) FROM modules WHERE name LIKE '%ЦеныСервер%'"
-        ).fetchone()[0] == 1
+        module_id = conn.execute(
+            "SELECT id FROM modules WHERE name LIKE '%ЦеныСервер%'").fetchone()[0]
+        assert db.read_module_text(module_id)
 
         shutil.rmtree(xml_dir / 'CommonModules' / 'ЦеныСервер')
 
@@ -141,6 +144,7 @@ def test_removed_file_is_cleaned_up():
         # module_text_fts row must go with it (no FK — cleaned up explicitly)
         remaining_fts = conn.execute("SELECT COUNT(*) FROM module_text_fts").fetchone()[0]
         assert remaining_fts == after_modules
+        assert db.read_module_text(module_id) is None
         db.close()
 
 

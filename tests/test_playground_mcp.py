@@ -153,6 +153,110 @@ def test_cases_cover_every_mcp_tool():
     assert len(CASES) == 27
 
 
+def test_mcp_and_web_use_only_index_after_export_moves(web, tmp_path, monkeypatch):
+    from tests.fixtures.generate_platform_help import context_book
+    from tests.test_platform_check import _join_workers, _report_workers
+    from src.mcp_server.tools import semantic_search_payload
+    from src.web import app as app_module
+
+    pm, client = web
+    for pid in ('base', 'release'):
+        pm.create_project(pid, pid)
+        pm.add_source(pid, 'main', 'Main', xml_archive=_zip(FIXTURES / 'xml_ru'), xml_archive_filename='x.zip')
+    for pid, value in (('p1', 120), ('release', 110)):
+        path = pm.get_source_xml_path(pid, 'main') / 'CommonModules/ЦеныСервер/Ext/Module.bsl'
+        code = path.read_text(encoding='utf-8-sig')
+        path.write_text(code.replace('Возврат 100;', f'Возврат {value};'), encoding='utf-8-sig')
+    for pid in ('base', 'release'):
+        pm.reindex(pid)
+    pm.set_comparison('p1', 'base', 'release')
+    pm.platform_help.build_from_bytes('8.3.27.1', context_book())
+
+    cases = {**CASES, 'diff_from_base': CASES['get_procedure_code'],
+             'update_conflicts': {**CASES['get_procedure_code'], 'release_project': 'release'}}
+    schemas = _schemas()
+
+    def call(manager, tool):
+        return execute_tool(manager, tool, _sdk_args(schemas[tool], cases[tool]))
+
+    reindex_result = call(pm, 'reindex')
+    assert reindex_result.startswith('Reindex started')
+    _wait_ready(pm)
+    glossary_result = call(pm, 'add_glossary_term')
+    assert 'Записано в словарь' in glossary_result
+
+    def mcp_results(manager):
+        result = call(manager, 'check_platform_calls')
+        if 'Отчёт готовится' in result or 'Отчёт уже готовится' in result:
+            _join_workers(_report_workers(manager, 'p1'))
+        return {tool: call(manager, tool) for tool in cases
+                if tool not in ('reindex', 'add_glossary_term')}
+
+    proc = {'module': 'ЦеныСервер', 'name': 'РассчитатьЦену'}
+    graph = {'module': proc['module'], 'procedure': proc['name'], 'direction': 'up'}
+    pages = [
+        ('/', {}), ('/projects/p1', {}), ('/projects/p1/settings', {}),
+        ('/projects/p1/search', {'q': 'Возврат 120', 'mode': 'code'}),
+        ('/projects/p1/object/Справочник.Склады', {}),
+        ('/projects/p1/procedure', proc),
+        ('/projects/p1/procedure', {'module': proc['module'], 'line': 1}),
+        ('/projects/p1/calltree', graph), ('/projects/p1/graph', graph),
+        ('/api/projects/p1/graph/calltree', graph),
+        ('/projects/p1/checks', {}), ('/projects/p1/diff', {}),
+        ('/projects/p1/diff/procedure', proc), ('/projects/p1/diff/update', {}),
+        ('/projects/p1/diff/conflict', {**proc, 'release': 'release'}),
+        ('/projects/p1/glossary', {}), ('/projects/p1/playground', {}),
+        ('/api/projects/p1/manifest', {}), ('/ready', {}),
+    ]
+
+    def web_results():
+        responses = []
+        for path, params in pages:
+            response = client.get(path, params=params)
+            assert response.status_code == 200, (path, response.text)
+            responses.append(response.content)
+        return responses
+
+    before = mcp_results(pm)
+    assert {**before, 'reindex': reindex_result, 'add_glossary_term': glossary_result}.keys() == schemas.keys()
+    assert 'Возврат 120;' in before['get_procedure_code']
+    assert 'Возврат 120;' in before['search_code']
+    assert '8.3.24' in before['check_platform_calls']
+    assert 'СтрНайти' in before['platform_help']
+    assert 'Возврат 120;' in before['diff_from_base']
+    assert 'Возврат 110;' in before['update_conflicts']
+    assert 'места хранения' in before['list_glossary']
+    assert int(before['diagnose_index'].split(': ', 1)[1].split()[0]) > 0
+    semantic_args = _sdk_args(schemas['semantic_search_code'], cases['semantic_search_code'])
+    semantic = semantic_search_payload(pm, semantic_args)
+    assert any(item['snippet'] for item in semantic['items'])
+    rendered = web_results()
+    pm.close_all()
+
+    # Переносим только index.db каждого проекта, без WAL и кэша проверки платформы.
+    index_dir = tmp_path / 'index'
+    shutil.copytree(pm.data_dir / 'platform-help', index_dir / 'platform-help')
+    for pid in ('p1', 'base', 'release'):
+        xml = pm.get_source_xml_path(pid, 'main')
+        xml.parent.rename(tmp_path / f'{pid}-export')
+        copied = index_dir / pid / 'index.db'
+        copied.parent.mkdir(parents=True)
+        shutil.copy2(pm.projects_dir / pid / 'index.db', copied)
+
+    offline = ProjectManager(str(pm.projects_dir.parent), index_dir=str(index_dir))
+    monkeypatch.setattr(app_module, '_pm', offline)
+    try:
+        assert mcp_results(offline) == before
+        assert semantic_search_payload(offline, semantic_args) == semantic
+        for (path, params), old, new in zip(pages, rendered, web_results(), strict=True):
+            assert new == old, (path, params)
+        assert call(offline, 'add_glossary_term') == glossary_result
+        assert call(offline, 'reindex') == reindex_result
+        _wait_ready(offline)
+    finally:
+        offline.close_all()
+
+
 @pytest.mark.parametrize('tool', sorted(CASES))
 def test_playground_answer_equals_execute_tool(web, tool):
     pm, client = web

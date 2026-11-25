@@ -15,9 +15,8 @@
 {% elif result.status == 'same' %}
 <p class="text-muted">Текст в «{{ current_label }}» и в базе «{{ base_label }}» совпадает.</p>
 {% elif result.status == 'unreadable' %}
-<p class="text-muted">Процедура есть в обоих индексах, но файл выгрузки
-    {{ 'базы «' ~ base_label ~ '»' if result.base_unreadable else '«' ~ current_label ~ '»' }}
-    недоступен на сервере — текст не сравнить.</p>
+<p class="text-muted">Текст процедуры отсутствует в индексе
+    {{ 'базы «' ~ base_label ~ '»' if result.base_unreadable else '«' ~ current_label ~ '»' }}.</p>
 {% else %}
 <p class="text-muted text-sm">
     <span class="diff-line-del-mark">−</span> было в базе «{{ base_label }}»,

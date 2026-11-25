@@ -11,6 +11,7 @@
   - bsl_parser.py, bsl_reference.py — сам разбор и стоп-листы;
   - xml_walker.py — full_name модулей (ключ хранения), путь к Form.xml и
     read_form_attributes (реквизиты формы меняют разбор модуля формы);
+  - form_events.py — связи событий форм с обработчиками;
   - из indexer.py — только исходник функций, формирующих сохранённый
     результат разбора (_INDEXER_FUNCTIONS). У resolve_calls свой отпечаток
     (Indexer.resolver_fingerprint, таблица graph_state), у записи метаданных —
@@ -32,7 +33,7 @@ from .code_fingerprints import bundled_fingerprints
 logger = logging.getLogger('ariadna')
 
 _HERE = Path(__file__).parent
-_SOURCE_FILES = ('bsl_parser.py', 'bsl_reference.py', 'xml_walker.py')
+_SOURCE_FILES = ('bsl_parser.py', 'bsl_reference.py', 'xml_walker.py', 'form_events.py')
 _INDEXER_FUNCTIONS = ('collect_known_facts', 'scan_known_names',
                       'scan_known_factory_functions', 'index_bsl')
 

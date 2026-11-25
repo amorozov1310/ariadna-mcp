@@ -101,7 +101,7 @@ if HAS_MCP:
         match_end_line: int = Field(description='Конец найденного фрагмента')
         content_hash: str = Field(description='Отпечаток карточки процедуры (sha256)')
         match_methods: list[str] = Field(description='Как найдено: exact_name — имя равно запросу, fts — по тексту карточки, glossary — по словарю проекта')
-        evidence_kind: str = Field(description='source_excerpt — фрагмент из файла; card_header — файл недоступен')
+        evidence_kind: str = Field(description='source_excerpt — фрагмент кода из индекса, card_header — заголовок карточки')
         snippet: str = Field(description='Строка кода рядом с совпадением')
         snippet_line: int
 
@@ -628,9 +628,9 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
                    limit=limit, offset=offset, level=level)
 
     @mcp.tool(
-        description="Диагностика индекса: процедуры в файлах против проиндексированных (пропущенные "
-                     "и лишние) и качество графа вызовов — доля разрешённых вызовов по видам, худшие "
-                     "модули, частые нерезолвленные имена. Читает все файлы выгрузки — на крупной "
+        description="Диагностика индекса: сверяет объявления в сохранённом тексте BSL с результатом "
+                     "разбора и проверяет качество графа вызовов (доли разрешённых вызовов, худшие "
+                     "модули, частые нерезолвленные имена). Читает весь текст из индекса — на крупной "
                      "конфигурации занимает время. Не для обычного поиска.",
         annotations=_READ_ONLY,
     )

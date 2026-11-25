@@ -22,7 +22,6 @@ import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Iterator
 
 # Меняется при любом изменении состава или вида карточки: карточки (и всё,
@@ -174,19 +173,6 @@ def query_stems(word: str) -> list[str]:
     return stems
 
 
-def _read_lines(path: str) -> list[str] | None:
-    try:
-        raw = Path(path).read_bytes()
-    except OSError:
-        return None
-    for enc in ('utf-8-sig', 'cp1251'):
-        try:
-            return raw.decode(enc).splitlines()
-        except UnicodeDecodeError:
-            continue
-    return None
-
-
 def _regions(lines: list[str]) -> list[str]:
     """Область на каждой строке (индекс — номер строки с 0): «А/Б» для вложенных."""
     stack: list[str] = []
@@ -272,7 +258,7 @@ def build_cards(engine, source_id: str | None = None, module_name: str | None = 
                 module_ids: set[int] | None = None) -> Iterator[ProcedureCard]:
     """Карточки процедур индекса (SearchEngine engine), по модулю за раз.
 
-    Файл модуля читается один раз на модуль; недоступный файл даёт карточки
+    Текст читается из индекса один раз на модуль; отсутствие текста даёт карточки
     с одним заголовком (body_available=False), а не пропуск процедур.
     """
     conn = engine.db.read_conn()
@@ -287,7 +273,7 @@ def build_cards(engine, source_id: str | None = None, module_name: str | None = 
     rows = conn.execute(
         f"""SELECT p.id, p.name, p.kind, p.is_export, p.start_line, p.end_line,
                    p.directive, p.signature, m.id AS module_id, m.name AS module_name,
-                   m.file_path, m.abs_path, m.source_id
+                   m.file_path, m.source_id
             FROM procedures p JOIN modules m ON m.id = p.module_id
             {where} ORDER BY m.source_id, m.name, p.start_line""", params).fetchall()
 
@@ -299,8 +285,8 @@ def build_cards(engine, source_id: str | None = None, module_name: str | None = 
 
     for procs in by_module.values():
         first = procs[0]
-        path = engine.module_file_path(first)
-        lines = _read_lines(path) if path else None
+        content = engine.db.read_module_text(first['module_id'])
+        lines = content.splitlines() if content is not None else None
         regions = _regions(lines) if lines is not None else []
         obj = _object_of(first['module_name'])
         synonym = synonym_of(first['source_id'], first['module_name'])
@@ -501,7 +487,7 @@ def drop_common_terms(db, conn, terms: list[str]) -> list[str]:
 # Общие поля выдачи search_cards: границы процедуры и файл модуля — для
 # ссылки на источник (semantic_search_code), чтения фрагмента и get_procedure_code.
 _RESULT_COLUMNS = ('p.start_line AS proc_start, p.end_line AS proc_end, p.is_export, '
-                   'p.kind AS proc_kind, m.file_path, m.abs_path')
+                   'p.kind AS proc_kind, m.file_path, m.id AS module_id')
 
 
 def _exact_name_rows(conn, name: str, source_id: str | None, limit: int):

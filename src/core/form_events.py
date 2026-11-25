@@ -8,9 +8,8 @@
 Form.xml основной конфигурации. Значения callType в выгрузке английские и в
 русских конфигурациях: Before / After / Override.
 
-Отдельный модуль, а не xml_walker: тот входит в отпечаток парсера
-(parser_fingerprint), его правка переразбирает все индексы. Form.xml
-читаются при поиске перехватов — это только заимствованные формы расширений.
+При индексации сохраняются связи события с обработчиком. По ним сравниваются
+формы основной конфигурации и расширений.
 """
 
 import logging
@@ -57,21 +56,3 @@ def form_events(form_xml: str | Path) -> dict[tuple[str, str], tuple[str, str]]:
 
     walk(root, '')
     return found
-
-
-def intercepted_events(ext_form_xml: str | Path, main_form_xml: str | Path, russian: bool = True):
-    """Перехваты событий формы расширения: (обработчик в основной форме,
-    обработчик расширения, ключевое слово). Событие без обработчика в
-    основной форме пропускается — перехватывать в ней нечего."""
-    keywords = CALL_TYPES if russian else CALL_TYPES_EN
-    ext = {k: v for k, v in form_events(ext_form_xml).items() if v[1]}
-    if not ext:
-        return []
-    main = form_events(main_form_xml)
-    result = []
-    for key, (ext_handler, call_type) in sorted(ext.items()):
-        keyword = keywords.get(call_type.casefold())
-        target = main.get(key)
-        if keyword and target and not target[1]:
-            result.append((target[0], ext_handler, keyword))
-    return result

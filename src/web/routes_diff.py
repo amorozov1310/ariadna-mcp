@@ -208,15 +208,13 @@ async def conflict_page(request: Request, project_id: str, release: str, module:
 
 def _intercept_code(pm, project_id: str, module: str, procedure: str) -> list[dict]:
     """Перехваты процедуры в расширениях проекта с текстом процедур расширений."""
-    from ..core.bsl_parser import read_bsl_text
     engine = pm.get_search(project_id)
     found = []
     for it in pm.intercepts(project_id, None, module, procedure):
         outline = engine.get_module_outline(it.module, source_id=it.source_id)
         proc = next((p for p in (outline or {}).get('procedures', [])
                      if p['name'].casefold() == it.ext_procedure.casefold()), None)
-        path = engine.module_file_path(outline['module']) if outline and proc else None
-        text = read_bsl_text(path) if path else None
+        text = engine.db.read_module_text(outline['module']['id']) if proc else None
         lines = text.split('\n')[proc['start_line'] - 1:proc['end_line']] if text else []
         found.append({'intercept': it, 'lines': lines})
     return found

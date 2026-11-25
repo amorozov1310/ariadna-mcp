@@ -242,41 +242,37 @@ def test_complete_result_still_says_shown_and_web_api_returns_list():
 
 
 # ============================================
-# Недоступные файлы выгрузки: не «ничего не найдено», а честная ошибка
+# Отсутствие текста в индексе отражается в полноте выдачи
 # ============================================
 
 import shutil
 
 
-def _xml_dir(pm: ProjectManager) -> Path:
-    return pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
-
-
-def test_unreadable_dump_is_an_error_not_no_matches():
-    """Выгрузку убрали с диска после индексации (так было на живом
-    сервере) — раньше search_code отвечал «No code matches found»."""
+def test_missing_indexed_text_is_an_error():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm_with_xml_en(tmpdir)
         try:
-            shutil.move(str(_xml_dir(pm)), str(Path(tmpdir) / 'moved-away'))
-            abs_paths = [r[0] for r in pm.get_db('p1').conn.execute(
-                "SELECT abs_path FROM modules WHERE abs_path != ''")]
-            assert abs_paths and not any(os.path.exists(p) for p in abs_paths), \
-                "запасной путь abs_path тоже должен быть недоступен"
-
+            with pm.get_db('p1').conn as conn:
+                conn.execute('DELETE FROM module_text')
             text = execute_tool(pm, 'search_code', {'query': 'TraceSettings'})
             assert 'No code matches found' not in text, text
             assert text.startswith('Error'), text
-            assert 'недоступны' in text and 'переиндексируйте' in text.lower(), text
+            assert 'отсутствует текст' in text and 'переиндексируйте' in text.lower(), text
         finally:
             pm.close_all()
 
 
-def test_partially_unreadable_dump_marks_result_incomplete():
+def _delete_server_common_text(pm):
+    with pm.get_db('p1').conn as conn:
+        conn.execute("DELETE FROM module_text WHERE module_id IN (SELECT id FROM modules WHERE file_path = ?)",
+                     ('CommonModules/ServerCommon/Ext/Module.bsl',))
+
+
+def test_partially_missing_indexed_text_marks_result_incomplete():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm_with_xml_en(tmpdir)
         try:
-            (_xml_dir(pm) / 'CommonModules' / 'ServerCommon' / 'Ext' / 'Module.bsl').unlink()
+            _delete_server_common_text(pm)
             text = execute_tool(pm, 'search_code', {'query': 'EndFunction'})
             assert not text.startswith('Error'), text
             assert 'IntegrationServer' in text, text
@@ -292,7 +288,7 @@ def test_unreadable_and_limit_notes_agree(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm_with_xml_en(tmpdir)
         try:
-            (_xml_dir(pm) / 'CommonModules' / 'ServerCommon' / 'Ext' / 'Module.bsl').unlink()
+            _delete_server_common_text(pm)
             text = execute_tool(pm, 'search_code', {'query': 'EndFunction'})
             last = text.splitlines()[-1]
             assert 'выдача ограничена' in last and 'не прочитано модулей: 1' in last, text

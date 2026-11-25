@@ -775,9 +775,7 @@ _OBJECT_METHODS = {
 def read_bsl_text(file_path: str, encoding: str = 'utf-8-sig') -> str | None:
     """Read a .bsl file's text, trying likely 1C encodings in order.
     Returns None if the file is missing or none of them decode it.
-    Shared by BSLParser.parse_file and search_code's on-disk re-read
-    (Этап 3 — module_text_fts is contentless, so this is how a matched
-    module's line/context actually gets recovered)."""
+    Used by BSLParser.parse_file during indexing."""
     path = Path(file_path)
     if not path.exists():
         return None

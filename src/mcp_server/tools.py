@@ -146,28 +146,6 @@ def _format_page(page: list[dict], offset: int, limit: int, has_more: bool) -> s
     return f"{text}\n{_page_trailer(len(page), offset, limit, has_more)}"
 
 
-def _stale_module_warning(path: str, mod: dict) -> str:
-    """Предупреждение, если файл модуля изменился после индексации.
-
-    get_procedure_code режет текущий файл по номерам строк из индекса: после
-    «обновить источник» без reindex под заголовком процедуры оказались бы
-    чужие строки. Хеш считается так же, как в индексаторе; пустой
-    file_hash (индексатор не смог прочитать файл) — не повод для тревоги."""
-    from ..core.indexer import form_xml_for_module, module_file_hash
-    stored = mod.get('file_hash') or ''
-    if not stored:
-        return ''
-    try:
-        current = module_file_hash(path, form_xml_for_module(path, mod.get('module_type') or ''))
-    except OSError:
-        return ''
-    if current == stored:
-        return ''
-    return ("// ВНИМАНИЕ: файл модуля изменён после индексации — границы процедуры "
-            "могут быть неверны, код ниже может быть чужим. Переиндексируйте проект "
-            "(reindex).\n")
-
-
 _GLOSSARY_KIND = {'object': 'объект', 'attribute': 'реквизит', 'procedure': 'процедура'}
 
 
@@ -392,8 +370,8 @@ def format_procedure_diff(result: dict) -> str:
             return f"{name}: текст в проекте и в базе «{base}» совпадает."
         case 'unreadable':
             side = f"базы «{base}»" if result['base_unreadable'] else "проекта"
-            return (f"{name}: процедура есть в обоих индексах, но файл выгрузки {side} недоступен на "
-                    f"сервере — текст не сравнить (переиндексируйте или проверьте путь к выгрузке).")
+            return (f"{name}: текст процедуры отсутствует в индексе {side}. "
+                    f"Переиндексируйте проект (reindex).")
     note = {'added': f"процедуры нет в базе «{base}» — добавлена",
             'removed': f"процедура есть только в базе «{base}» — удалена"}.get(result['status'], '')
     return (f"// {note}\n" if note else '') + (result['diff'] or f"{name}: изменение не прочитать.")
@@ -734,7 +712,6 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     f"  Modules: {preview['modules']}\n"
                     f"  Procedures: {preview['procedures']}\n"
                     f"  Calls: {preview['calls']}\n"
-                    f"  Files on disk: {'yes' if preview['files_exist'] else 'no'}\n"
                     f"This is irreversible. Repeat with confirm=true to actually delete."
                 )
             # pm.remove_source молча выходит на неизвестном id (так его зовёт
@@ -771,7 +748,6 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             return '\n'.join(lines)
 
         case 'get_procedure_code':
-            from ..core.bsl_parser import read_bsl_text
             module_name = args.get('module_name', '')
             proc_name = (args.get('procedure_name') or '').strip()
             outline = engine.get_module_outline(module_name, source_id=source_id)
@@ -784,18 +760,14 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             if not proc:
                 return (f"Procedure '{proc_name}' not found in module {mod['name']}. "
                         f"List its procedures with get_module_outline(module_name=\"{mod['name']}\").")
-            path = engine.module_file_path(mod)
-            if not path:
-                return (f"{mod['name']}.{proc['name']}: lines {proc['start_line']}-{proc['end_line']} — "
-                        f"module file is not readable on the server (XML dump moved or deleted? reindex the project).")
-            content = read_bsl_text(path)
+            content = engine.db.read_module_text(mod['id'])
             if content is None:
-                return f"{mod['name']}.{proc['name']}: could not read {mod.get('file_path', '')}."
+                return (f"{mod['name']}.{proc['name']}: текст модуля отсутствует в индексе. "
+                        f"Переиндексируйте проект (reindex).")
             lines = content.split('\n')
             code = '\n'.join(lines[proc['start_line'] - 1:proc['end_line']])
             src = f"  @{outline['source_label']}" if outline.get('source_label') else ''
-            return (_stale_module_warning(path, mod)
-                    + f"// {mod['name']}.{proc['name']}{src}\n"
+            return (f"// {mod['name']}.{proc['name']}{src}\n"
                     f"// Lines {proc['start_line']}-{proc['end_line']}\n\n{code}")
 
         case 'get_procedure_context':
@@ -838,12 +810,9 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             unreadable = last.unreadable if last else 0
             readable = last.readable if last else 0
 
-            # Модули читаются с диска: если выгрузки там нет, пустой ответ —
-            # не «ничего не найдено», а невозможность искать.
             if not page and unreadable and not readable:
-                return (f"Error: файлы выгрузки недоступны на сервере — не прочитан ни один из "
-                        f"{unreadable} модулей-кандидатов. Переиндексируйте проект или "
-                        f"проверьте путь к выгрузке.")
+                return (f"Error: в индексе отсутствует текст всех модулей-кандидатов ({unreadable}). "
+                        f"Переиндексируйте проект (reindex).")
 
             # Поиск просматривает ограниченное число модулей и вхождений на
             # модуль; если предел сработал, «показано всё» было бы неправдой.
@@ -859,8 +828,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                 notes.append(f"выдача ограничена: {' и '.join(limits)} — "
                              f"сузьте поиск через file_pattern или source_id")
             if unreadable:
-                notes.append(f"не прочитано модулей: {unreadable} (файлы выгрузки недоступны "
-                             f"на сервере) — выдача неполная")
+                notes.append(f"не прочитано модулей: {unreadable} (в индексе нет текста) — выдача неполная")
 
             if not page:
                 if offset == 0:
@@ -1033,7 +1001,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             limit = max(1, int(args.get('limit', 50)))
             offset = max(0, offset)
             try:
-                page, more, counts, modules, changed = check_calls(
+                page, more, counts, modules = check_calls(
                     engine, index, mode, source_id, limit, offset, levels, project_id, revision)
             except ReportUnavailable as e:
                 return str(e)
@@ -1045,9 +1013,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             heading += f'Режим совместимости {mode}.' if mode else 'Числовой режим совместимости не задан.'
             summary = (f"Модулей — {modules}. Ошибки — {counts['error']}, "
                        f"предупреждения — {counts['warning']}, не проверено — {counts['unchecked']}.")
-            notes = ['Файлы изменились или пропали после подготовки отчёта, счётчики могут быть устаревшими. '
-                     'Обновите индекс (reindex).', *changed] if changed else []
-            if not page and not changed:
+            if not page:
                 if offset:
                     page.append(f'При offset={offset} записей больше нет.')
                 else:
@@ -1055,7 +1021,7 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                                 else 'Замечаний нет.')
             if more:
                 page.append(f'Следующая страница: offset={offset + limit}.')
-            return '\n'.join([heading, summary, *notes, *page])
+            return '\n'.join([heading, summary, *page])
 
         case 'diagnose_index':
             from ..core.search import diagnose_index

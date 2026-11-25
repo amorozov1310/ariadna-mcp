@@ -25,7 +25,6 @@ from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
-from .xml_metadata import compatibility_version
 
 logger = logging.getLogger('ariadna')
 
@@ -766,14 +765,12 @@ class ProjectManager:
                          (SELECT 1 FROM calls_resolved cr WHERE cr.call_id = c.id))""",
                 (source_id,)).fetchone()[0]
         except Exception:
-            pass  # DB not indexed yet — a files-only preview is still useful
+            pass  # До первой индексации счётчики остаются нулевыми.
 
-        source_dir = self.projects_dir / project_id / 'sources' / source_id
         return {
             'source_id': source_id,
             'label': source.label,
             'source_type': source.source_type,
-            'files_exist': source_dir.exists(),
             **counts,
         }
 
@@ -923,16 +920,7 @@ class ProjectManager:
 
     def get_search(self, project_id: str) -> SearchEngine:
         """Get SearchEngine instance for project."""
-        db = self.get_db(project_id)
-        roots: dict[str, str] = {}
-        try:
-            project = self.get_project(project_id)
-        except KeyError:
-            project = None
-        for src in (project.sources if project else []):
-            if src.xml_path:
-                roots[src.id] = str(self.source_path(project_id, src.xml_path))
-        return SearchEngine(db, source_roots=roots, glossary=self.get_glossary(project_id))
+        return SearchEngine(self.get_db(project_id), glossary=self.get_glossary(project_id))
 
     def get_glossary(self, project_id: str):
         """Словарь проекта (src/core/glossary.py): data/projects/{id}/glossary.json."""
@@ -1000,7 +988,10 @@ class ProjectManager:
         return (main or (sources[0] if sources else None)).id if sources else 'main'
 
     def platform_mode(self, project_id: str) -> str:
-        return compatibility_version(self.get_source_xml_path(project_id, self.main_source(project_id)))
+        row = self.get_db(project_id).read_conn().execute(
+            "SELECT compatibility_mode FROM sources WHERE id=?", (self.main_source(project_id),)
+        ).fetchone()
+        return row[0] if row else ''
 
     def platform_help_version(self, project_id: str | None = None) -> str:
         version = self.get_project(project_id).platform_version if project_id else ''
@@ -1246,41 +1237,31 @@ class ProjectManager:
 
     def _form_event_intercepts(self, project_id: str, source_id: str, module_name: str = '',
                                procedure_name: str = '') -> list:
-        """Перехваты событий заимствованных форм: модуль формы расширения с тем
-        же именем, что в source_id, и callType у события в его Form.xml."""
+        """Перехваты событий заимствованных форм по связям из индекса."""
         from .base_diff import Intercept
-        from .form_events import FORM_EVENT_MARK, intercepted_events
-        from .indexer import form_xml_for_module
-        from .xml_metadata import is_russian_dump
-        project = self.get_project(project_id)
-        roots = {s.id: self.source_path(project_id, s.xml_path)
-                 for s in project.sources if s.xml_path}
-        if source_id not in roots:
-            return []
-        # Первый параметр — источник основной формы (JOIN), второй — «не он».
-        conds, params = ["e.source_id != ?", "e.module_type = 'МодульФормы'"], [source_id, source_id]
+        from .form_events import CALL_TYPES, CALL_TYPES_EN, FORM_EVENT_MARK
+        conds = ["e.source_id != ?", "ef.call_type != ''", "mf.call_type = ''"]
+        params = [source_id, source_id]
         if module_name:
-            conds.append("casefold(e.name) = ?")
+            conds.append("e.name_cf = ?")
             params.append(module_name.casefold())
+        if procedure_name:
+            conds.append("casefold(mf.handler) = ?")
+            params.append(procedure_name.strip().casefold())
         rows = self.get_db(project_id).read_conn().execute(
-            f"""SELECT e.name, e.source_id, e.file_path AS ext_path, m.file_path AS main_path
-                FROM modules e JOIN modules m ON m.name = e.name AND m.source_id = ?
-                WHERE {' AND '.join(conds)}""", params).fetchall()
-        result, russian = [], {}
+            f"""SELECT e.name, e.source_id, s.script_is_russian, ef.call_type,
+                       ef.handler, mf.handler AS target
+                FROM form_events ef JOIN modules e ON e.id = ef.module_id
+                JOIN sources s ON s.id = e.source_id
+                JOIN modules m ON m.name_cf = e.name_cf AND m.source_id = ?
+                JOIN form_events mf ON mf.module_id = m.id AND mf.owner = ef.owner AND mf.event = ef.event
+                WHERE {' AND '.join(conds)} ORDER BY e.id, ef.owner, ef.event""", params)
+        result = []
         for r in rows:
-            if r['source_id'] not in roots or not r['ext_path'] or not r['main_path']:
-                continue
-            ext_xml = form_xml_for_module(roots[r['source_id']] / r['ext_path'], 'МодульФормы')
-            main_xml = form_xml_for_module(roots[source_id] / r['main_path'], 'МодульФормы')
-            if not ext_xml or not main_xml:
-                continue
-            if r['source_id'] not in russian:
-                russian[r['source_id']] = is_russian_dump(roots[r['source_id']])
-            for target, handler, keyword in intercepted_events(ext_xml, main_xml,
-                                                               russian[r['source_id']]):
-                if procedure_name and target.casefold() != procedure_name.strip().casefold():
-                    continue
-                result.append(Intercept(r['name'], target, r['source_id'], handler,
+            keywords = CALL_TYPES if r['script_is_russian'] else CALL_TYPES_EN
+            if keyword := keywords.get(r['call_type'].casefold()):
+                target = r['target']
+                result.append(Intercept(r['name'], target, r['source_id'], r['handler'],
                                         f'&{keyword}:{target} {FORM_EVENT_MARK}'))
         return result
 
@@ -1371,16 +1352,8 @@ class ProjectManager:
         with self._base_diff_lock:
             cached = self._broken_calls.get(project_id)
         if not cached or cached[0] != key:
-            engine = self.get_search(project_id)
             conn = db.read_conn()
-
-            def read_module(module_id: int) -> str | None:
-                from .bsl_parser import read_bsl_text
-                row = conn.execute("SELECT * FROM modules WHERE id = ?", (module_id,)).fetchone()
-                path = engine.module_file_path(row) if row else None
-                return read_bsl_text(path) if path else None
-
-            cached = (key, find_broken_calls(conn, read_module=read_module))
+            cached = (key, find_broken_calls(conn, read_module=db.read_module_text))
             with self._base_diff_lock:
                 self._broken_calls[project_id] = cached
         result = cached[1]
@@ -1403,11 +1376,10 @@ class ProjectManager:
                            source_id: str | None = None, base_id: str | None = None) -> dict:
         """Текст процедуры в базе и в проекте и их diff. status: changed |
         same | added | removed | missing (нет ни там, ни там) | unreadable
-        (процедура в индексе есть, а файла выгрузки нет — base_unreadable /
+        (процедура в индексе есть, а текста нет — base_unreadable /
         current_unreadable говорят, с какой стороны). base_id — сравнить не с
         базой проекта, а с другим проектом (релиз против базы проекта)."""
         from .base_diff import procedure_text_diff
-        from .bsl_parser import read_bsl_text
         base_id = base_id or self._base_of(project_id)
         own = self.main_source(project_id)
         explicit = source_id if source_id and source_id != own else None
@@ -1423,8 +1395,7 @@ class ProjectManager:
                          if p['name'].casefold() == procedure_name.strip().casefold()), None)
             if not proc:
                 return mod['name'], None, False
-            path = engine.module_file_path(mod)
-            text = read_bsl_text(path) if path else None
+            text = engine.db.read_module_text(mod['id'])
             if text is None:
                 return mod['name'], None, True
             lines = text.split('\n')[proc['start_line'] - 1:proc['end_line']]
@@ -1589,10 +1560,8 @@ class ProjectManager:
             db.update_state(progress_phase='cards', progress_current=0, progress_total=0)
             try:
                 from .cards import refresh_card_index
-                roots = {s.id: str(self.source_path(project_id, s.xml_path))
-                         for s in project.sources if s.xml_path}
                 card_stats = refresh_card_index(
-                    SearchEngine(db, source_roots=roots),
+                    SearchEngine(db),
                     progress_cb=lambda done, total: db.update_state(
                         progress_current=done, progress_total=total))
                 if card_stats['modules']:
@@ -1692,6 +1661,8 @@ class ProjectManager:
             db.update_state(progress_phase='base')
             source = sqlite3.connect(str(base_path))
             try:
+                if not Database.has_current_schema(source):
+                    return False
                 source.backup(conn)
             finally:
                 source.close()

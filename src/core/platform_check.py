@@ -15,12 +15,11 @@ import zlib
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict, defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 from functools import cache, lru_cache
 from heapq import merge
-from itertools import groupby, islice
+from itertools import groupby
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock, Thread
@@ -28,18 +27,16 @@ from weakref import WeakKeyDictionary, WeakSet, WeakValueDictionary
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .bsl_parser import (_BSL_TOKEN, _RE_MODULE_VAR_DECL, _form_context_vars,
-                         _parse_param_names, read_bsl_text, without_deletions)
+                         _parse_param_names, without_deletions)
 from .bsl_reference import module_context_vars
 from .code_fingerprints import bundled_fingerprints
 from .db import IndexRemovedError
 from .fsretry import replace_with_retry, retry_on_permission_error
-from .indexer import form_xml_for_module, module_file_hash, module_file_stat
 from .metadata_model import MANAGER_OBJECT_KINDS, canonicalize_kind, indexed_manager_objects
 from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
 from .platform_help import (COLLECTION_KINDS, COLLECTION_MANAGER_TYPES, compatibility_warning,
                             fingerprint as help_fingerprint, methods_outside_help,
                             minimum_compatibility_mode, owner_type, read_meta)
-from .xml_walker import IO_THREADS
 
 
 logger = logging.getLogger('ariadna')
@@ -634,7 +631,6 @@ _RESTORE_LOCKS = WeakValueDictionary()
 _PUBLISH_LOCKS = WeakValueDictionary()
 _MAX_REPORTS = 3
 _MAX_ARCHIVES = 3
-_CHANGED_FILES_SHOWN = 5
 _CACHE_ARCHIVE = re.compile(r'platform-check(?:-[0-9a-f]{64})?\.zip')
 
 
@@ -700,26 +696,18 @@ def wait_report_jobs(databases):
         job.join()
 
 
-def _module_input(engine, mod):
-    path = engine.module_file_path(mod)
-    form = form_xml_for_module(path, mod['module_type']) if path else ''
-    return path, form, module_file_stat(path, form) if path else ''
-
-
 class _Report:
     """Один снимок проекта. Источники занимают непрерывные диапазоны модулей."""
 
     def __init__(self):
         self.lock = Lock()
-        self.inputs = None
         self.archive_stamp = None
         self.selections = {}
 
     def _load_modules(self, conn):
         self.modules = conn.execute(
-            """SELECT m.id, m.name_cf, m.file_path, m.abs_path, m.source_id, m.object_id,
-                      m.file_hash, m.module_type, s.stat, o.kind FROM modules m
-               LEFT JOIN module_stat s ON s.module_id=m.id
+            """SELECT m.id, m.name_cf, m.file_path, m.source_id, m.object_id,
+                      m.module_type, o.kind FROM modules m
                LEFT JOIN metadata_objects o ON o.id=m.object_id
                WHERE m.file_path != '' ORDER BY m.source_id, m.file_path, m.id""").fetchall()
         self.sources = {}
@@ -729,15 +717,8 @@ class _Report:
             self.sources[sid] = (start, end)
             start = end
 
-    def _module_findings(self, mod, procedures, bindings, form_attrs, diagnosis, objects, path, form, stat):
+    def _module_findings(self, mod, procedures, bindings, form_attrs, diagnosis, objects, source):
         where = f"@{mod['source_id']} {mod['file_path']}"
-        try:
-            if path and mod['stat'] != stat and mod['file_hash'] != module_file_hash(path, form):
-                yield 'unchecked', f'{where} — Не проверено — файл изменился, обновите индекс'
-                return
-            source = read_bsl_text(path) if path else None
-        except OSError:
-            source = None
         if source is None:
             yield 'unchecked', f'{where} — Не проверено — нет исходного текста'
             return
@@ -778,9 +759,8 @@ class _Report:
         self.selections.clear()
         self.starts = []
         self.count = 0
-        inputs, block = [], []
+        block = []
         for mod in self.modules:
-            snapshot = _module_input(engine, mod)
             procedures = conn.execute(
                 """SELECT start_line, end_line, directive, params FROM procedures
                    WHERE module_id=? ORDER BY start_line, id""", (mod['id'],)).fetchall()
@@ -794,10 +774,10 @@ class _Report:
             if module_type == 'МодульФормы':
                 form_attrs = {row[0] for row in conn.execute(
                     "SELECT name_cf FROM form_attributes WHERE module_id=?", (mod['id'],))}
-            inputs.append(snapshot)
             self.starts.append(self.count)
+            source = engine.db.read_module_text(mod['id'])
             for level, msg in self._module_findings(mod, procedures, bindings, form_attrs,
-                                                    diagnosis, objects, *snapshot):
+                                                    diagnosis, objects, source):
                 self.positions[level].append(self.count)
                 self.count += 1
                 block.append(msg)
@@ -805,7 +785,6 @@ class _Report:
                     self._pack(block)
         if block:
             self._pack(block)
-        self.inputs = inputs
 
     def _pack(self, block):
         self.blocks.append(zlib.compress(json.dumps(block, ensure_ascii=False).encode(), level=1))
@@ -814,11 +793,11 @@ class _Report:
     def restore(self, path, key, conn):
         try:
             with path.open('rb') as stream, ZipFile(stream) as archive:
-                saved_key, count, starts, inputs = json.loads(archive.read('report.json'))
+                saved_key, count, starts = json.loads(archive.read('report.json'))
                 if saved_key != key:
                     return
                 self._load_modules(conn)
-                if len(starts) != len(inputs) or len(inputs) != len(self.modules):
+                if len(starts) != len(self.modules):
                     return
                 positions = {level: array('I', archive.read(level)) for level in LEVELS}
                 if sum(map(len, positions.values())) != count:
@@ -826,7 +805,6 @@ class _Report:
                 blocks = [archive.read(f'blocks/{i}') for i in range((count + _BLOCK_SIZE - 1) // _BLOCK_SIZE)]
                 stamp = _stat_signature(os.fstat(stream.fileno()))
             self.count, self.starts, self.positions, self.blocks = count, starts, positions, blocks
-            self.inputs = [tuple(item) for item in inputs]
             self.archive_stamp = stamp
         except FileNotFoundError:
             pass
@@ -840,7 +818,7 @@ class _Report:
             with TemporaryDirectory(dir=path.parent) as tmp_dir:
                 temp = Path(tmp_dir) / path.name
                 with ZipFile(temp, 'w') as archive:
-                    header = json.dumps([key, self.count, self.starts, self.inputs], ensure_ascii=False)
+                    header = json.dumps([key, self.count, self.starts], ensure_ascii=False)
                     archive.writestr('report.json', header.encode(), compress_type=ZIP_DEFLATED, compresslevel=1)
                     for level, positions in self.positions.items():
                         archive.writestr(level, positions.tobytes(), compress_type=ZIP_DEFLATED, compresslevel=1)
@@ -881,14 +859,11 @@ class _Report:
         stop = bisect_left(selection, upper, lo=first)
         return lo, hi, lower, upper, selection[first + offset:min(first + offset + limit, stop)], stop - first
 
-    def page(self, engine, source_id, limit, offset, levels):
+    def page(self, source_id, limit, offset, levels):
         with self.lock:
             lo, hi, lower, upper, positions, count = self._page_selection(source_id, limit, offset, levels)
-        changed = self._changed_modules(engine, lo, hi)
         items, prev = [], -1
         for pos in positions:
-            if changed and bisect_right(self.starts, pos) - 1 in changed:
-                continue
             block, index = divmod(pos, _BLOCK_SIZE)
             if block != prev:
                 values = json.loads(zlib.decompress(self.blocks[block]))
@@ -896,28 +871,7 @@ class _Report:
             items.append(values[index])
         counts = {level: bisect_left(rows, upper) - bisect_left(rows, lower)
                   for level, rows in self.positions.items()}
-        changed_files = []
-        for i, path in islice(changed.items(), _CHANGED_FILES_SHOWN):
-            mod = self.modules[i]
-            reason = 'файл изменился' if path else 'нет исходного текста'
-            changed_files.append(f"@{mod['source_id']} {mod['file_path']} — {reason}")
-        if len(changed) > _CHANGED_FILES_SHOWN:
-            changed_files.append(f'Других изменённых или отсутствующих файлов — {len(changed) - _CHANGED_FILES_SHOWN}.')
-        return items, offset + limit < count, counts, hi - lo, changed_files
-
-    def _changed_modules(self, engine, lo, hi):
-        def snapshot(mod):
-            return _module_input(engine, mod)
-
-        def changes(current):
-            return {i: actual[0] for i, (actual, previous) in enumerate(zip(current, self.inputs[lo:hi]), lo)
-                    if actual != previous}
-
-        modules = self.modules[lo:hi]
-        if len(modules) < IO_THREADS:
-            return changes(map(snapshot, modules))
-        with ThreadPoolExecutor(IO_THREADS) as pool:
-            return changes(pool.map(snapshot, modules))
+        return items, offset + limit < count, counts, hi - lo
 
 
 @cache
@@ -946,7 +900,7 @@ def _help_revision(path, stamp):
 
 def _cache_key(engine, index, mode, revision):
     parts = (_report_fingerprint(), sys.byteorder, _file_identity(engine.db.db_path), revision,
-             sorted(engine.source_roots.items()), index.version,
+             index.version,
              _help_revision(index.path, _stat_signature(index.path.stat())), mode)
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
@@ -1051,7 +1005,7 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
         elif invalid is None and revision[1] == 'ready':
             restored = _Report()
             restored.restore(path, key, conn)
-            if restored.inputs is not None:
+            if restored.archive_stamp is not None:
                 with _REPORTS_LOCK:
                     _remember(cache_id, restored)
                 return key, restored
@@ -1107,10 +1061,10 @@ def check_calls(engine, index, mode, source_id, limit, offset, levels, project_i
     """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
     key, report = _request_report(engine, index, mode, revision, project_id)
     try:
-        page = report.page(engine, source_id, limit, offset, levels)
+        page = report.page(source_id, limit, offset, levels)
     except (IndexError, ValueError, zlib.error):
         key, report = _request_report(engine, index, mode, revision, project_id, invalid=report)
-        page = report.page(engine, source_id, limit, offset, levels)
+        page = report.page(source_id, limit, offset, levels)
     conn = engine.db.read_conn()
     _check_revision(engine, conn, index, mode, key, project_id)
     return page

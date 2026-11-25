@@ -4,7 +4,6 @@ xml_ru (метаданные — из её Configuration.xml).
 """
 
 import io
-import shutil
 import sys
 import tempfile
 import zipfile
@@ -109,14 +108,17 @@ def test_hash_is_stable_and_tracks_code_and_metadata(pm):
     text = form.read_text(encoding='utf-8-sig')
     form.write_text(text.replace('Оповестить("Запись_Склады"', 'Оповестить("Запись_Склад"'),
                     encoding='utf-8-sig')
+    assert _cards(pm)[key].content_hash == renamed.content_hash
+    pm.reindex('p1')
     after = _cards(pm)
     assert after[key].content_hash != renamed.content_hash
     assert after[('Справочник.Склады.Форма.ФормаЭлемента', 'ПриСозданииНаСервере')].content_hash == other
 
 
-def test_unreadable_module_gives_header_only_cards(pm):
-    xml = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
-    shutil.rmtree(xml / 'CommonModules' / 'ЦеныСервер')
+def test_missing_indexed_text_gives_header_only_cards(pm):
+    with pm.get_db('p1').conn as conn:
+        conn.execute("DELETE FROM module_text WHERE module_id IN (SELECT id FROM modules WHERE name = ?)",
+                     ('ОбщийМодуль.ЦеныСервер.Модуль',))
     card = _cards(pm)[('ОбщийМодуль.ЦеныСервер.Модуль', 'РассчитатьЦену')]
     assert not card.body_available and card.chunks == []
     assert card.chunk_texts() == [card.header()]
