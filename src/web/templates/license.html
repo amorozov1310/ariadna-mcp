@@ -18,7 +18,7 @@
 </div>
 {% endif %}
 
-<div class="card">
+<div class="card license-status">
     <div class="license-summary">
         {% if state.valid %}<span class="badge badge-ready">действует</span>
         {% elif state.status == 'none' %}<span class="badge">нет ключа</span>
@@ -26,9 +26,9 @@
         {% if state.info %}
         <span><b>{{ state.info.owner }}</b> · {{ state.info.users|plural('пользователь', 'пользователя', 'пользователей') }}
             · обновления до {{ state.info.updates_until.split('-')|reverse|join('.') }}</span>
-        {% endif %}
+        {% else %}<span class="text-muted">{{ state.message }}</span>{% endif %}
     </div>
-    <p class="text-muted">{{ state.message }}</p>
+    {% if state.info %}<p class="text-muted">{{ state.message }}</p>{% endif %}
     {% if not state.valid %}
     <p>Без ключа используйте Ариадну на этом компьютере. В Docker оставьте публикацию портов на 127.0.0.1. Для доступа из сети установите ключ.</p>
     {% endif %}
@@ -36,27 +36,27 @@
         <dt>Токенов</dt><dd>{{ used }} из {{ limit }} — <a href="/admin/tokens">Доступ</a></dd>
         <dt>Эта версия</dt><dd>{{ version }}, вышла {{ released.strftime('%d.%m.%Y') }}</dd>
         {% if state.info %}<dt>Номер ключа</dt><dd class="mono">{{ state.info.id }}</dd>{% endif %}
+        <dt>Условия</dt><dd><a href="/license/agreement">Лицензионное соглашение</a></dd>
     </dl>
-    <p><a href="/license/agreement">Лицензионное соглашение</a></p>
-
-    {# Действующий ключ заменять незачем — форма свёрнута. #}
-    <details class="disclosure" {% if not state.valid or error %}open{% endif %}>
-        <summary>{% if state.status == 'none' %}Установить ключ{% else %}Заменить ключ{% endif %}</summary>
-        <form method="post" action="/api/admin/license" enctype="multipart/form-data" class="disclosure-body">
-            <div class="form-group">
-                <label for="key-file">Файл ключа</label>
-                <input type="file" id="key-file" name="key_file" accept=".key,.txt">
-            </div>
-            <div class="form-group">
-                <label for="key-text">или текст ключа</label>
-                <textarea id="key-text" name="key" class="mono" rows="5"
-                          placeholder="-----BEGIN ARIADNA LICENSE-----"></textarea>
-                <div class="form-hint">Ключ проверяется сразу: неверный не заменит установленный.</div>
-            </div>
-            <button type="submit" class="btn btn-primary">Установить ключ</button>
-        </form>
-    </details>
 </div>
+
+{# Действующий ключ заменять незачем — форма свёрнута; без ключа — сразу открыта. #}
+<details class="card disclosure" {% if not state.valid or error %}open{% endif %}>
+    <summary>{% if state.status == 'none' %}Установить ключ{% else %}Заменить ключ{% endif %}</summary>
+    <form method="post" action="/api/admin/license" enctype="multipart/form-data" class="disclosure-body">
+        <div class="form-group">
+            <label for="key-file">Файл ключа</label>
+            <input type="file" id="key-file" name="key_file" accept=".key,.txt">
+        </div>
+        <div class="form-group">
+            <label for="key-text">или текст ключа</label>
+            <textarea id="key-text" name="key" class="mono" rows="5"
+                      placeholder="-----BEGIN ARIADNA LICENSE-----"></textarea>
+            <div class="form-hint">Ключ проверяется сразу: неверный не заменит установленный.</div>
+        </div>
+        <button type="submit" class="btn btn-primary">Установить ключ</button>
+    </form>
+</details>
 
 <details class="card disclosure">
     <summary>Что даёт лицензия</summary>

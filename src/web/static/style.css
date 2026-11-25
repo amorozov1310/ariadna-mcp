@@ -828,8 +828,9 @@ main .appsearch-field { height: var(--control-h-lg); }
                 border-radius: var(--radius-sm); padding: var(--space-3); margin: var(--space-2) 0; overflow-x: auto; white-space: pre; }
 .plain-list { margin: var(--space-2) 0 var(--space-2) var(--space-5); }
 .plain-list li { margin-bottom: var(--space-1); }
-.license-summary { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; font-size: var(--fs-md); margin-bottom: var(--space-2); }
-.license-summary + p { margin-bottom: var(--space-3); }
+.license-summary { display: flex; align-items: center; gap: var(--space-2) var(--space-3); flex-wrap: wrap; font-size: var(--fs-md); margin-bottom: var(--space-4); }
+.license-status p { margin-bottom: var(--space-4); }
+.license-status .kv { gap: var(--space-2) var(--space-5); margin-top: 0; }
 .card .kv + .disclosure { margin-top: var(--space-3); }
 .error-actions { justify-content: center; gap: var(--space-4); }
 .error-back { display: inline-flex; align-items: center; gap: var(--space-1); }
