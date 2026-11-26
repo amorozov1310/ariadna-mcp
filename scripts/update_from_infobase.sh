@@ -41,6 +41,7 @@ usage() {
                            (по умолчанию — имя расширения)
   --dump-dir КАТАЛОГ       постоянный каталог выгрузки (обязательно)
   --target-root КАТАЛОГ    передача rsync в папку sources проекта вместо архива
+  --full                   принудительно передать полную выгрузку архивом
   --server-dump            многопоточная выгрузка на сервере 1С (-Server)
   --platform ПУТЬ          путь к 1cv8 (по умолчанию — самая новая в /opt/1cv8)
   --timeout-minutes N      сколько ждать индексацию (по умолчанию 120)
@@ -51,7 +52,7 @@ EOF
 
 ARIADNA_URL='' PROJECT='' SOURCE='main' IB_FILE='' IB_SERVER='' USER_1C=''
 EXTENSIONS='' EXT_SOURCES='' DUMP_DIR='' TARGET_ROOT='' SERVER_DUMP=0
-PLATFORM='' TIMEOUT_MIN=120 SKIP_DUMP=0
+PLATFORM='' TIMEOUT_MIN=120 SKIP_DUMP=0 FULL_TRANSFER=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --ariadna-url) ARIADNA_URL="$2"; shift 2 ;;
@@ -68,6 +69,7 @@ while [ $# -gt 0 ]; do
         --platform) PLATFORM="$2"; shift 2 ;;
         --timeout-minutes) TIMEOUT_MIN="$2"; shift 2 ;;
         --skip-dump) SKIP_DUMP=1; shift ;;
+        --full) FULL_TRANSFER=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Неизвестный параметр: $1 (--help — справка)" >&2; exit 3 ;;
     esac
@@ -183,6 +185,40 @@ PY
     log "Источник «$sid»: $summary"
 }
 
+delta_refresh() {
+    local sid="$1" dir="$2" n="$3" attempt="${4:-1}"
+    local base="$ARIADNA_URL/api/projects/$(urlencode "$PROJECT")/sources/$(urlencode "$sid")"
+    local manifest="$LOG_DIR/manifest_$n.json" target="$LOG_DIR/target_$n.json"
+    local archive="$DUMP_DIR/delta_$n.zip" resp="$LOG_DIR/ariadna_response.json" status auth=()
+    [ -n "${ARIADNA_TOKEN:-}" ] && auth+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
+    status="$(curl -sS -o "$manifest" -w '%{http_code}' "${auth[@]}" "$base/manifest")" \
+        || fail 2 "не удалось запросить манифест Ариадны ($base/manifest)"
+    if [ "$status" = 404 ] || ! command -v python3 >/dev/null; then
+        return 1
+    fi
+    [ "$status" = 200 ] || fail 2 "Ариадна ответила $status на запрос манифеста: $(cat "$manifest")"
+    python3 "$(dirname "$0")/build_delta.py" "$dir" "$manifest" "$archive" "$target" >/dev/null \
+        || fail 2 'не удалось собрать разницу'
+    local base_version
+    base_version="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["version"])' "$manifest")" \
+        || fail 2 'не удалось прочитать версию манифеста'
+    local curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F wait=1 -F "timeout=$((TIMEOUT_MIN * 60))"
+                     -F "base_version=$base_version" -F "target_manifest=<$target"
+                     -F "delta_archive=@$archive;type=application/zip"
+                     --max-time $((TIMEOUT_MIN * 60 + 600)))
+    [ -n "${ARIADNA_TOKEN:-}" ] && curl_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
+    status="$(curl "${curl_args[@]}" "$base/delta")" || fail 2 "нет связи с Ариадной ($base/delta)"
+    if [ "$status" = 409 ] && grep -q 'запросите его заново' "$resp" && [ "$attempt" -eq 1 ]; then
+        log "Манифест изменился во время передачи; запрашиваю его повторно"
+        delta_refresh "$sid" "$dir" "$n" 2
+        return $?
+    fi
+    [ "$status" = 200 ] || fail 2 "Ариадна ответила $status на разницу «$sid»: $(cat "$resp")"
+    log "Источник «$sid»: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print("{}, {} с; модулей {}, процедур {}".format(d.get("status"),d.get("duration_sec"),(d.get("index") or {}).get("total_modules"),(d.get("index") or {}).get("total_procedures"))' "$resp")"
+    rm -f "$archive"
+    return 0
+}
+
 n=0
 for item in "${ITEMS[@]}"; do
     IFS='|' read -r name dir sid <<< "$item"
@@ -196,6 +232,13 @@ for item in "${ITEMS[@]}"; do
         rsync -a --delete --exclude='Template.*' --exclude='logs/' "$dir/" "$target/" \
             || fail 2 "rsync завершился с ошибкой"
         refresh "$sid" ''
+    elif [ "$FULL_TRANSFER" = 0 ]; then
+        if delta_refresh "$sid" "$dir" "$n"; then continue; fi
+        archive="$DUMP_DIR/upload_$n.tar.gz"
+        log "Полная передача: манифест недоступен или нет Python"
+        tar -czf "$archive" --exclude='Template.*' --exclude='logs' -C "$dir" . || fail 2 'не удалось собрать архив'
+        refresh "$sid" "$archive"
+        rm -f "$archive"
     else
         archive="$DUMP_DIR/upload_$n.tar.gz"
         log "Архив для передачи: $archive"

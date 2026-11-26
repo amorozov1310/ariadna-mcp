@@ -26,6 +26,7 @@ from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
+from . import source_delta
 
 logger = logging.getLogger('ariadna')
 
@@ -240,6 +241,12 @@ class ProjectManager:
         # замены (файла нет) мог дать другую запись пути, чем при
         # существующем файле, — и чтение брало другую блокировку.
         self._registry_lock_key = str(self.data_dir.resolve() / 'projects.json')
+        # Завершить атомарное восстановление выгрузок до запуска фоновых потоков.
+        for project in self._load_registry().values():
+            for source in project.sources:
+                root = self.get_source_xml_path(project.id, source.id)
+                if root is not None:
+                    source_delta.recover(root)
 
     def _retire_project_db(self, project_id: str) -> None:
         """Закрыть Database проекта и убрать его из пула — перед удалением
@@ -688,6 +695,19 @@ class ProjectManager:
         xml_archive: BinaryIO | None = None,
         xml_archive_filename: str = '',
     ) -> SourceInfo:
+        with self._no_reindex(project_id):
+            return self._update_source_unlocked(project_id, source_id, label, source_type,
+                                                xml_archive, xml_archive_filename)
+
+    def _update_source_unlocked(
+        self,
+        project_id: str,
+        source_id: str,
+        label: str | None = None,
+        source_type: str | None = None,
+        xml_archive: BinaryIO | None = None,
+        xml_archive_filename: str = '',
+    ) -> SourceInfo:
         """
         Update an existing source: replace its files and/or change its label/type.
 
@@ -836,6 +856,40 @@ class ProjectManager:
             if s.id == source_id and s.xml_path:
                 return self.source_path(project_id, s.xml_path)
         return None
+
+    def source_file_manifest(self, project_id: str, source_id: str) -> dict:
+        """Файловый манифест выгрузки; кэш расположен рядом с проектом, вне xml/."""
+        project = self.get_project(project_id)
+        source = next((s for s in project.sources if s.id == source_id), None)
+        if source is None:
+            raise KeyError(f"Source '{source_id}' not found")
+        root = self.get_source_xml_path(project_id, source_id)
+        if root is None:
+            root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
+        cache = self.projects_dir / project_id / '.source-manifests' / f'{source_id}.json'
+        return source_delta.manifest(root, cache)
+
+    def apply_source_delta(self, project_id: str, source_id: str, archive: BinaryIO,
+                           base_version: str, target_manifest: dict) -> dict:
+        """Применить разницу под той же блокировкой, что защищает индексацию."""
+        with self._no_reindex(project_id):
+            project = self.get_project(project_id)
+            source = next((s for s in project.sources if s.id == source_id), None)
+            if source is None:
+                raise KeyError(f"Source '{source_id}' not found")
+            root = self.get_source_xml_path(project_id, source_id)
+            if root is None:
+                root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
+            cache = self.projects_dir / project_id / '.source-manifests' / f'{source_id}.json'
+            current = source_delta.manifest(root, cache)
+            result = source_delta.apply(root, archive, target_manifest, base_version, current)
+            if not source.xml_path:
+                with self._registry_lock():
+                    source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+                    if source is not None:
+                        source.xml_path = f'sources/{source_id}/xml'
+                        self._save_registry()
+            return result
 
 
 

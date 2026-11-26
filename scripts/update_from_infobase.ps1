@@ -8,15 +8,15 @@
        раз — полная; дальше — с -update -force: платформа переписывает только
        изменённые файлы (по ConfigDumpInfo.xml в каталоге выгрузки), поэтому
        каталог выгрузки (-DumpDir) нужно сохранять между запусками.
-    2. Передача в Ариадну, один из двух способов:
-       - в папку (-TargetRoot): robocopy /MIR в папку источников проекта
-         Ариадны (локальную или общую \\сервер\...) — копируются только
-         изменённые файлы;
-       - архивом по сети (по умолчанию): ZIP по HTTP.
+    2. По умолчанию скрипт получает манифест источника и отправляет только
+       новые и изменённые файлы; удаления отражаются целевым манифестом.
+       -FullTransfer принудительно включает полный ZIP. Если /manifest отвечает
+       404 или Python не установлен, используется полный ZIP автоматически.
+       -TargetRoot сохраняет режим общей папки с robocopy.
        Макеты (Template.*) не передаются: Ариадне они не нужны, а это больше
        половины объёма выгрузки типовой.
     3. Ариадна переиндексирует источник и ждёт окончания:
-       POST /api/projects/<проект>/sources/<источник>/refresh.
+       POST /api/projects/<проект>/sources/<источник>/delta.
 
     Проект и его источники (основная конфигурация, расширения) заранее
     создаёт администратор Ариадны. Подробно — docs/update.md.
@@ -65,6 +65,8 @@ param(
     # Передача в папку: каталог sources проекта Ариадны (в нём <источник>\xml);
     # не задан — передача архивом по сети
     [string]$TargetRoot,
+    # Передавать полную выгрузку вместо архива разницы
+    [switch]$FullTransfer,
 
     # Путь к 1cv8.exe; по умолчанию — самая новая установленная платформа
     [string]$Platform,
@@ -188,6 +190,43 @@ function Invoke-Refresh($Item, [string]$ZipPath) {
                $json.duration_sec, $json.index.total_modules, $json.index.total_procedures)
 }
 
+function Invoke-DeltaRefresh($Item, [int]$Number, [int]$Attempt = 1) {
+    $base = "$AriadnaUrl/api/projects/$([uri]::EscapeDataString($Project))/sources/$([uri]::EscapeDataString($Item.Source))"
+    $manifest = Join-Path $LogDir "manifest_$Number.json"
+    $target = Join-Path $LogDir "target_$Number.json"
+    $zip = Join-Path $DumpDir "delta_$Number.zip"
+    $resp = Join-Path $LogDir 'ariadna_response.json'
+    $getArgs = @('-sS', '-o', $manifest, '-w', '%{http_code}')
+    if ($Token) { $getArgs += @('-H', "Authorization: Bearer $Token") }
+    $status = & curl.exe @getArgs "$base/manifest"
+    if ($status -eq '404') { return $false }
+    if ($status -ne '200') { Fail 2 "Ошибка запроса манифеста: HTTP $status" }
+    # Проверка после ответа манифеста позволяет старому серверу выбрать полный режим без Python.
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $python) { return $false }
+    & $python.Source (Join-Path $PSScriptRoot 'build_delta.py') $Item.Dir $manifest $zip $target | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail 2 'Не удалось собрать разницу' }
+    $baseVersion = (Get-Content $manifest -Raw -Encoding UTF8 | ConvertFrom-Json).version
+    $curl = @('-sS', '-o', $resp, '-w', '%{http_code}', '-X', 'POST',
+              '-F', 'wait=1', '-F', "timeout=$($TimeoutMinutes * 60)",
+              '-F', "base_version=$baseVersion", '-F', "target_manifest=<$target",
+              '-F', "delta_archive=@$zip;type=application/zip",
+              '--max-time', "$($TimeoutMinutes * 60 + 600)")
+    if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
+    $status = & curl.exe @curl "$base/delta"
+    $body = if (Test-Path $resp) { Get-Content $resp -Raw -Encoding UTF8 } else { '' }
+    if ($status -eq '409' -and $Attempt -eq 1 -and $body -match 'запросите его заново') {
+        Write-Log 'Манифест изменился во время передачи; запрашиваю его повторно'
+        return (Invoke-DeltaRefresh $Item $Number 2)
+    }
+    if ($status -ne '200') { Fail 2 "Ариадна ответила $status на разницу: $body" }
+    $json = $body | ConvertFrom-Json
+    Write-Log ("Источник «{0}»: {1}, {2} с; модулей {3}, процедур {4}" -f $Item.Source, $json.status,
+               $json.duration_sec, $json.index.total_modules, $json.index.total_procedures)
+    Remove-Item $zip -ErrorAction SilentlyContinue
+    return $true
+}
+
 $n = 0
 foreach ($item in $Items) {
     $n++
@@ -201,6 +240,13 @@ foreach ($item in $Items) {
         & robocopy.exe $item.Dir $target /MIR /XF 'Template.*' /XD logs /R:2 /W:5 /NP /NFL /NDL /NJH /NJS | Out-Null
         if ($LASTEXITCODE -ge 8) { Fail 2 "robocopy завершился с кодом $LASTEXITCODE" }
         Invoke-Refresh $item ''
+    } elseif (-not $FullTransfer -and -not $TargetRoot) {
+        if (Invoke-DeltaRefresh $item $n) { continue }
+        Write-Log 'Полная передача: манифест недоступен или нет Python'
+        $zip = Join-Path $DumpDir ("upload_{0}.zip" -f $n)
+        New-SlimZip $item.Dir $zip
+        Invoke-Refresh $item $zip
+        Remove-Item $zip -ErrorAction SilentlyContinue
     } else {
         # Имя архива — латиницей: у расширений имена обычно русские, а curl.exe
         # в Windows PowerShell 5.1 получает аргументы в кодировке ANSI.
