@@ -7,6 +7,7 @@ Each project gets its own SQLite at /data/projects/{id}/index.db — or at
 
 import json
 import logging
+import queue
 import shutil     # не используется напрямую — тесты подменяют shutil.rmtree через модуль
 import sqlite3
 import time
@@ -215,10 +216,18 @@ class ProjectManager:
         self._broken_calls: dict[str, tuple] = {}
         # Фоновые переиндексации (reindex_async) — close_all их дожидается.
         self._reindexing: set[threading.Thread] = set()
+        # Восстановление схемы идёт через одного воркера: несколько больших
+        # проектов не запускают полную индексацию одновременно.
+        self._schema_reindex_queue: queue.Queue[str] = queue.Queue()
+        self._schema_reindex_pending: set[str] = set()
+        self._schema_reindex_lock = threading.Lock()
+        self._schema_reindex_worker: threading.Thread | None = None
+        self._schema_reindex_worker_running = False
+        self._reindex_local = threading.local()
         self._platform_workers: set[threading.Thread] = set()
         self._closing_platform_workers = False
-        # Причина последней упавшей индексации проекта (для Web UI); в памяти —
-        # после перезапуска её нет, статус 'error' остаётся в реестре.
+        # Кэш причин ошибок индексации; постоянная копия хранится рядом с
+        # проектом в index-error.txt.
         self._index_errors: dict[str, str] = {}
         self._checks_warming: dict[str, threading.Thread] = {}
         self._checks_failed: dict[str, tuple] = {}
@@ -916,7 +925,85 @@ class ProjectManager:
             db.connect()
             db.init_schema()
             self._db_pool[project_id] = db
+            if db.stale_schema_recreated or db.rebuild_required:
+                # Обработать до снятия блокировки пула, чтобы другой запрос
+                # не увидел новый пустой файл со статусом «готов».
+                self._handle_stale_schema(project_id, db)
             return db
+
+    def _handle_stale_schema(self, project_id: str, db: Database) -> None:
+        """Пометить удалённый устаревший индекс и поставить его в очередь."""
+        try:
+            project = self.get_project(project_id)
+        except KeyError:
+            return
+
+        available_sources = [
+            source for source in project.sources
+            if source.xml_path and self.source_path(project_id, source.xml_path).is_dir()
+        ]
+        if not available_sources:
+            message = (
+                '\u0418\u043d\u0434\u0435\u043a\u0441 \u0441\u043e\u0437\u0434\u0430\u043d \u043f\u043e \u0441\u0442\u0430\u0440\u043e\u0439 \u0441\u0445\u0435\u043c\u0435 \u0438 \u0431\u044b\u043b \u043f\u0435\u0440\u0435\u0441\u043e\u0437\u0434\u0430\u043d. '
+                '\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 XML \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430; \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u0435 \u0435\u0451 \u0437\u0430\u043d\u043e\u0432\u043e \u0438 \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u043f\u0435\u0440\u0435\u0438\u043d\u0434\u0435\u043a\u0441\u0430\u0446\u0438\u044e.'
+            )
+            with self._registry_lock():
+                project = self.get_project(project_id)
+                project.status = 'error'
+                self._save_project_to_disk(project_id, project)
+            self._set_index_error(project_id, message)
+            db.update_state(status='error', progress_phase='')
+            logger.warning('Проект %s: %s', project_id, message)
+            return
+
+        with self._schema_reindex_lock:
+            with self._registry_lock():
+                project = self.get_project(project_id)
+                project.status = 'indexing'
+                self._save_project_to_disk(project_id, project)
+            db.update_state(
+                status='indexing', progress_current=0, progress_total=0,
+                progress_phase='scanning')
+            # Текущий синхронный или асинхронный reindex уже перестроит
+            # индекс. В очередь попадают только открытия со стороны чтения.
+            if self._reindex_lock(project_id).locked() or project_id in self._schema_reindex_pending:
+                return
+            self._schema_reindex_pending.add(project_id)
+            self._schema_reindex_queue.put(project_id)
+            if not self._schema_reindex_worker_running:
+                self._schema_reindex_worker_running = True
+                self._schema_reindex_worker = threading.Thread(
+                    target=self._run_schema_reindex_queue, daemon=True,
+                    name='schema-reindex-queue')
+                self._schema_reindex_worker.start()
+
+    def _run_schema_reindex_queue(self) -> None:
+        while True:
+            with self._schema_reindex_lock:
+                try:
+                    project_id = self._schema_reindex_queue.get_nowait()
+                except queue.Empty:
+                    self._schema_reindex_worker_running = False
+                    self._schema_reindex_worker = None
+                    return
+            try:
+                lock = self._reindex_lock(project_id)
+                result = self.reindex_async(project_id)
+                if result['status'] == 'already_running':
+                    # The in-flight synchronous/asynchronous reindex claimed
+                    # the stale index and already owns the rebuild.
+                    lock.acquire()
+                    lock.release()
+                elif result['status'] == 'started':
+                    lock.acquire()
+                    lock.release()
+                elif result['status'] == 'error':
+                    logger.error('Не удалось поставить на переиндексацию %s: %s',
+                                 project_id, result.get('error', 'неизвестная ошибка'))
+            finally:
+                with self._schema_reindex_lock:
+                    self._schema_reindex_pending.discard(project_id)
+                self._schema_reindex_queue.task_done()
 
     def get_search(self, project_id: str) -> SearchEngine:
         """Get SearchEngine instance for project."""
@@ -1163,8 +1250,31 @@ class ProjectManager:
         return False
 
     def index_error(self, project_id: str) -> str:
-        """Причина последней упавшей индексации проекта ('' — неизвестна)."""
-        return self._index_errors.get(project_id, '')
+        """Причина последней ошибки; sidecar сохраняет её между запусками."""
+        message = self._index_errors.get(project_id)
+        if message is not None:
+            return message
+        try:
+            return (self.projects_dir / project_id / 'index-error.txt').read_text(encoding='utf-8')
+        except OSError:
+            return ''
+
+    def _set_index_error(self, project_id: str, message: str) -> None:
+        self._index_errors[project_id] = message
+        error_path = self.projects_dir / project_id / 'index-error.txt'
+        try:
+            error_path.write_text(message, encoding='utf-8')
+        except OSError:
+            logger.exception('Не удалось сохранить причину ошибки индекса проекта %s', project_id)
+
+    def _clear_index_error(self, project_id: str) -> None:
+        self._index_errors.pop(project_id, None)
+        try:
+            (self.projects_dir / project_id / 'index-error.txt').unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception('Не удалось удалить причину ошибки индекса проекта %s', project_id)
 
     def diff_warming(self, project_id: str) -> bool:
         """Идёт ли фоновый расчёт сравнений проекта (warm_diffs)."""
@@ -1437,6 +1547,18 @@ class ProjectManager:
     # ============================================
 
     def reindex(self, project_id: str, source_id: str | None = None) -> IndexStats:
+        """Сериализовать синхронную индексацию с фоновыми запусками."""
+        async_owned = getattr(self._reindex_local, 'project_id', None) == project_id
+        lock = self._reindex_lock(project_id)
+        if not async_owned:
+            lock.acquire()
+        try:
+            return self._reindex_locked(project_id, source_id=source_id)
+        finally:
+            if not async_owned:
+                lock.release()
+
+    def _reindex_locked(self, project_id: str, source_id: str | None = None) -> IndexStats:
         """
         Run indexing for project, synchronously (blocks until done — use
         reindex_async() for a large corpus so MCP/HTTP callers don't time
@@ -1454,6 +1576,10 @@ class ProjectManager:
         from .xml_walker import XMLWalker
 
         project, db = self._mark_indexing(project_id)
+        if db.rebuild_required:
+            # Маркер требует перестроить весь индекс, поэтому частичную
+            # переиндексацию повышаем до полного прохода по источникам.
+            source_id = None
         if source_id is None:
             try:
                 self._seed_from_base(project, db)
@@ -1468,6 +1594,11 @@ class ProjectManager:
         db.conn.execute("PRAGMA synchronous=OFF")
 
         try:
+            if db.rebuild_required and not any(
+                    source.xml_path and self.source_path(project_id, source.xml_path).is_dir()
+                    for source in project.sources):
+                raise RuntimeError(self.index_error(project_id) or
+                                   'Для восстановления индекса требуется XML-выгрузка проекта.')
             indexer = Indexer(db)
 
             sources = project.sources if source_id is None else [
@@ -1616,6 +1747,8 @@ class ProjectManager:
             db.update_state(status='ready', progress_phase='', progress_current=0,
                              progress_total=0, index_duration_sec=total_stats.duration_sec, updated_at=ready_at)
             self._save_project_to_disk(project_id, project)
+            self._clear_index_error(project_id)
+            db.clear_rebuild_marker()
             try:
                 version = self.platform_help_version(project_id)
                 index = self.platform_help.get(version) if version else None
@@ -1631,7 +1764,7 @@ class ProjectManager:
             return total_stats
 
         except Exception as e:
-            self._index_errors[project_id] = _index_error_text(e)
+            self._set_index_error(project_id, _index_error_text(e))
             project.status = 'error'
             self._save_project_to_disk(project_id, project)
             db.update_state(status='error', progress_phase='')
@@ -1737,8 +1870,8 @@ class ProjectManager:
         # запись не удалась (проект удалили между вызовами), поток не
         # запускается.
         try:
+            self._clear_index_error(project_id)
             self._mark_indexing(project_id)
-            self._index_errors.pop(project_id, None)
         except Exception as e:
             lock.release()
             logger.exception("Не удалось начать переиндексацию проекта %s", project_id)
@@ -1747,12 +1880,17 @@ class ProjectManager:
 
         def _run():
             try:
+                self._reindex_local.project_id = project_id
                 self.reindex(project_id, source_id=source_id)
             except Exception:
                 # status='error' reindex() уже записал; причина нужна в логе.
                 logger.exception("Фоновая переиндексация проекта %s (источник %s) упала",
                                  project_id, source_id or 'все')
             finally:
+                try:
+                    del self._reindex_local.project_id
+                except AttributeError:
+                    pass
                 lock.release()
                 with self._base_diff_lock:
                     self._reindexing.discard(threading.current_thread())
@@ -1776,21 +1914,34 @@ class ProjectManager:
 
         Вызывать ОДИН раз при старте процесса, до запуска рабочих потоков:
         в этот момент ни один прогон идти не может по определению, поэтому
-        любой 'indexing' заведомо протухший. Прежний индекс на диске цел и
-        пригоден (индексация инкрементальная, UPSERT), поэтому проект
-        возвращается в 'ready', если он хоть раз успешно индексировался, и
-        в 'empty', если нет. Возвращает id тронутых проектов.
+        любой 'indexing' заведомо протухший. Если рядом с индексом есть
+        маркер schema-reindex-required, старый файл уже был удалён и проект
+        восстанавливается из XML заново. Возвращает id тронутых проектов.
         """
         reset: dict[str, str] = {}
         with self._registry_lock():
-            for project in self._load_registry().values():
+            projects = list(self._load_registry().values())
+        for snapshot in projects:
+            marker_path = Path(str(self._index_path(snapshot.id)) + '.reindex-required')
+            if marker_path.exists():
+                try:
+                    self.get_db(snapshot.id)
+                    reset[snapshot.id] = self.get_project(snapshot.id).status
+                except Exception:
+                    logger.exception("Не удалось возобновить восстановление индекса %s", snapshot.id)
+                continue
+            if snapshot.status != 'indexing':
+                continue
+            with self._registry_lock():
+                project = self.get_project(snapshot.id)
                 if project.status != 'indexing':
                     continue
                 project.status = 'ready' if project.index_stats.last_indexed else 'empty'
                 reset[project.id] = project.status
-            if reset:
-                self._save_registry()
+                self._save_project_to_disk(project.id, project)
         for project_id, status in reset.items():
+            if Path(str(self._index_path(project_id)) + '.reindex-required').exists():
+                continue
             try:
                 db = self.get_db(project_id)
                 db.update_state(status=status, progress_phase='',
@@ -2034,6 +2185,9 @@ class ProjectManager:
         # отпускает соединение: закрыть его под ней — на Windows access
         # violation, а файлы останутся занятыми. Сначала переиндексации: в
         # конце они сами запускают прогрев сравнений.
+        schema_worker = self._schema_reindex_worker
+        if schema_worker is not None:
+            schema_worker.join(timeout=120)
         with self._base_diff_lock:
             reindexing = list(self._reindexing)
             platform_workers = list(self._platform_workers)
