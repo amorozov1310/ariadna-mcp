@@ -162,6 +162,15 @@ def test_first_delta_populates_source_without_dump(web):
         "SELECT COUNT(*) FROM modules WHERE source_id='empty'").fetchone()[0] > 0
 
 
+def test_delta_body_limit_is_checked_before_form_parse(web, monkeypatch):
+    _, client, _ = web
+    monkeypatch.setenv('ARIADNA_DELTA_MAX_BODY', '32')
+    response = client.post('/api/projects/p1/sources/main/delta', data={
+        'base_version': 'unused', 'target_manifest': '{}'},
+        files={'delta_archive': ('delta.zip', b'archive contents', 'application/zip')})
+    assert response.status_code == 413
+
+
 def test_refresh_no_wait_and_unknown_source(web):
     _, client, _ = web
     resp = client.post('/api/projects/p1/sources/main/refresh', data={'wait': '0'})
