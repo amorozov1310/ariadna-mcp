@@ -15,6 +15,7 @@ from typing import BinaryIO
 MAX_ENTRIES = 250_000
 MAX_PATH = 1024
 MAX_UNPACKED = 32 * 1024**3
+SUSPICIOUS_DELETE_FLOOR = 1000
 
 
 def _checkpoint(_name: str) -> None:
@@ -43,18 +44,47 @@ def _path(value: str) -> str:
     return value
 
 
+def _validate_path_set(paths) -> None:
+    """Проверить полные пути и единый регистр каждого общего родителя."""
+    seen: dict[str, str] = {}
+    for rel in paths:
+        prefix = []
+        for part in PurePosixPath(rel).parts:
+            prefix.append(part)
+            name = "/".join(prefix)
+            key = name.casefold()
+            previous = seen.get(key)
+            if previous is not None and previous != name:
+                raise DeltaError(f"Несогласованный регистр или повтор пути: {rel}")
+            seen[key] = name
+    full = {p.casefold() for p in paths}
+    for rel in paths:
+        parts = PurePosixPath(rel).parts
+        for i in range(1, len(parts)):
+            if "/".join(parts[:i]).casefold() in full:
+                raise DeltaError(f"Файл используется как каталог: {rel}")
+
+
+def is_reparse_point(path: Path) -> bool:
+    """Проверка symlink, junction и reparse points, включая Python 3.11."""
+    try:
+        attrs = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        return Path(path).is_symlink()
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 def _safe_tree(root: Path) -> None:
+    if is_reparse_point(root):
+        raise DeltaError(f"Символическая ссылка в каталоге выгрузки: {root}")
     if not root.exists():
         return
-    if root.is_symlink() or getattr(root, 'is_junction', lambda: False)():
-        raise DeltaError(f"Символическая ссылка в каталоге выгрузки: {root}")
     if not root.is_dir():
         raise DeltaError(f"Путь выгрузки не является каталогом: {root}")
-    for base, dirs, files in os.walk(root, followlinks=False):
+    for base, dirs, files in os.walk(root, followlinks=False, onerror=_raise_walk_error):
         for name in dirs + files:
             item = Path(base) / name
-            junction = getattr(item, 'is_junction', lambda: False)()
-            if item.is_symlink() or junction or not (item.is_dir() or item.is_file()):
+            if is_reparse_point(item) or not (item.is_dir() or item.is_file()):
                 raise DeltaError(f"Ссылка или специальный файл в каталоге выгрузки: {item}")
 
 
@@ -115,26 +145,35 @@ def _atomic_json(path: Path, data: dict) -> None:
         Path(tmp).unlink(missing_ok=True)
 
 
-def _journal_path(root: Path) -> Path:
-    return root.parent / f".{root.name}.delta-journal.json"
+def _raise_walk_error(error: OSError) -> None:
+    raise error
 
 
-def recover(root: Path) -> None:
-    journal = _journal_path(root)
+def _journal_path(workspace: Path) -> Path:
+    return workspace / "delta-journal.json"
+
+
+def recover(root: Path, workspace: Path | None = None) -> None:
+    root = Path(root)
+    workspace = Path(workspace) if workspace is not None else root.parent / f".{root.name}-delta-state"
+    journal = _journal_path(workspace)
     if not journal.exists():
+        for orphan in (*workspace.glob('staging-*'), *workspace.glob('rollback-*')):
+            shutil.rmtree(orphan, ignore_errors=True)
         return
     data = json.loads(journal.read_text("utf-8"))
     backup = Path(data["backup"])
+    staging = Path(data["staging"]) if data.get("staging") else None
     if data.get("committed"):
         shutil.rmtree(backup, ignore_errors=True)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
         journal.unlink(missing_ok=True)
         return
     old_by_fold = {rel.casefold(): rel for rel in data.get("old", [])}
     for rel in data.get("new", []):
         target = root.joinpath(*PurePosixPath(rel).parts)
         prior = old_by_fold.get(rel.casefold())
-        # Если старый файл ещё не переименовали в backup, целевой путь всё ещё
-        # содержит оригинал и удалять его при восстановлении нельзя.
         if prior is not None and not backup.joinpath(*PurePosixPath(prior).parts).exists():
             continue
         if target.is_file() or target.is_symlink():
@@ -149,15 +188,24 @@ def recover(root: Path) -> None:
             elif target.exists():
                 target.unlink()
             os.replace(saved, target)
+    for rel in sorted(data.get("created_dirs", []), key=lambda p: p.count("/"), reverse=True):
+        directory = root.joinpath(*PurePosixPath(rel).parts)
+        if directory.is_dir():
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
     shutil.rmtree(backup, ignore_errors=True)
+    if staging is not None:
+        shutil.rmtree(staging, ignore_errors=True)
     journal.unlink(missing_ok=True)
 
 
 def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: str,
-          current: dict) -> dict:
+          current: dict, workspace: Path | None = None) -> dict:
     """Устанавливает архив разницы; вызывающий удерживает reindex lock."""
     root = Path(root)
-    recover(root)
+    workspace = Path(workspace) if workspace is not None else root.parent / f".{root.name}-delta-state"
     if current["version"] != base_version:
         raise DeltaConflict("Манифест источника изменился; запросите его заново")
     _checkpoint('a')
@@ -167,13 +215,11 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
     if len(desired) > MAX_ENTRIES:
         raise DeltaError("Слишком много записей в целевом манифесте")
     normalized = {}
-    folded = set()
     total = 0
     for raw, spec in desired.items():
         rel = _path(raw)
-        if rel.casefold() in folded:
-            raise DeltaError(f"Повтор пути без учёта регистра: {rel}")
-        folded.add(rel.casefold())
+        if not _managed(rel):
+            raise DeltaError(f"Файл исключён из области разницы: {rel}")
         if not isinstance(spec, dict) or not isinstance(spec.get("size"), int) or spec["size"] < 0:
             raise DeltaError(f"Некорректный размер файла: {rel}")
         digest = spec.get("sha256", "")
@@ -181,6 +227,7 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
             raise DeltaError(f"Некорректный SHA-256: {rel}")
         total += spec["size"]
         normalized[rel] = {"sha256": digest, "size": spec["size"]}
+    _validate_path_set(normalized)
     if total > MAX_UNPACKED:
         raise DeltaError("Целевой манифест превышает лимит размера")
     desired_version = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True,
@@ -188,8 +235,11 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
     if target_manifest.get("version") != desired_version:
         raise DeltaError("Версия целевого манифеста не соответствует его содержимому")
 
+    workspace.mkdir(parents=True, exist_ok=True)
     root.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{root.name}-delta-", dir=root.parent))
+    if os.stat(workspace).st_dev != os.stat(root.parent).st_dev:
+        raise DeltaError("Каталог отката и выгрузка находятся на разных файловых системах")
+    staging = Path(tempfile.mkdtemp(prefix="staging-", dir=workspace))
     try:
         with zipfile.ZipFile(archive) as zf:
             all_infos = zf.infolist()
@@ -198,17 +248,33 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
                 raise DeltaError("Архив разницы превышает лимиты")
             seen = set()
             supplied = set()
+            zip_files = []
+            zip_prefixes = {}
             for info in all_infos:
                 entry_name = info.filename.rstrip('/') if info.is_dir() else info.filename
                 rel_name = _path(entry_name)
+                if not _managed(rel_name):
+                    raise DeltaError(f"Файл исключён из области разницы: {rel_name}")
                 mode = info.external_attr >> 16
                 kind = stat.S_IFMT(mode)
-                if kind == stat.S_IFLNK or (kind and kind not in (stat.S_IFREG, stat.S_IFDIR)):
+                if (info.external_attr & 0x400 or kind == stat.S_IFLNK
+                        or (kind and kind not in (stat.S_IFREG, stat.S_IFDIR))):
                     raise DeltaError(f"Недопустимый тип файла в ZIP: {rel_name}")
                 key = rel_name.casefold()
                 if key in seen:
                     raise DeltaError(f"Повтор файла в архиве: {rel_name}")
                 seen.add(key)
+                prefix = []
+                for part in PurePosixPath(rel_name).parts:
+                    prefix.append(part)
+                    name = "/".join(prefix)
+                    previous = zip_prefixes.get(name.casefold())
+                    if previous is not None and previous != name:
+                        raise DeltaError(f"Несогласованный регистр пути в ZIP: {rel_name}")
+                    zip_prefixes[name.casefold()] = name
+                if not info.is_dir():
+                    zip_files.append(rel_name)
+            _validate_path_set(zip_files)
             for info in infos:
                 rel = _path(info.filename)
                 spec = normalized.get(rel)
@@ -234,18 +300,30 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
             raise DeltaError("Архив должен содержать все изменённые и добавленные файлы")
         _checkpoint('b')
         removed = set(old_files) - set(normalized)
+        if (len(removed) > SUSPICIOUS_DELETE_FLOOR
+                and len(removed) > len(old_files) / 2):
+            raise DeltaError("Разница удаляет слишком много файлов; выполните полную передачу выгрузки")
         affected = removed | changed
-        backup = Path(tempfile.mkdtemp(prefix=f".{root.name}-rollback-", dir=root.parent))
-        journal = _journal_path(root)
+        backup = Path(tempfile.mkdtemp(prefix="rollback-", dir=workspace))
+        journal = _journal_path(workspace)
+        created_dirs = set()
+        for rel in changed:
+            parent = PurePosixPath(rel).parent
+            while str(parent) != ".":
+                candidate = root.joinpath(*parent.parts)
+                if not candidate.is_dir():
+                    created_dirs.add(parent.as_posix())
+                parent = parent.parent
         _atomic_json(journal, {"backup": str(backup), "old": sorted(affected & set(old_files)),
-                               "new": sorted(changed), "committed": False})
+                               "new": sorted(changed), "staging": str(staging),
+                               "created_dirs": sorted(created_dirs), "committed": False})
         _checkpoint('c')
         root.mkdir(parents=True, exist_ok=True)
         _safe_tree(root)
         # Перемещаем старые файлы, а не копируем их; регистронезависимый путь
         # учитывает смену регистра имени на Windows.
         actual = {}
-        for base, _, names in os.walk(root, followlinks=False):
+        for base, _, names in os.walk(root, followlinks=False, onerror=_raise_walk_error):
             for name in names:
                 rel = (Path(base) / name).relative_to(root).as_posix()
                 actual[rel.casefold()] = rel
@@ -257,6 +335,16 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(src, dst)
         _checkpoint('d')
+        candidates = set()
+        for rel in affected & set(old_files):
+            parent = PurePosixPath(rel).parent
+            while str(parent) != ".":
+                candidates.add(parent.as_posix())
+                parent = parent.parent
+        for rel in sorted(candidates, key=lambda p: p.count("/"), reverse=True):
+            directory = root.joinpath(*PurePosixPath(rel).parts)
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
         for rel in sorted(changed, key=lambda x: x.count("/")):
             src = staging.joinpath(*PurePosixPath(rel).parts)
             dst = root.joinpath(*PurePosixPath(rel).parts)
@@ -269,23 +357,19 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
                 dst.unlink()
             os.replace(src, dst)
         _checkpoint('e')
-        # Не оставляем пустые каталоги от удалённых файлов.
-        for directory, dirs, names in os.walk(root, topdown=False):
-            p = Path(directory)
-            if p != root and not dirs and not names:
-                p.rmdir()
         for rel, spec in normalized.items():
             file = root.joinpath(*PurePosixPath(rel).parts)
             if not file.is_file() or file.stat().st_size != spec["size"]:
                 raise DeltaError(f"Итоговый файл не прошёл проверку: {rel}")
         _atomic_json(journal, {"backup": str(backup), "old": sorted(affected & set(old_files)),
-                               "new": sorted(changed), "committed": True})
+                               "new": sorted(changed), "staging": str(staging),
+                               "created_dirs": sorted(created_dirs), "committed": True})
         _checkpoint('f')
         shutil.rmtree(backup, ignore_errors=True)
         _checkpoint('g')
         journal.unlink(missing_ok=True)
     except Exception:
-        recover(root)
+        recover(root, workspace)
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)

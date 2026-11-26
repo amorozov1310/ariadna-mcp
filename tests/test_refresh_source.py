@@ -5,6 +5,7 @@
 import io
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.auth import TokenStore
 from src.core.project_manager import ProjectManager
+from src.core import source_delta
 from tests.license_helper import install_team_license
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -169,6 +171,95 @@ def test_delta_body_limit_is_checked_before_form_parse(web, monkeypatch):
         'base_version': 'unused', 'target_manifest': '{}'},
         files={'delta_archive': ('delta.zip', b'archive contents', 'application/zip')})
     assert response.status_code == 413
+
+
+def test_manifest_recovers_pending_transaction_before_returning_version(web, monkeypatch):
+    pm, client, _ = web
+    before = client.get('/api/projects/p1/sources/main/manifest').json()
+    rel = MODULE
+    path = pm.get_source_xml_path('p1', 'main') / Path(*rel.split('/'))
+    old_bytes = path.read_bytes()
+    new_bytes = old_bytes + b'\n// changed\n'
+    files = dict(before['files'])
+    files[rel] = {'sha256': hashlib.sha256(new_bytes).hexdigest(), 'size': len(new_bytes)}
+    target = {'version': _manifest_version(files), 'files': files}
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as zf:
+        zf.writestr(rel, new_bytes)
+    archive.seek(0)
+    workspace = pm._source_delta_workspace('p1', 'main')
+
+    def fail_at(point):
+        if point == 'e':
+            raise RuntimeError('simulated crash after installing files')
+
+    real_recover = source_delta.recover
+    monkeypatch.setattr(source_delta, '_checkpoint', fail_at)
+    monkeypatch.setattr(source_delta, 'recover', lambda *_a, **_kw: (_ for _ in ()).throw(OSError('rollback unavailable')))
+    with pytest.raises(OSError):
+        source_delta.apply(pm.get_source_xml_path('p1', 'main'), archive, target,
+                           before['version'], before, workspace)
+    assert path.read_bytes() == new_bytes
+    monkeypatch.setattr(source_delta, 'recover', real_recover)
+    after = client.get('/api/projects/p1/sources/main/manifest')
+    assert after.status_code == 200
+    assert after.json()['version'] == before['version']
+    assert path.read_bytes() == old_bytes
+    assert not source_delta._journal_path(workspace).exists()
+
+
+def test_refresh_never_reports_ready_when_reindex_is_already_running(web, monkeypatch):
+    pm, client, _ = web
+    monkeypatch.setattr(pm, 'reindex_async', lambda *_a, **_kw: {'status': 'already_running'})
+    response = client.post('/api/projects/p1/sources/main/refresh')
+    assert response.status_code == 409
+    assert response.json()['status'] == 'busy'
+
+
+def test_manifest_and_ui_update_do_not_observe_or_change_delta_midflight(web):
+    pm, client, _ = web
+    lock = pm._reindex_lock('p1')
+    assert lock.acquire(blocking=False)
+    try:
+        assert client.get('/api/projects/p1/sources/main/manifest').status_code == 409
+        response = client.post('/api/projects/p1/sources/main/update', data={'label': 'new label'})
+        assert response.status_code == 409
+    finally:
+        lock.release()
+
+
+def test_refresh_route_no_longer_accepts_delta_archive_parameter():
+    import inspect
+    from src.web.routes_update import refresh_source
+
+    assert 'delta_archive' not in inspect.signature(refresh_source).parameters
+
+
+def test_full_tree_update_invalidates_cached_source_hashes(web):
+    pm, client, _ = web
+    before = client.get('/api/projects/p1/sources/main/manifest').json()
+    cache = pm._source_manifest_cache_path('p1', 'main')
+    assert cache.exists()
+    rel = MODULE
+    old_path = pm.get_source_xml_path('p1', 'main') / Path(*rel.split('/'))
+    old_stat = old_path.stat()
+    old_bytes = old_path.read_bytes()
+    new_bytes = bytes([old_bytes[0] ^ 1]) + old_bytes[1:]
+    assert len(new_bytes) == old_stat.st_size
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as zf:
+        zf.writestr(rel, new_bytes)
+    archive.seek(0)
+    pm.update_source('p1', 'main', xml_archive=archive, xml_archive_filename='replacement.zip')
+    assert not cache.exists()
+    replaced = pm.get_source_xml_path('p1', 'main') / Path(*rel.split('/'))
+    current_stat = replaced.stat()
+    os.utime(replaced, ns=(current_stat.st_atime_ns, old_stat.st_mtime_ns))
+    replaced = replaced.stat()
+    assert replaced.st_size == old_stat.st_size and replaced.st_mtime_ns == old_stat.st_mtime_ns
+    after = pm.source_file_manifest('p1', 'main')
+    assert after['version'] != before['version']
+    assert after['files'][rel]['sha256'] != before['files'][rel]['sha256']
 
 
 def test_refresh_no_wait_and_unknown_source(web):

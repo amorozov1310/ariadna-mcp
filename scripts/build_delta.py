@@ -10,6 +10,19 @@ import zipfile
 from pathlib import Path
 
 
+def _raise_walk_error(error):
+    raise error
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        import stat
+        attrs = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        return path.is_symlink()
+    return bool(attrs & 0x400)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('root', type=Path)
@@ -18,19 +31,21 @@ def main() -> int:
     parser.add_argument('target_manifest', type=Path)
     args = parser.parse_args()
     baseline = json.loads(args.server_manifest.read_text(encoding='utf-8'))
+    if _is_reparse_point(args.root):
+        raise ValueError(f'Символическая ссылка в исходной выгрузке: {args.root}')
     files = {}
     changed = []
-    for base, dirs, names in os.walk(args.root, followlinks=False):
+    for base, dirs, names in os.walk(args.root, followlinks=False, onerror=_raise_walk_error):
         for directory in dirs:
             candidate = Path(base) / directory
-            if candidate.is_symlink() or getattr(candidate, 'is_junction', lambda: False)():
+            if _is_reparse_point(candidate):
                 raise ValueError(f'Символическая ссылка в исходной выгрузке: {candidate}')
         dirs[:] = sorted(d for d in dirs if not d.startswith('Template.') and d.casefold() != 'logs')
         for name in sorted(names):
             if name.startswith('Template.'):
                 continue
             path = Path(base) / name
-            if path.is_symlink() or getattr(path, 'is_junction', lambda: False)():
+            if _is_reparse_point(path):
                 raise ValueError(f'Символическая ссылка в исходной выгрузке: {path}')
             rel = path.relative_to(args.root).as_posix()
             if len(rel) > 1024 or '\\' in rel or '..' in Path(rel).parts:

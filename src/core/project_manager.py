@@ -244,9 +244,14 @@ class ProjectManager:
         # Завершить атомарное восстановление выгрузок до запуска фоновых потоков.
         for project in self._load_registry().values():
             for source in project.sources:
-                root = self.get_source_xml_path(project.id, source.id)
-                if root is not None:
-                    source_delta.recover(root)
+                local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
+                root = self.get_source_xml_path(project.id, source.id) or local_root
+                workspace = self._source_delta_workspace(project.id, source.id)
+                # Корпус, на который указывает абсолютный xml_path, может быть
+                # общим и только читаемым (slow-тесты). Старт sandbox его не трогает.
+                is_local = self._is_local_source_root(root, project.id, source.id)
+                if is_local:
+                    source_delta.recover(root, workspace)
 
     def _retire_project_db(self, project_id: str) -> None:
         """Закрыть Database проекта и убрать его из пула — перед удалением
@@ -738,6 +743,7 @@ class ProjectManager:
             # только после успешной проверки и распаковки нового архива.
             extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
             changes['xml_path'] = f'sources/{source_id}/xml'
+            self._source_manifest_cache_path(project_id, source_id).unlink(missing_ok=True)
 
         # Update metadata fields
         if label is not None:
@@ -857,17 +863,41 @@ class ProjectManager:
                 return self.source_path(project_id, s.xml_path)
         return None
 
-    def source_file_manifest(self, project_id: str, source_id: str) -> dict:
-        """Файловый манифест выгрузки; кэш расположен рядом с проектом, вне xml/."""
-        project = self.get_project(project_id)
-        source = next((s for s in project.sources if s.id == source_id), None)
+    def _source_manifest_cache_path(self, project_id: str, source_id: str) -> Path:
+        return self.projects_dir / project_id / '.source-manifests' / f'{source_id}.json'
+
+    def _source_delta_workspace(self, project_id: str, source_id: str) -> Path:
+        return self.projects_dir / project_id / 'sources' / source_id / '.delta-state'
+
+    def _is_local_source_root(self, root: Path, project_id: str, source_id: str) -> bool:
+        local_root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
+        try:
+            return (Path(root).absolute() == local_root.absolute()
+                    and not source_delta.is_reparse_point(local_root))
+        except OSError:
+            return False
+
+    def _source_file_root(self, project_id: str, source_id: str, source=None) -> Path:
+        if source is None:
+            project = self.get_project(project_id)
+            source = next((s for s in project.sources if s.id == source_id), None)
         if source is None:
             raise KeyError(f"Source '{source_id}' not found")
-        root = self.get_source_xml_path(project_id, source_id)
-        if root is None:
-            root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
-        cache = self.projects_dir / project_id / '.source-manifests' / f'{source_id}.json'
-        return source_delta.manifest(root, cache)
+        return (self.get_source_xml_path(project_id, source_id)
+                or self.projects_dir / project_id / 'sources' / source_id / 'xml')
+
+    def source_file_manifest(self, project_id: str, source_id: str) -> dict:
+        """Файловый манифест выгрузки; кэш расположен рядом с проектом, вне xml/."""
+        with self._no_reindex(project_id):
+            root = self._source_file_root(project_id, source_id)
+            workspace = self._source_delta_workspace(project_id, source_id)
+            if not self._is_local_source_root(root, project_id, source_id):
+                if source_delta._journal_path(workspace).exists():
+                    raise source_delta.DeltaError("Операция восстановления ожидает следующего обновления источника")
+                source_delta.recover(root, workspace)  # очищает только сиротские staging/rollback в workspace
+            else:
+                source_delta.recover(root, workspace)
+            return source_delta.manifest(root, self._source_manifest_cache_path(project_id, source_id))
 
     def apply_source_delta(self, project_id: str, source_id: str, archive: BinaryIO,
                            base_version: str, target_manifest: dict) -> dict:
@@ -877,12 +907,14 @@ class ProjectManager:
             source = next((s for s in project.sources if s.id == source_id), None)
             if source is None:
                 raise KeyError(f"Source '{source_id}' not found")
-            root = self.get_source_xml_path(project_id, source_id)
-            if root is None:
-                root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
-            cache = self.projects_dir / project_id / '.source-manifests' / f'{source_id}.json'
+            root = self._source_file_root(project_id, source_id, source)
+            workspace = self._source_delta_workspace(project_id, source_id)
+            # Восстановить предыдущую транзакцию до вычисления версии, иначе
+            # base_version может описать файлы, которые сейчас откатятся.
+            source_delta.recover(root, workspace)
+            cache = self._source_manifest_cache_path(project_id, source_id)
             current = source_delta.manifest(root, cache)
-            result = source_delta.apply(root, archive, target_manifest, base_version, current)
+            result = source_delta.apply(root, archive, target_manifest, base_version, current, workspace)
             if not source.xml_path:
                 with self._registry_lock():
                     source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)

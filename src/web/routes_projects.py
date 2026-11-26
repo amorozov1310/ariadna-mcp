@@ -303,7 +303,11 @@ async def update_source(
         )
 
         if auto_reindex:
-            pm.reindex_async(project_id, source_id=source_id)
+            result = pm.reindex_async(project_id, source_id=source_id)
+            if result['status'] == 'already_running':
+                raise HTTPException(409, 'Выгрузка обновлена, но переиндексация уже выполняется; проверьте статус проекта')
+    except ReindexInProgressError as e:
+        raise HTTPException(409, f'Выгрузка не изменена: {e}') from e
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
