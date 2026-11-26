@@ -9,6 +9,7 @@ scripts/update_from_infobase.ps1) — одним запросом: при нео
 """
 
 import asyncio
+import threading
 import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -16,11 +17,25 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..core.project_manager import ReindexInProgressError
+from ..core.source_manifest import (UnsafeArchiveError, apply_delta, build_manifest,
+                                    read_or_create_manifest, write_manifest)
 from .app import get_pm
 
 router = APIRouter()
 
 _POLL_SEC = 2.0
+_delta_locks: dict[str, threading.Lock] = {}
+_delta_locks_guard = threading.Lock()
+
+
+def _source_paths(pm, project_id: str, source_id: str):
+    source = pm.projects_dir / project_id / 'sources' / source_id
+    return source / 'xml', source / '.ariadna-manifest.json'
+
+
+def _delta_lock(key: str) -> threading.Lock:
+    with _delta_locks_guard:
+        return _delta_locks.setdefault(key, threading.Lock())
 
 
 def _status(pm, project_id: str) -> str:
@@ -46,6 +61,7 @@ async def refresh_source(
     xml_archive: UploadFile | None = File(None),
     wait: str = Form('1'),
     timeout: int = Form(3600),
+    refresh_manifest: str = Form('0'),
 ):
     """Обновить источник и переиндексировать.
 
@@ -65,19 +81,39 @@ async def refresh_source(
     deadline = started + max(1, timeout)
 
     if xml_archive is not None and xml_archive.filename:
+        lock = _delta_lock(f'{project_id}/{source_id}')
+        if not lock.acquire(blocking=False):
+            raise HTTPException(409, 'Для источника уже применяется другое обновление')
         # Пока индексация читает файлы источника, заменять их нельзя.
-        if not await _wait_idle(pm, project_id, deadline):
-            return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
-                                 'detail': 'Проект всё ещё индексируется — выгрузка не заменена'},
-                                status_code=409)
         try:
+            if not await _wait_idle(pm, project_id, deadline):
+                return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
+                                     'detail': 'Проект всё ещё индексируется — выгрузка не заменена'},
+                                    status_code=409)
             await run_in_threadpool(pm.update_source, project_id, source_id,
                                     xml_archive=xml_archive.file,
                                     xml_archive_filename=xml_archive.filename)
+            xml_root, sidecar = _source_paths(pm, project_id, source_id)
+            def refresh_saved_manifest():
+                write_manifest(sidecar, build_manifest(xml_root))
+            await run_in_threadpool(refresh_saved_manifest)
         except ReindexInProgressError as e:
             raise HTTPException(409, f'Выгрузка не заменена: {e}')
         except (ValueError, KeyError) as e:
             raise HTTPException(400, f'Выгрузка не заменена: {e}')
+        finally:
+            lock.release()
+    elif refresh_manifest.lower() in ('1', 'true', 'yes'):
+        # Общая папка/robocopy может обновить источник в обход API. Клиент
+        # явно просит зафиксировать новые хеши после такого зеркалирования.
+        xml_root, sidecar = _source_paths(pm, project_id, source_id)
+        try:
+            def rebuild_saved_manifest():
+                with _delta_lock(f'{project_id}/{source_id}'):
+                    write_manifest(sidecar, build_manifest(xml_root))
+            await run_in_threadpool(rebuild_saved_manifest)
+        except (OSError, UnsafeArchiveError) as e:
+            raise HTTPException(400, f'Не удалось обновить манифест источника: {e}') from e
 
     # Идёт другая индексация — дождаться и запустить свою: файлы могли
     # измениться уже после её начала.
@@ -109,4 +145,85 @@ async def refresh_source(
     if project.status != 'ready':
         body['detail'] = 'Индексация завершилась с ошибкой — подробности в журнале сервера'
         return JSONResponse(body, status_code=500)
+    return JSONResponse(body)
+
+
+@router.get('/api/projects/{project_id}/sources/{source_id}/manifest')
+async def source_manifest(project_id: str, source_id: str):
+    """Версия и хеши файлов, сохранённые после последнего обновления источника."""
+    pm = get_pm()
+    try:
+        project = pm.get_project(project_id)
+    except KeyError:
+        raise HTTPException(404, f'Проект «{project_id}» не найден')
+    if not any(s.id == source_id for s in project.sources):
+        raise HTTPException(404, f'Источник «{source_id}» не найден в проекте «{project_id}»')
+    root, sidecar = _source_paths(pm, project_id, source_id)
+    try:
+        def load_saved_manifest():
+            with _delta_lock(f'{project_id}/{source_id}'):
+                return read_or_create_manifest(root, sidecar)
+        value = await run_in_threadpool(load_saved_manifest)
+    except (OSError, UnsafeArchiveError) as e:
+        raise HTTPException(409, f'Не удалось получить манифест источника: {e}')
+    return JSONResponse(value)
+
+
+@router.post('/api/projects/{project_id}/sources/{source_id}/delta')
+async def update_source_delta(
+    project_id: str,
+    source_id: str,
+    base_version: str = Form(...),
+    delta_archive: UploadFile = File(...),
+    wait: str = Form('1'),
+    timeout: int = Form(3600),
+):
+    """Атомарно применить архив разницы и запустить обычную инкрементальную индексацию."""
+    pm = get_pm()
+    try:
+        project = pm.get_project(project_id)
+    except KeyError:
+        raise HTTPException(404, f'Проект «{project_id}» не найден')
+    if not any(s.id == source_id for s in project.sources):
+        raise HTTPException(404, f'Источник «{source_id}» не найден в проекте «{project_id}»')
+    if not delta_archive.filename:
+        raise HTTPException(400, 'Не передан архив разницы')
+    lock = _delta_lock(f'{project_id}/{source_id}')
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, 'Для источника уже применяется другая разница')
+    started = time.monotonic()
+    deadline = started + max(1, timeout)
+    try:
+        if not await _wait_idle(pm, project_id, deadline):
+            return JSONResponse({'status': 'busy', 'detail': 'Проект всё ещё индексируется — разница не применена'},
+                                status_code=409)
+        root, sidecar = _source_paths(pm, project_id, source_id)
+        try:
+            await run_in_threadpool(apply_delta, root, sidecar, delta_archive.file,
+                                    delta_archive.filename, base_version)
+        except UnsafeArchiveError as e:
+            raise HTTPException(400, f'Разница отклонена: {e}') from e
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+        except OSError as e:
+            raise HTTPException(400, f'Разница отклонена: {e}') from e
+        result = pm.reindex_async(project_id, source_id=source_id)
+        if result['status'] == 'error':
+            raise HTTPException(500, f"Не удалось начать переиндексацию: {result.get('error', '')}")
+    finally:
+        lock.release()
+    body = {'project_id': project_id, 'source_id': source_id}
+    if wait in ('0', 'false', 'no', ''):
+        return JSONResponse({**body, 'status': 'started'}, status_code=202)
+    if not await _wait_idle(pm, project_id, deadline):
+        return JSONResponse({**body, 'status': 'running'}, status_code=202)
+    project = pm.get_project(project_id)
+    body.update(status=project.status, duration_sec=round(time.monotonic() - started, 1))
+    if project.status != 'ready':
+        body['detail'] = 'Индексация завершилась с ошибкой — подробности в журнале сервера'
+        return JSONResponse(body, status_code=500)
+    stats = project.index_stats
+    if stats is not None:
+        body['index'] = {k: getattr(stats, k, 0) for k in
+                         ('total_objects', 'total_modules', 'total_procedures', 'total_calls')}
     return JSONResponse(body)
