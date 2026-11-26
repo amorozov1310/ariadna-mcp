@@ -188,7 +188,6 @@ function Invoke-Refresh($Item, [string]$ZipPath) {
 }
 
 function Invoke-DeltaRefresh($Item) {
-    if (-not (Get-Command python -ErrorAction SilentlyContinue)) { Fail 3 'Для передачи разницы нужен Python 3 (команда python)' }
     $baseUrl = "$AriadnaUrl/api/projects/$([uri]::EscapeDataString($Project))/sources/$([uri]::EscapeDataString($Item.Source))"
     $manifestPath = Join-Path $LogDir 'server_manifest.json'
     $deltaPath = Join-Path $DumpDir 'delta_upload.zip'
@@ -199,6 +198,10 @@ function Invoke-DeltaRefresh($Item) {
         $status = & curl.exe @curl "$baseUrl/manifest"
         if ($status -in @('404', '405')) { return $false }
         if ($status -ne '200') { Fail 2 "Ариадна ответила $status на запрос манифеста «$($Item.Source)»: $(Get-Content $manifestPath -Raw -ErrorAction SilentlyContinue)" }
+        if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+            Write-Log 'Python 3 не найден: для совместимости передаётся полный архив'
+            return $false
+        }
         $summary = & python (Join-Path $PSScriptRoot 'build_source_delta.py') $Item.Dir $manifestPath $deltaPath
         if ($LASTEXITCODE -ne 0) { Fail 2 'Не удалось построить архив разницы' }
         $baseVersion = (Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json).version

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 from . import parser_fingerprint
 from .archives import extract_archive
@@ -26,6 +26,7 @@ from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
+from .source_manifest import invalidate_manifest, recover_source
 
 logger = logging.getLogger('ariadna')
 
@@ -235,6 +236,18 @@ class ProjectManager:
 
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
+        # Закончить/откатить замену выгрузки, прерванную падением процесса.
+        # Staging содержит только hardlink-и и новые файлы, поэтому его
+        # удаление не перечитывает и не копирует большой исходный каталог.
+        for project_dir in self.projects_dir.iterdir():
+            if not project_dir.is_dir() or project_dir.is_symlink():
+                continue
+            sources_dir = project_dir / 'sources'
+            if not sources_dir.is_dir() or sources_dir.is_symlink():
+                continue
+            for source_dir in sources_dir.iterdir():
+                if source_dir.is_dir() and not source_dir.is_symlink():
+                    recover_source(source_dir / 'xml')
         # Ключ блокировки реестра — от каталога, который точно существует, и
         # один раз: resolve() самого projects.json на Windows в момент его
         # замены (файла нет) мог дать другую запись пути, чем при
@@ -664,6 +677,7 @@ class ProjectManager:
             xml_path = f'sources/{source_id}/xml'
         elif (source_dir / 'xml').exists():
             xml_path = f'sources/{source_id}/xml'
+        invalidate_manifest(source_dir / 'xml')
 
         source = SourceInfo(
             id=source_id,
@@ -717,6 +731,7 @@ class ProjectManager:
             # Старый xml/ заменяется целиком (без остатков прежних файлов) и
             # только после успешной проверки и распаковки нового архива.
             extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
+            invalidate_manifest(source_dir / 'xml')
             changes['xml_path'] = f'sources/{source_id}/xml'
 
         # Update metadata fields
@@ -1842,7 +1857,8 @@ class ProjectManager:
                         progress_phase='scanning')
         return project, db
 
-    def reindex_async(self, project_id: str, source_id: str | None = None) -> dict:
+    def reindex_async(self, project_id: str, source_id: str | None = None,
+                      before_start: Callable[[], bool] | None = None) -> dict:
         """
         Start reindex() in a background thread and return immediately
         (IMPROVEMENT_PLAN Этап 4/D7) — for MCP/HTTP callers, so indexing a
@@ -1863,6 +1879,20 @@ class ProjectManager:
         lock = self._reindex_lock(project_id)
         if not lock.acquire(blocking=False):
             return {'status': 'already_running', 'project_id': project_id}
+
+        # Некоторые Web-операции должны опубликовать файлы только после
+        # резервирования единственного слота индексации проекта. Иначе две
+        # дельты разных источников могут одновременно пройти проверку idle,
+        # и вторая останется без своего reindex.
+        if before_start is not None:
+            try:
+                should_reindex = before_start()
+            except Exception:
+                lock.release()
+                raise
+            if not should_reindex:
+                lock.release()
+                return {'status': 'unchanged', 'project_id': project_id}
 
         # Статус 'indexing' — синхронно, до ответа «started»: иначе его
         # записывал поток уже после ответа, и get_index_status сразу после

@@ -17,8 +17,8 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..core.project_manager import ReindexInProgressError
-from ..core.source_manifest import (UnsafeArchiveError, apply_delta, build_manifest,
-                                    read_or_create_manifest, write_manifest)
+from ..core.source_manifest import (MANIFEST_NAME, UnsafeArchiveError, apply_delta,
+                                    build_manifest, read_or_create_manifest, write_manifest)
 from .app import get_pm
 
 router = APIRouter()
@@ -29,8 +29,10 @@ _delta_locks_guard = threading.Lock()
 
 
 def _source_paths(pm, project_id: str, source_id: str):
-    source = pm.projects_dir / project_id / 'sources' / source_id
-    return source / 'xml', source / '.ariadna-manifest.json'
+    root = pm.get_source_xml_path(project_id, source_id)
+    if root is None:
+        root = pm.projects_dir / project_id / 'sources' / source_id / 'xml'
+    return root, root / MANIFEST_NAME
 
 
 def _delta_lock(key: str) -> threading.Lock:
@@ -193,26 +195,43 @@ async def update_source_delta(
         raise HTTPException(409, 'Для источника уже применяется другая разница')
     started = time.monotonic()
     deadline = started + max(1, timeout)
+    root, sidecar = _source_paths(pm, project_id, source_id)
+
+    def apply_if_reserved() -> bool:
+        result = apply_delta(root, sidecar, delta_archive.file,
+                             delta_archive.filename, base_version)
+        return result['changed']
+
     try:
-        if not await _wait_idle(pm, project_id, deadline):
-            return JSONResponse({'status': 'busy', 'detail': 'Проект всё ещё индексируется — разница не применена'},
-                                status_code=409)
-        root, sidecar = _source_paths(pm, project_id, source_id)
-        try:
-            await run_in_threadpool(apply_delta, root, sidecar, delta_archive.file,
-                                    delta_archive.filename, base_version)
-        except UnsafeArchiveError as e:
-            raise HTTPException(400, f'Разница отклонена: {e}') from e
-        except ValueError as e:
-            raise HTTPException(409, str(e)) from e
-        except OSError as e:
-            raise HTTPException(400, f'Разница отклонена: {e}') from e
-        result = pm.reindex_async(project_id, source_id=source_id)
+        while True:
+            try:
+                result = await run_in_threadpool(pm.reindex_async, project_id, source_id,
+                                                 apply_if_reserved)
+            except UnsafeArchiveError as e:
+                raise HTTPException(400, f'Разница отклонена: {e}') from e
+            except ValueError as e:
+                raise HTTPException(409, str(e)) from e
+            except OSError as e:
+                raise HTTPException(400, f'Разница отклонена: {e}') from e
+            if result['status'] != 'already_running':
+                break
+            if not await _wait_idle(pm, project_id, deadline):
+                return JSONResponse({'status': 'busy',
+                                     'detail': 'Проект индексируется — разница не применена; повторите запрос позже'},
+                                    status_code=409)
         if result['status'] == 'error':
             raise HTTPException(500, f"Не удалось начать переиндексацию: {result.get('error', '')}")
     finally:
         lock.release()
     body = {'project_id': project_id, 'source_id': source_id}
+    if result['status'] == 'unchanged':
+        project = pm.get_project(project_id)
+        body.update(status=project.status, duration_sec=round(time.monotonic() - started, 1))
+        if project.index_stats is not None:
+            stats = project.index_stats
+            body['index'] = {k: getattr(stats, k, 0) for k in
+                             ('total_objects', 'total_modules', 'total_procedures', 'total_calls')}
+        return JSONResponse(body, status_code=200 if project.status == 'ready' else 500)
     if wait in ('0', 'false', 'no', ''):
         return JSONResponse({**body, 'status': 'started'}, status_code=202)
     if not await _wait_idle(pm, project_id, deadline):

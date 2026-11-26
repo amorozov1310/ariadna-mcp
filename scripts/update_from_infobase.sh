@@ -195,6 +195,10 @@ delta_refresh() {
             || fail 2 "нет связи с Ариадной при запросе манифеста источника «$sid»"
         if [ "$status" = 404 ] || [ "$status" = 405 ]; then return 1; fi
         [ "$status" = 200 ] || fail 2 "Ариадна ответила $status на запрос манифеста «$sid»: $(cat "$manifest" 2>/dev/null)"
+        if ! command -v python3 >/dev/null; then
+            log 'Python 3 не найден: для совместимости передаётся полный архив'
+            return 1
+        fi
         python3 "$SCRIPT_DIR/build_source_delta.py" "$dir" "$manifest" "$delta" > "$LOG_DIR/delta_summary.json" \
             || fail 2 'не удалось построить архив разницы (нужен Python 3)'
         local base

@@ -25,7 +25,8 @@ def main():
     for path in sorted(root.rglob('*')):
         if path.is_symlink():
             raise SystemExit(f'Символическая ссылка в выгрузке не поддерживается: {path}')
-        if not path.is_file() or path.name.startswith('Template.'):
+        if (not path.is_file() or path.name.startswith('Template.')
+                or path.name == '.ariadna-manifest.json'):
             continue
         digest = hashlib.sha256()
         size = 0
