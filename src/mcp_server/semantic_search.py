@@ -38,21 +38,6 @@ def _terms(query: str) -> list[str]:
     return words + [r for w in words for r in word_roots(w)]
 
 
-def _read_lines(path: str | None) -> list[str] | None:
-    if not path:
-        return None
-    try:
-        raw = open(path, 'rb').read()
-    except OSError:
-        return None
-    for enc in ('utf-8-sig', 'cp1251'):
-        try:
-            return raw.decode(enc).splitlines()
-        except UnicodeDecodeError:
-            continue
-    return None
-
-
 def _snippet(lines: list[str] | None, hit: dict, terms: list[str]) -> tuple[str, int]:
     """Строка фрагмента, где встретилось слово запроса (иначе — объявление)."""
     if not lines:
@@ -108,12 +93,13 @@ def search(engine, project_id: str, query: str, source_id: str | None,
     has_more = len(hits) > offset + limit
 
     terms = _terms(query)
-    files: dict[str, list[str] | None] = {}
+    files: dict[int, list[str] | None] = {}
     items = []
     for n, hit in enumerate(page, offset + 1):
-        key = f"{hit['source_id']}\0{hit['module_name']}"
+        key = hit['module_id']
         if key not in files:
-            files[key] = _read_lines(engine.module_file_path(hit))
+            content = engine.db.read_module_text(key)
+            files[key] = content.splitlines() if content is not None else None
         snippet, snippet_line = _snippet(files[key], hit, terms)
         items.append({
             'rank': n,
@@ -135,7 +121,7 @@ def search(engine, project_id: str, query: str, source_id: str | None,
             'snippet_line': snippet_line,
         })
     if any(not i['snippet'] for i in items):
-        warnings.append('часть файлов модулей недоступна — у таких результатов нет фрагмента кода')
+        warnings.append('для части результатов нет фрагмента кода в индексе')
 
     return {
         'schema_version': SCHEMA_VERSION,

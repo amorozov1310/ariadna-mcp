@@ -19,7 +19,6 @@ from .. import __version__
 from . import parser_fingerprint
 from .cards import CARD_FORMAT
 from .project_manager import PROJECT_GONE, ProjectManager
-from .xml_metadata import has_configuration
 
 MANIFEST_SCHEMA_VERSION = '1'
 
@@ -101,8 +100,8 @@ def project_manifest(pm: ProjectManager, project_id: str) -> dict:
         row = by_source.get(src.id, {})
         state = parser_states.get(src.id) or {}
         cards = row.get('cards', {'modules_with_code': 0, 'modules_current': 0})
-        xml_dir = pm.source_path(project_id, src.xml_path) if src.xml_path else None
-        metadata_from = 'xml' if xml_dir is not None and has_configuration(xml_dir) else ''
+        # sources.indexed_at заполняет обход метаданных из Configuration.xml.
+        metadata_from = 'xml' if row.get('indexed_at') else ''
         fingerprint = state.get('fingerprint', '')
         item = {
             'id': src.id,

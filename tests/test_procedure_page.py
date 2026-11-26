@@ -2,7 +2,6 @@
 что вызывает, переход из поиска по процедурам и по тексту кода."""
 
 import io
-import shutil
 import sys
 import tempfile
 import zipfile
@@ -93,15 +92,11 @@ def test_search_results_link_here(web):
     assert '/projects/p1/procedure?module=' in code and 'line=' in code
 
 
-def test_not_found_and_missing_file(web):
+def test_not_found_and_missing_indexed_text(web):
     pm, client = web
     main = _main(client.get(_url('НетТакой')).text)
     assert 'не найдена' in main and client.get(_url('НетТакой')).status_code == 200
-    xml = Path(pm.data_dir) / 'projects' / 'p1' / 'sources' / 'main' / 'xml'
-    moved = xml.with_name('xml_moved')
-    shutil.move(str(xml), str(moved))
-    try:
-        main = _main(client.get(_url()).text)
-        assert 'Файл модуля недоступен' in main
-    finally:
-        shutil.move(str(moved), str(xml))
+    with pm.get_db('p1').conn as conn:
+        conn.execute('DELETE FROM module_text')
+    main = _main(client.get(_url()).text)
+    assert 'Текст модуля отсутствует в индексе' in main

@@ -78,7 +78,7 @@ def test_sandbox_reads_corpus_and_writes_nothing_to_data():
             users = pm.get_search('corpus').search_metadata('Users', source_id='ext')
             assert [r['full_name'] for r in users][:1] == ['Справочник.Users']
 
-            # Поиск, код процедуры и diagnose_index читают файлы корпуса.
+            # Поиск, код процедуры и diagnose_index работают по снимку корпуса.
             code = execute_tool(pm, 'get_procedure_code', {
                 'project_id': 'corpus', 'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
             assert 'Функция РассчитатьЦену' in code and 'изменён' not in code, code

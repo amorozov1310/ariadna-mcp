@@ -4,9 +4,7 @@ driving the live server as an agent would against a large real index:
 
 - a common module's natural short name resolved to a *different* module
   containing it as a substring (ОбщегоНазначения → ОтчетыОбщегоНазначения);
-- get_procedure_code / search_code could not read module files when the
-  index was built by another process (Windows host paths inside the
-  Linux container): stored file_path had backslashes, abs_path was D:\\...;
+- get_procedure_code / search_code depended on paths from the build host;
 - procedure names were matched case-sensitively in get_procedure_code and
   get_call_tree, unlike every search tool;
 - search_attributes / find_references never printed the attribute name,
@@ -63,15 +61,6 @@ def _pm_with_xml_project(tmpdir: str) -> ProjectManager:
     return pm
 
 
-def _simulate_foreign_index(pm: ProjectManager):
-    """Make the index look like it was built on Windows and is now served
-    from elsewhere: backslash relative paths, absolute paths that don't exist."""
-    db = pm.get_db('p1')
-    db.conn.execute("UPDATE modules SET file_path = replace(file_path, '/', '\\'), "
-                    "abs_path = 'D:\\nowhere\\' || file_path")
-    db.conn.commit()
-
-
 def test_module_short_name_prefers_exact_common_module():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm_with_xml_project(tmpdir)
@@ -98,7 +87,8 @@ def test_code_tools_work_with_index_built_elsewhere():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm_with_xml_project(tmpdir)
         try:
-            _simulate_foreign_index(pm)
+            xml = pm.get_source_xml_path('p1', 'main')
+            xml.rename(Path(tmpdir) / 'выгрузка-перенесена')
             code = execute_tool(pm, 'get_procedure_code', {
                 'module_name': 'ОбщийМодуль.ОбщегоНазначения.Модуль',
                 'procedure_name': 'ЗначениеРеквизитаОбъекта'})

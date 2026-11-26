@@ -93,7 +93,6 @@ def procedure_page(request: Request, project_id: str, module: str, name: str = '
     конфигурации, и в расширении). Из поиска по тексту кода приходит модуль и
     строка без имени — процедура находится по строке, строка подсвечивается.
     Данные — те же функции ядра, что у get_procedure_context / get_procedure_code."""
-    from ..core.bsl_parser import read_bsl_text
     pm = get_pm()
     try:
         project = pm.get_project(project_id)
@@ -112,8 +111,7 @@ def procedure_page(request: Request, project_id: str, module: str, name: str = '
         elif outline:
             # Строка вне процедур (комментарий над процедурой, раздел
             # переменных, основная программа) — кусок модуля вокруг неё.
-            path = engine.module_file_path(outline['module'])
-            content = read_bsl_text(path) if path else None
+            content = engine.db.read_module_text(outline['module']['id'])
             if content is not None:
                 lines = content.split('\n')
                 first = max(1, line - 10)
@@ -130,11 +128,9 @@ def procedure_page(request: Request, project_id: str, module: str, name: str = '
     code_lines, truncated, file_note = [], False, ''
     if ctx:
         proc, mod = ctx['procedure'], ctx['module']
-        path = engine.module_file_path(mod)
-        content = read_bsl_text(path) if path else None
+        content = engine.db.read_module_text(mod['id'])
         if content is None:
-            file_note = ('Файл модуля недоступен на сервере — выгрузку переместили или удалили? '
-                         'Обновите индекс проекта.')
+            file_note = 'Текст модуля отсутствует в индексе. Обновите индекс проекта.'
         else:
             all_lines = content.split('\n')[proc['start_line'] - 1:proc['end_line']]
             truncated = len(all_lines) > PROCEDURE_LINES and not full

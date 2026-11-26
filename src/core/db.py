@@ -8,6 +8,7 @@ import sqlite3
 import os
 import threading
 import time
+import zlib
 from datetime import datetime
 
 
@@ -18,7 +19,9 @@ CREATE TABLE IF NOT EXISTS sources (
     source_type TEXT DEFAULT 'main',
     config_name TEXT DEFAULT '',
     config_version TEXT DEFAULT '',
-    indexed_at  TEXT DEFAULT ''
+    indexed_at  TEXT DEFAULT '',
+    compatibility_mode TEXT NOT NULL DEFAULT '',
+    script_is_russian BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS metadata_objects (
@@ -79,11 +82,6 @@ CREATE TABLE IF NOT EXISTS modules (
     server_call  BOOLEAN DEFAULT FALSE,
     line_count   INTEGER DEFAULT 0,
     name_cf      TEXT DEFAULT '',
-    -- Absolute path on disk (Этап 3) — module_text_fts is contentless
-    -- (stores no text, only the index) to keep the DB from ballooning to
-    -- GB scale on a large corpus; search_code re-reads the file directly
-    -- for the handful of matches it needs line/context from.
-    abs_path     TEXT DEFAULT '',
     -- Этап 4/D7: (source_id, name) is the stable identity a rerun looks a
     -- module up by — for incremental reindex to skip/update in place
     -- instead of accumulating duplicate rows, both index_metadata (common
@@ -92,6 +90,21 @@ CREATE TABLE IF NOT EXISTS modules (
     -- hence UPSERTing on this rather than plain INSERT.
     UNIQUE(source_id, name)
 );
+
+-- Сжатый UTF-8 хранится отдельно: выборки метаданных модуля не тянут его код.
+CREATE TABLE IF NOT EXISTS module_text (
+    module_id INTEGER PRIMARY KEY REFERENCES modules(id) ON DELETE CASCADE,
+    content   BLOB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS form_events (
+    module_id INTEGER NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
+    owner     TEXT NOT NULL,
+    event     TEXT NOT NULL,
+    handler   TEXT NOT NULL,
+    call_type TEXT NOT NULL,
+    PRIMARY KEY (module_id, owner, event)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS procedures (
     id          INTEGER PRIMARY KEY,
@@ -160,9 +173,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS procedures_fts USING fts5(
 --   - content='' (contentless): FTS5 stores only the index, not the text
 --     itself — turns out that duplicated raw text, not the position
 --     index, was the actual multi-GB cost (detail=none alone only saved
---     ~3%). search_code re-reads the source .bsl file straight from disk
---     (modules.abs_path) for the handful of rows a query actually
---     matches, and computes the line/±1 context from that.
+--     ~3%). search_code retrieves the compressed text from module_text
+--     for each candidate it scans and computes the line and context.
 -- contentless_delete=1: lets DELETE/INSERT OR REPLACE work on a contentless
 -- table at all (needed for _clear_source_data and reindexing an existing
 -- module) — without it contentless FTS5 tables are insert-only.
@@ -607,17 +619,27 @@ class Database:
                 delay *= 3
         raise AssertionError("unreachable")   # pragma: no cover
 
+    @staticmethod
+    def has_current_schema(conn: sqlite3.Connection) -> bool:
+        """Есть ли в индексе таблица с текстами модулей."""
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='module_text'"
+        ).fetchone() is not None
+
+    def read_module_text(self, module_id: int) -> str | None:
+        """Текст, из которого построены FTS и границы процедур модуля."""
+        row = self.read_conn().execute(
+            "SELECT content FROM module_text WHERE module_id=?", (module_id,)
+        ).fetchone()
+        return zlib.decompress(row[0]).decode('utf-8') if row is not None else None
+
     def _recreate_if_stale_schema(self):
         """
         No migrations (per IMPROVEMENT_PLAN): the index is fully rebuilt
         from source on reindex, so a DB created under an older schema is
         just deleted and recreated empty rather than ALTERed in place.
-        Detected by probing for something added in the latest schema
-        revision — index_state.progress_phase (Этап 4/D7: background
-        reindex progress tracking needs these columns to exist, and
-        db.update_state() would otherwise fail with "no such column" on
-        an older DB) — rather than a version counter, since existing
-        on-disk DBs predate any such counter.
+        Проверка таблицы module_text распознаёт индексы, построенные без
+        исходного текста модулей.
         """
         if self.db_path in (':memory:', '') or not os.path.exists(self.db_path):
             return
@@ -627,9 +649,7 @@ class Database:
                 has_calls_table = probe.execute(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='calls'"
                 ).fetchone()[0]
-                has_new_schema = probe.execute(
-                    "SELECT COUNT(*) FROM pragma_table_info('index_state') WHERE name='progress_phase'"
-                ).fetchone()[0]
+                has_new_schema = self.has_current_schema(probe)
             finally:
                 probe.close()
         except sqlite3.Error:
@@ -652,7 +672,8 @@ class Database:
             self.connect()
         for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes', 'object_properties',
                       'object_queries', 'object_query_refs',
-                      'module_stat', 'object_stat', 'graph_state', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
+                      'module_stat', 'object_stat', 'graph_state', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts',
+                      'module_text', 'form_events', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:
             self.conn.execute(f"DELETE FROM {table}")

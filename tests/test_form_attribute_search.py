@@ -107,14 +107,9 @@ def test_type_filter_applies_to_form_attributes(pm):
     assert 'ПроцентЗаполнения' not in _attrs(pm, 'заполнения', type_filter='Строка')
 
 
-def test_existing_index_is_backfilled_without_reparse(pm):
-    """Индекс, построенный до таблицы form_attributes: reindex без изменений
-    дочитывает реквизиты, не переразбирая модули."""
-    db = pm.get_db('p1')
+def test_unchanged_form_attributes_survive_reindex(pm):
     before = _form_rows(pm)
     assert before
-    db.conn.execute('DELETE FROM form_attributes')
-    db.conn.commit()
     stats = pm.reindex('p1')
     assert _form_rows(pm) == before
     assert stats.total_procedures   # индекс на месте

@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import os
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
@@ -47,15 +48,6 @@ def module_file_stat(file_path: str | Path, form_xml_path: str | Path = '') -> s
         return stat
     except OSError:
         return ''
-
-
-def form_xml_for_module(file_path: str | Path, module_type: str) -> str:
-    """Form.xml модуля формы (…/Ext/Form/Module.bsl → …/Ext/Form.xml) — как
-    его находит XMLWalker; '' — не модуль формы или файла нет."""
-    if module_type != 'МодульФормы':
-        return ''
-    form_xml = Path(file_path).parent.parent / 'Form.xml'
-    return str(form_xml) if form_xml.exists() else ''
 
 
 class Indexer:
@@ -121,8 +113,9 @@ class Indexer:
         if prev_type is None or (prev_type[0] or 'main') != (source_type or 'main'):
             self.db.mark_graph_dirty()
         conn.execute(
-            """INSERT OR REPLACE INTO sources (id, label, source_type, indexed_at)
-               VALUES (?, ?, ?, ?)""",
+            """INSERT INTO sources (id, label, source_type, indexed_at)
+               VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,
+               source_type=excluded.source_type, indexed_at=excluded.indexed_at""",
             (source_id, source_label or source_id, source_type, datetime.now().isoformat())
         )
 
@@ -442,7 +435,8 @@ class Indexer:
         параллельно — через 9p упирается в задержку, а не в диск.
         """
         from .xml_walker import IO_THREADS, XMLWalker, read_form_attribute_details
-        from .xml_metadata import is_russian_dump
+        from .xml_metadata import read_script_settings
+        from .form_events import form_events
         from .bsl_reference import module_context_vars, module_context_methods
         from .bsl_parser import BSLParser
 
@@ -452,16 +446,17 @@ class Indexer:
             self.db.connect()
             conn = self.db.conn
 
-        # Register source if index_report() hasn't already (e.g. no report.txt
-        # yet — XML-only source). modules.source_id has a FK on sources(id).
-        # source_type matters beyond bookkeeping: resolve_calls() prefers
-        # 'extension' sources when the same module/procedure exists in more
-        # than one source, so an XML-only extension must register as such,
-        # not silently fall back to 'main'.
+        # Настройки BSL нужны и для выгрузки без модулей. Если метаданные
+        # ещё не индексировались, регистрируем источник с его видом.
+        russian, compatibility_mode = read_script_settings(xml_path)
+        previous = conn.execute(
+            "SELECT script_is_russian FROM sources WHERE id=?", (source_id,)).fetchone()
+        language_changed = previous is not None and bool(previous[0]) != russian
         conn.execute(
-            "INSERT OR IGNORE INTO sources (id, label, source_type) VALUES (?, ?, ?)",
-            (source_id, source_label or source_id, source_type)
-        )
+            """INSERT INTO sources (id, label, source_type, script_is_russian, compatibility_mode)
+               VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+               script_is_russian=excluded.script_is_russian, compatibility_mode=excluded.compatibility_mode""",
+            (source_id, source_label or source_id, source_type, russian, compatibility_mode))
 
         if module_files is None:
             module_files = XMLWalker().walk(xml_path)
@@ -504,13 +499,6 @@ class Indexer:
         with ThreadPoolExecutor(IO_THREADS) as pool:
             fingerprints = list(pool.map(fingerprint, module_files))
         seen_names: set[str] = set()
-        # Модули форм, чьи реквизиты уже в индексе: у остальных неизменённых
-        # форм (индекс построен до таблицы form_attributes) реквизиты
-        # дочитываются без переразбора модуля.
-        with_form_attributes = {r[0] for r in conn.execute(
-            "SELECT DISTINCT module_id FROM form_attributes")}
-        russian = is_russian_dump(xml_path)
-
         stats = {'modules': 0, 'procedures': 0, 'calls': 0, 'lines': 0,
                   'files': 0, 'files_skipped': 0}
 
@@ -522,15 +510,13 @@ class Indexer:
             stat, file_hash = fingerprints[i]
 
             prior = existing_modules.get(mf.full_name)
-            if (not force_reparse and prior is not None and file_hash
+            if (not force_reparse and not (language_changed and mf.form_xml_path)
+                    and prior is not None and file_hash
                     and prior['file_hash'] == file_hash):
                 stats['files_skipped'] += 1
                 if stat and stored_stat.get(prior['id']) != stat:
                     conn.execute("INSERT OR REPLACE INTO module_stat (module_id, stat) VALUES (?, ?)",
                                  (prior['id'], stat))
-                if mf.form_xml_path and prior['id'] not in with_form_attributes:
-                    self._store_form_attributes(conn, prior['id'], read_form_attribute_details(
-                        mf.form_xml_path, russian))
             else:
                 details = (read_form_attribute_details(mf.form_xml_path, russian)
                            if mf.form_xml_path else None)
@@ -572,10 +558,10 @@ class Indexer:
                         module_id = prior['id']
                         conn.execute(
                             """UPDATE modules SET object_id=?, file_path=?, file_hash=?,
-                               line_count=?, abs_path=?, is_server=?, is_client=?, is_global=?,
+                               line_count=?, is_server=?, is_client=?, is_global=?,
                                is_privileged=?, server_call=?, name_cf=?
                                WHERE id=?""",
-                            (object_id, mf.relative_path, file_hash, result.line_count, mf.file_path,
+                            (object_id, mf.relative_path, file_hash, result.line_count,
                              is_server, is_client, is_global, is_privileged, server_call,
                              mf.full_name.casefold(), module_id))
                         # Stale content from the previous version of this
@@ -587,12 +573,12 @@ class Indexer:
                         cur = conn.execute(
                             """INSERT INTO modules (source_id, object_id, name, module_type,
                                file_path, file_hash, is_server, is_client, is_global,
-                               is_privileged, server_call, line_count, name_cf, abs_path)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               is_privileged, server_call, line_count, name_cf)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (source_id, object_id, mf.full_name, mf.module_type,
                              mf.relative_path, file_hash,
                              is_server, is_client, is_global, is_privileged, server_call,
-                             result.line_count, mf.full_name.casefold(), mf.file_path))
+                             result.line_count, mf.full_name.casefold()))
                         module_id = cur.lastrowid
                         existing_modules[mf.full_name] = {
                             'id': module_id, 'object_id': object_id, 'file_hash': file_hash}
@@ -600,14 +586,19 @@ class Indexer:
                     stats['modules'] += 1
                     conn.execute("INSERT OR REPLACE INTO module_stat (module_id, stat) VALUES (?, ?)",
                                  (module_id, stat))
-                    if mf.form_xml_path:
-                        self._store_form_attributes(conn, module_id, details)
+                    if mf.module_type == 'МодульФормы':
+                        self._store_form_attributes(conn, module_id, details or [])
+                        events = form_events(mf.form_xml_path) if mf.form_xml_path else {}
+                        conn.execute("DELETE FROM form_events WHERE module_id=?", (module_id,))
+                        conn.executemany(
+                            "INSERT INTO form_events (module_id, owner, event, handler, call_type)"
+                            " VALUES (?, ?, ?, ?, ?)",
+                            [(module_id, owner, event, handler, call_type)
+                             for (owner, event), (handler, call_type) in events.items()])
 
-                    # FTS index for search_code (Этап 3/D6) — contentless:
-                    # only the index is stored here, not the text itself
-                    # (see db.py); the actual content lives on disk at
-                    # modules.abs_path and gets re-read from there when a
-                    # query matches.
+                    # FTS хранит термы, а выдача читает сжатый текст того же разбора.
+                    conn.execute("INSERT OR REPLACE INTO module_text (module_id, content) VALUES (?, ?)",
+                                 (module_id, zlib.compress(result.content.encode('utf-8'))))
                     conn.execute(
                         "INSERT INTO module_text_fts (rowid, text) VALUES (?, ?)",
                         (module_id, result.content))
@@ -678,10 +669,7 @@ class Indexer:
 
     @staticmethod
     def _store_form_attributes(conn, module_id: int, details) -> None:
-        """Реквизиты формы модуля — заново (details из read_form_attribute_details;
-        None — Form.xml не прочитан, прежние строки остаются)."""
-        if details is None:
-            return
+        """Заменить реквизиты формы данными текущего разбора."""
         conn.execute("DELETE FROM form_attributes WHERE module_id=?", (module_id,))
         conn.executemany(
             """INSERT INTO form_attributes (module_id, name, title, type_desc, name_cf, search_cf)

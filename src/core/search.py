@@ -11,10 +11,8 @@ sources (main config vs extensions).
 """
 
 import logging
-import os
 import re
 import sqlite3
-from pathlib import Path
 from typing import NamedTuple
 
 from .db import Database
@@ -129,35 +127,14 @@ def resolve_module_ids(conn, module_name: str, source_id: str | None = None) -> 
 class SearchEngine:
     """Search over indexed 1C configuration metadata."""
 
-    def __init__(self, db: Database, source_roots: dict[str, str] | None = None,
-                 glossary=None):
+    def __init__(self, db: Database, glossary=None):
         self.db = db
         # Словарь проекта (glossary.Glossary) — слова пользователей → объекты и
         # процедуры; None — без словаря (движок построен не через ProjectManager).
         self.glossary = glossary
-        # {source_id: XML dump root on THIS machine} — module files are
-        # located from here, not from modules.abs_path: that column holds
-        # the path as seen by whichever process built the index, which is
-        # wrong once the same data/ is served from a container (a
-        # natively-built index stores D:\... paths).
-        self.source_roots = source_roots or {}
         # Этап 4/D7: no longer forces the writer connection open — every
         # query here uses db.read_conn() (a per-thread reader), which
         # bootstraps the schema itself on a brand-new db_path if needed.
-
-    def module_file_path(self, module_row) -> str | None:
-        """Path of a module's .bsl file readable from this process, or None."""
-        row = dict(module_row)
-        rel = (row.get('file_path') or '').replace('\\', '/')
-        root = self.source_roots.get(row.get('source_id') or '')
-        if root and rel:
-            candidate = Path(root) / rel
-            if candidate.exists():
-                return str(candidate)
-        abs_path = row.get('abs_path') or ''
-        if abs_path and os.path.exists(abs_path):
-            return abs_path
-        return None
 
     # ============================================
     # SOURCE HELPERS
@@ -917,11 +894,11 @@ class SearchEngine:
                               source_id: str | None = None) -> dict | str:
         """Всё о процедуре, кроме кода, — для get_procedure_context: объявление,
         строки, объект и его синоним, область и строки комментария над
-        объявлением (из файла модуля), кто вызывает (сначала по числу мест
+        объявлением (из текста модуля в индексе), кто вызывает (сначала по числу мест
         вызова) и что
         вызывает (разрешённые вызовы и неразрешённые имена). Строка — ошибка
         «не найдено» с подсказкой."""
-        from .cards import _read_lines, _regions, doc_comment_lines
+        from .cards import _regions, doc_comment_lines
         conn = self.db.read_conn()
         ids = resolve_module_ids(conn, module_name, source_id)
         if not ids:
@@ -941,8 +918,8 @@ class SearchEngine:
                     f"List its procedures with get_module_outline(module_name=\"{mod['name']}\").")
 
         region, comment = '', []
-        path = self.module_file_path(mod)
-        lines = _read_lines(path) if path else None
+        content = self.db.read_module_text(mod['id'])
+        lines = content.splitlines() if content is not None else []
         if lines:
             regions = _regions(lines)
             if 0 < proc['start_line'] <= len(regions):
@@ -1033,7 +1010,7 @@ class SearchEngine:
         cap = SEARCH_CODE_FTS_MODULES
         rows = _fts_rows(conn, f"""
             SELECT f.rowid as module_id, m.name as module_name,
-                   m.file_path, m.abs_path, m.source_id
+                   m.file_path, m.source_id
             FROM module_text_fts f
             JOIN modules m ON m.id = f.rowid
             WHERE {where}
@@ -1045,10 +1022,8 @@ class SearchEngine:
             rows[:cap], query, limit, offset=offset)
 
         # Fallback (D5: case-insensitive) — covers queries FTS5's unicode61
-        # tokenizer won't prefix-match (e.g. leading punctuation). No stored
-        # text to LIKE against (contentless table), so this scans the
-        # on-disk file of every candidate module instead — capped, since
-        # it's a real per-file read, not a SQL scan.
+        # tokenizer won't prefix-match (e.g. leading punctuation).
+        # Просматриваем сжатый текст модулей, поэтому число кандидатов ограничено.
         if not results:
             conds = ["file_path != ''"]
             p: list = []
@@ -1061,7 +1036,7 @@ class SearchEngine:
             w = ' AND '.join(conds)
             cap = SEARCH_CODE_FALLBACK_MODULES
             rows = conn.execute(f"""
-                SELECT id as module_id, name as module_name, file_path, abs_path, source_id
+                SELECT id as module_id, name as module_name, file_path, source_id
                 FROM modules WHERE {w} LIMIT ?""", p + [cap + 1]).fetchall()
             results, fb_per_module, fb_unreadable, fb_readable = self._extract_code_matches(
                 rows[:cap], query, limit, offset=offset)
@@ -1087,9 +1062,7 @@ class SearchEngine:
         """Locate each occurrence of ``query`` (case-insensitive) inside the
         matched modules' text and build a module:line + ±1 line context
         result for it — the line number is computed from the match's
-        character offset, per Этап 3's spec. module_text_fts is contentless
-        (D6 size contingency), so the text is re-read from disk here rather
-        than fetched from the DB.
+        character offset in the text stored in the index.
 
         ``offset`` skips that many matches (across all candidate modules,
         in the same scan order) before collecting into ``results`` —
@@ -1102,8 +1075,6 @@ class SearchEngine:
         пропущены, модулей не прочитано, модулей прочитано). Считаются только
         модули, до которых дошёл просмотр.
         """
-        from .bsl_parser import read_bsl_text
-
         if max_per_module is None:
             max_per_module = SEARCH_CODE_MAX_PER_MODULE
         needle = query.casefold()
@@ -1115,8 +1086,7 @@ class SearchEngine:
         capped = False
         unreadable = readable = 0
         for row in rows:
-            path = self.module_file_path(row)
-            content = read_bsl_text(path) if path else None
+            content = self.db.read_module_text(row['module_id'])
             if content is None:
                 unreadable += 1
                 continue
@@ -1542,7 +1512,7 @@ def call_graph_resolution_stats(conn, worst_modules_limit: int = 20,
 
 def diagnose_index(project_manager, project_id: str) -> dict:
     """
-    Compare BSL files on disk with indexed procedures.
+    Compare the indexed snapshot of BSL modules with parsed procedures.
     Finds procedures present in source but missing from index.
     Uses a greedy regex (more permissive than the parser) to detect mismatches.
 
@@ -1550,8 +1520,6 @@ def diagnose_index(project_manager, project_id: str) -> dict:
     call_graph_resolution_stats().
     """
     import re
-    from pathlib import Path
-    from .xml_walker import XMLWalker
 
     pm = project_manager
     project = pm.get_project(project_id)
@@ -1568,36 +1536,21 @@ def diagnose_index(project_manager, project_id: str) -> dict:
 
     # 1. Scan all BSL files with greedy regex
     file_procs = {}  # {(module_full_name, proc_name): info}
-    walker = XMLWalker()
-
-    for source in project.sources:
-        if not source.xml_path:
+    for mod in conn.execute("SELECT id, name, file_path FROM modules WHERE file_path != ''"):
+        content = db.read_module_text(mod['id'])
+        if content is None:
             continue
-        xml_path = pm.source_path(project_id, source.xml_path)
-        if not xml_path.exists():
-            continue
-
-        for mf in walker.walk(str(xml_path)):
-            try:
-                content = Path(mf.file_path).read_text(encoding='utf-8-sig')
-            except Exception:
-                try:
-                    content = Path(mf.file_path).read_text(encoding='cp1251')
-                except Exception:
-                    continue
-
-            for i, line in enumerate(content.replace('\r\n', '\n').split('\n'), 1):
-                m = RE_GREEDY.match(line)
-                if m:
-                    proc_name = m.group(2)
-                    key = (mf.full_name, proc_name)
-                    file_procs[key] = {
-                        'name': proc_name,
-                        'module': mf.full_name,
-                        'file': mf.relative_path,
-                        'line': i,
-                        'signature': line.strip()[:150],
-                    }
+        for i, line in enumerate(content.split('\n'), 1):
+            m = RE_GREEDY.match(line)
+            if m:
+                proc_name = m.group(2)
+                file_procs[mod['name'], proc_name] = {
+                    'name': proc_name,
+                    'module': mod['name'],
+                    'file': mod['file_path'],
+                    'line': i,
+                    'signature': line.strip()[:150],
+                }
 
     # 2. Get all indexed procedures
     indexed = {}
@@ -1640,7 +1593,6 @@ def diagnose_index(project_manager, project_id: str) -> dict:
     for (db_mod, proc_name), info in sorted(indexed.items()):
         if proc_name in file_by_proc and modules_match(db_mod, {m for m in file_by_proc[proc_name]}):
             continue
-        # Skip procedures from report-only modules (no BSL file)
         extra.append(info)
 
     return {

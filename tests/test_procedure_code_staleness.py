@@ -1,11 +1,4 @@
-"""
-get_procedure_code после изменения файла модуля без переиндексации.
-
-Инструмент режет текущий файл по номерам строк из индекса. Если выгрузку
-обновили («обновить источник» в Web UI), а reindex не запускали, под
-заголовком процедуры оказывались чужие строки. Теперь md5 файла сверяется
-с modules.file_hash, и при расхождении первой строкой идёт предупреждение.
-"""
+"""Код и границы процедуры обновляются одновременно при переиндексации."""
 
 import io
 import sys
@@ -19,8 +12,6 @@ from src.mcp_server.tools import execute_tool
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 PRICES = 'CommonModules/ЦеныСервер/Ext/Module.bsl'
-FORM = 'Catalogs/Склады/Forms/ФормаЭлемента/Ext/Form/Module.bsl'
-WARNING = 'файл модуля изменён после индексации'
 
 
 def _pm(tmpdir: str) -> ProjectManager:
@@ -42,51 +33,22 @@ def _code(pm, module, proc):
                                                    'procedure_name': proc})
 
 
-def test_unchanged_file_has_no_warning():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pm = _pm(tmpdir)
-        try:
-            text = _code(pm, 'ЦеныСервер', 'РассчитатьЦену')
-            assert 'Функция РассчитатьЦену' in text and WARNING not in text, text
-            # Модуль формы: хеш индексатора включает Form.xml — без изменений
-            # предупреждения тоже нет.
-            text = _code(pm, 'Справочник.Склады.Форма.ФормаЭлемента',
-                         'ПослеЗаписи')
-            assert 'Процедура ПослеЗаписи' in text and WARNING not in text, text
-        finally:
-            pm.close_all()
-
-
-def test_file_changed_after_indexing_is_flagged():
+def test_procedure_code_uses_indexed_revision():
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = _pm(tmpdir)
         try:
             path = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml' / PRICES
-            path.write_bytes('// новая строка 1\n// новая строка 2\n'.encode('utf-8') + path.read_bytes())
+            before = _code(pm, 'ЦеныСервер', 'РассчитатьЦену')
+            assert 'Функция РассчитатьЦену' in before and 'Возврат 100;' in before
+            original = path.read_text(encoding='utf-8-sig')
+            path.write_text('// добавлена строка\n' + original.replace('Возврат 100;', 'Возврат 120;'),
+                            encoding='utf-8-sig')
+            assert _code(pm, 'ЦеныСервер', 'РассчитатьЦену') == before
 
-            text = _code(pm, 'ЦеныСервер', 'РассчитатьЦену')
-            first = text.splitlines()[0]
-            assert WARNING in first and 'reindex' in first, text
-            # Код всё равно отдаётся — по старым границам.
-            assert '// Lines' in text
-
-            # После reindex границы снова верные, предупреждения нет.
             pm.reindex('p1')
-            text = _code(pm, 'ЦеныСервер', 'РассчитатьЦену')
-            assert WARNING not in text and 'Функция РассчитатьЦену' in text, text
-        finally:
-            pm.close_all()
-
-
-def test_empty_file_hash_means_no_warning():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        pm = _pm(tmpdir)
-        try:
-            db = pm.get_db('p1')
-            db.conn.execute("UPDATE modules SET file_hash = '' WHERE name LIKE '%.ЦеныСервер.%'")
-            db.conn.commit()
-            path = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml' / PRICES
-            path.write_bytes(b'// x\n' + path.read_bytes())
-            assert WARNING not in _code(pm, 'ЦеныСервер', 'РассчитатьЦену')
+            after = _code(pm, 'ЦеныСервер', 'РассчитатьЦену')
+            assert 'Функция РассчитатьЦену' in after and 'Возврат 120;' in after
+            assert after.splitlines()[1] != before.splitlines()[1]
+            assert '// добавлена строка' not in after
         finally:
             pm.close_all()

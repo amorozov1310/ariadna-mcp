@@ -454,7 +454,7 @@ def _with_form_events(form_ext: Path, events: str) -> None:
                     encoding='utf-8-sig')
 
 
-def test_form_event_intercepts(release_pm):
+def test_form_event_intercepts(release_pm, monkeypatch):
     """Перехват события заимствованной формы — callType в Form.xml расширения,
     без аннотации в коде: релиз изменил обработчик основной формы."""
     pm = release_pm
@@ -467,7 +467,7 @@ def test_form_event_intercepts(release_pm):
                                   'Расш_ПриСозданииПосле</Event>')
     (ext / FORM / 'Form' / 'Module.bsl').write_text(
         '&НаСервере\nПроцедура Расш_ПриСозданииПосле(Отказ, СтандартнаяОбработка)\n'
-        'КонецПроцедуры\n', encoding='utf-8-sig')
+        '\tКонтроль = 42;\nКонецПроцедуры\n', encoding='utf-8-sig')
     pm.add_source('custom', 'ext', 'Расширение', source_type='extension')
 
     release_form = pm.projects_dir / 'release' / 'sources' / 'main' / 'xml' / FORM / 'Form' / 'Module.bsl'
@@ -488,6 +488,37 @@ def test_form_event_intercepts(release_pm):
     target = f'{module}.ПриСозданииНаСервере'
     conflict = next(c for c in result.items if c.target == target)
     assert conflict.kind == 'intercepted_changed' and 'событие формы' in conflict.note
+
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    monkeypatch.setattr(app_module, '_pm', pm)
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+    url = '/projects/custom/diff/conflict'
+    params = {'module': module, 'name': found[0].procedure, 'release': 'release'}
+    detail = client.get(url, params=params)
+    assert detail.status_code == 200 and 'Контроль = 42;' in detail.text
+
+    for export in (main, ext, pm.get_source_xml_path('release', 'main'),
+                   pm.get_source_xml_path('typical', 'main')):
+        export.rename(export.with_name('xml-moved'))
+    assert pm.intercepts('custom', module_name=module) == found
+    assert pm.get_update_conflicts('custom', 'release') == result
+    assert client.get(url, params=params).content == detail.content
+
+
+def test_old_base_index_is_rebuilt_and_cannot_seed_new_index(pm):
+    with pm.get_db('typical').conn as conn:
+        conn.execute('DROP TABLE module_text')
+
+    pm.reindex('custom')
+    assert 'Возврат 120;' in execute_tool(pm, 'get_procedure_code', {
+        'project_id': 'custom', 'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
+
+    pm.close_all()
+    pm.reindex('typical')
+    assert 'Возврат 100;' in execute_tool(pm, 'get_procedure_code', {
+        'project_id': 'typical', 'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
 
 
 def test_main_source_with_any_id(release_pm):

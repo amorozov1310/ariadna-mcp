@@ -8,7 +8,6 @@ outputSchema, ошибки — isError.
 
 import asyncio
 import io
-import shutil
 import sys
 import tempfile
 import zipfile
@@ -115,12 +114,14 @@ def test_missing_card_index_is_an_error_not_empty_result(pm):
     assert isinstance(error, str) and error.startswith('Error') and 'reindex' in error
 
 
-def test_unreadable_file_falls_back_to_card_header(pm):
-    shutil.rmtree(pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml' / 'CommonModules' / 'ЦеныСервер')
+def test_missing_indexed_text_falls_back_to_card_header(pm):
+    with pm.get_db('p1').conn as conn:
+        conn.execute("DELETE FROM module_text WHERE module_id IN (SELECT id FROM modules WHERE name = ?)",
+                     ('ОбщийМодуль.ЦеныСервер.Модуль',))
     data = _search(pm, query='РассчитатьЦену', limit=5)
     item = next(i for i in data['items'] if i['module_name'] == 'ОбщийМодуль.ЦеныСервер.Модуль')
     assert item['evidence_kind'] == 'card_header' and item['snippet'] == ''
-    assert any('недоступна' in w for w in data['warnings'])
+    assert any('нет фрагмента кода в индексе' in w for w in data['warnings'])
 
 
 def test_empty_query_and_text_form(pm):

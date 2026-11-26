@@ -116,12 +116,17 @@ def test_help_mode_by_project(project):
     assert 'Недоступно' in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', args)
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', dict(args, project_id='other'))
+    # Режим берётся из индекса: у непроиндексированного проекта он «неизвестен», а не «не задан».
+    assert 'пока неизвестен' in execute_tool(pm, 'platform_help', dict(args, project_id='other'))
+    assert 'пока неизвестен' not in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
     config = source / 'Configuration.xml'
     xml = config.read_text(encoding='utf-8')
     for mode in ('Version8_3_25', 'DontUse'):
         config.write_text(xml.replace('Version8_3_24', mode), encoding='utf-8')
+        pm.reindex('demo')
         assert 'Недоступно' not in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
     config.write_text(xml.replace('Version8_3_24', 'Version8_3_9'), encoding='utf-8')
+    pm.reindex('demo')
     result = execute_tool(pm, 'platform_help', {'project_id': 'demo', 'query': 'ПримерРежима'})
     assert 'требует режима совместимости 8.3.26' in result and 'режим совместимости 8.3.9' in result
 
@@ -168,7 +173,7 @@ EndProcedure
 КонецПроцедуры
 ОпечаткаВМодуле();
 ''', encoding='utf-8')
-    assert 'файл изменился' in _ready_check(pm)
+    assert 'ОпечаткаВМодуле()' not in _ready_check(pm)
     pm.reindex('demo')
     result = execute_tool(pm, 'check_platform_calls', {})
     assert 'Module.bsl:4 — Не проверено' in result and 'ExampleTable.Unknown()' in result
@@ -178,7 +183,7 @@ EndProcedure
     assert 'Module.bsl:17 — Предупреждение — получатель' in result
     assert 'Module.bsl:19 — Ошибка' in result and 'ОпечаткаВМодуле()' in result
     module.unlink()
-    assert 'нет исходного текста' in execute_tool(pm, 'check_platform_calls', {})
+    assert execute_tool(pm, 'check_platform_calls', {}) == result
 
 
 def test_page_cap_on_large_result(project):
@@ -649,40 +654,33 @@ def test_filter_and_counts_cover_whole_report_across_pages(project):
     asyncio.run(verify_mcp())
 
 
-@pytest.mark.parametrize('session_code', ['// Без замечаний\n', 'ДругаяОпечатка();\n'])
-def test_cached_page_rechecks_all_modules(project, monkeypatch, session_code):
+def test_platform_report_changes_only_after_reindex(project):
     pm, source = project
     _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', 'Опечатка();\n')
-    session = _write_module(source, 'Ext/SessionModule.bsl', session_code)
+    session = _write_module(source, 'Ext/SessionModule.bsl', 'ДругаяОпечатка();\n')
     pm.reindex('demo')
-    assert 'счётчики могут быть устаревшими' not in execute_tool(pm, 'check_platform_calls', {'limit': 1})
+    before = execute_tool(pm, 'check_platform_calls', {})
+    assert 'Module.bsl:1 — Ошибка' in before and 'ДругаяОпечатка()' in before
     session.write_text('НовыйВызов();\n', encoding='utf-8')
-    inputs = []
-    original = platform_check._module_input
-
-    def track(engine, mod):
-        inputs.append(mod['file_path'])
-        return original(engine, mod)
-
-    monkeypatch.setattr(platform_check, '_module_input', track)
-    result = execute_tool(pm, 'check_platform_calls', {'limit': 1})
-    assert 'Module.bsl:1 — Ошибка' in result
-    assert 'счётчики могут быть устаревшими' in result and 'reindex' in result
-    assert '@sample Ext/SessionModule.bsl — файл изменился' in result
-    assert inputs == ['CommonModules/Пример/Ext/Module.bsl', 'Ext/SessionModule.bsl']
+    assert execute_tool(pm, 'check_platform_calls', {}) == before
+    pm.reindex('demo')
+    after = execute_tool(pm, 'check_platform_calls', {})
+    assert 'НовыйВызов()' in after and 'ДругаяОпечатка()' not in after
 
 
-def test_changed_module_notes_are_scoped_to_selected_source(project):
+def test_removed_module_stays_in_report_until_reindex(project):
     pm, source = project
     ext = _extension(pm, source)
-    module = _write_module(ext, 'Ext/SessionModule.bsl', '// Без замечаний\n')
+    module = _write_module(ext, 'Ext/SessionModule.bsl', 'ДругаяОпечатка();\n')
     pm.reindex('demo')
+    args = {'source_id': 'sample_ext', 'level': 'unchecked'}
+    before = execute_tool(pm, 'check_platform_calls', args)
+    assert '@sample_ext Ext/SessionModule.bsl:1' in before
     module.unlink()
-    result = execute_tool(pm, 'check_platform_calls', {'source_id': 'sample'})
-    assert 'счётчики могут быть устаревшими' not in result and 'SessionModule.bsl' not in result
-    result = execute_tool(pm, 'check_platform_calls', {'source_id': 'sample_ext', 'level': 'error'})
-    assert 'счётчики могут быть устаревшими' in result
-    assert '@sample_ext Ext/SessionModule.bsl — нет исходного текста' in result
+    assert execute_tool(pm, 'check_platform_calls', args) == before
+    assert 'SessionModule.bsl' not in execute_tool(pm, 'check_platform_calls', {'source_id': 'sample'})
+    pm.reindex('demo', source_id='sample_ext')
+    assert 'SessionModule.bsl' not in execute_tool(pm, 'check_platform_calls', args)
 
 
 def test_nested_extension_deletions_preserve_line_numbers(project):
@@ -772,9 +770,9 @@ def test_page_reuses_diagnoses_and_updates_after_source_change(project, monkeypa
     assert 'Опечатка0()' in first and 'Опечатка48()' in last
     assert observed == [f'опечатка{i}' for i in range(50)]
     module.write_text('НоваяОпечатка();\n', encoding='utf-8')
-    assert 'файл изменился' in execute_tool(pm, 'check_platform_calls', {})
+    assert execute_tool(pm, 'check_platform_calls', {'limit': 1}) == first
     filtered = execute_tool(pm, 'check_platform_calls', {'level': 'error'})
-    assert 'счётчики могут быть устаревшими' in filtered and '— Не проверено' not in filtered
+    assert 'Опечатка49()' in filtered and '— Не проверено' not in filtered
     pm.reindex('demo')
     assert 'НоваяОпечатка()' in execute_tool(pm, 'check_platform_calls', {})
 
@@ -1473,7 +1471,7 @@ def test_close_all_waits_for_report_archive_republication(project, monkeypatch):
     _assert_persisted_report(pm, VERSION)
 
 
-def test_mode_change_invalidates_persisted_report_without_reindex(project):
+def test_reindex_updates_mode_in_persisted_report(project):
     pm, source = project
     _write_module(source, 'CommonModules/Пример/Ext/Module.bsl', 'СтрШаблон("%1", 1);\n')
     pm.reindex('demo')
@@ -1481,6 +1479,9 @@ def test_mode_change_invalidates_persisted_report_without_reindex(project):
     config = source / 'Configuration.xml'
     config.write_text(config.read_text(encoding='utf-8').replace('Version8_3_24', 'Version8_3_5'),
                       encoding='utf-8')
+    platform_check._REPORTS.clear()
+    assert 'Замечаний нет' in _ready_check(pm)
+    pm.reindex('demo')
     platform_check._REPORTS.clear()
     assert 'требует режима совместимости 8.3.6' in _ready_check(pm)
 
@@ -1600,6 +1601,7 @@ Metadata.Typo();
     config = source / 'Configuration.xml'
     xml = config.read_text(encoding='utf-8')
     config.write_text(xml.replace('Version8_3_24', 'Version8_3_19'), encoding='utf-8')
+    pm.reindex('demo')
     restricted = _ready_check(pm)
     assert restricted.count('требует режима совместимости 8.3.20') == 2
 

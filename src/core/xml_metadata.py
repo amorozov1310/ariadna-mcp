@@ -348,29 +348,16 @@ def has_configuration(xml_root: str | Path) -> bool:
     return (Path(xml_root) / 'Configuration.xml').is_file()
 
 
-def is_russian_dump(xml_root: str | Path) -> bool:
-    """Язык встроенного языка выгрузки (ScriptVariant в Configuration.xml);
-    без Configuration.xml (выгрузка только модулей) — русский."""
+def read_script_settings(xml_root: str | Path) -> tuple[bool, str]:
+    """Язык BSL и числовой режим совместимости из Configuration.xml."""
     try:
-        root = ET.parse(str(Path(xml_root) / 'Configuration.xml')).getroot()
+        props = _child(_object_element(Path(xml_root) / 'Configuration.xml'), 'Properties')
     except (OSError, ET.ParseError):
-        return True
-    for obj in root:
-        return _text(_child(obj, 'Properties'), 'ScriptVariant') != 'English'
-    return True
-
-
-def compatibility_version(xml_root: Path | None) -> str:
-    """Числовой режим основной конфигурации. Для DontUse и выгрузки без XML — ''."""
-    if xml_root is None:
-        return ''
-    try:
-        props = _child(_object_element(xml_root / 'Configuration.xml'), 'Properties')
-    except (OSError, ET.ParseError):
-        return ''
+        return True, ''
+    russian = _text(props, 'ScriptVariant') != 'English'
     mode = _text(props, 'CompatibilityMode')
     match = re.fullmatch(r'Version(\d+(?:_\d+)+)', mode)
-    return match[1].replace('_', '.') if match else ''
+    return russian, match[1].replace('_', '.') if match else ''
 
 
 HELP_MAX_CHARS = 20000   # справка длиннее — обрезается: назначение объекта в начале
