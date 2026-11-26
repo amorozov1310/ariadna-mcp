@@ -617,6 +617,10 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
         case 'get_index_status':
             stats = engine.get_index_status()
             lines = [f"Status: {stats.get('status', 'unknown')}"]
+            if stats.get('status') == 'error':
+                error = pm.index_error(project_id)
+                if error:
+                    lines.append(f"Error: {error}")
             if stats.get('status') == 'indexing' and stats.get('progress_total'):
                 lines.append(
                     f"Progress: {stats.get('progress_current', 0)}/{stats['progress_total']} "

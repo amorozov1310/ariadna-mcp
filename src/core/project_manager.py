@@ -7,6 +7,7 @@ Each project gets its own SQLite at /data/projects/{id}/index.db — or at
 
 import json
 import logging
+import queue
 import shutil     # не используется напрямую — тесты подменяют shutil.rmtree через модуль
 import sqlite3
 import time
@@ -215,6 +216,12 @@ class ProjectManager:
         self._broken_calls: dict[str, tuple] = {}
         # Фоновые переиндексации (reindex_async) — close_all их дожидается.
         self._reindexing: set[threading.Thread] = set()
+        # Schema repairs share one worker so a server start cannot launch
+        # several expensive full corpus walks at once.
+        self._schema_reindex_queue: queue.Queue[str] = queue.Queue()
+        self._schema_reindex_pending: set[str] = set()
+        self._schema_reindex_lock = threading.Lock()
+        self._schema_reindex_worker: threading.Thread | None = None
         self._platform_workers: set[threading.Thread] = set()
         self._closing_platform_workers = False
         # Причина последней упавшей индексации проекта (для Web UI); в памяти —
@@ -891,6 +898,7 @@ class ProjectManager:
         же, что при открытии (Database.file_replaced, один os.stat): если
         файл удалили или заменили снаружи, старые соединения закрываются и
         индекс открывается заново."""
+        schema_recreated = False
         with self._db_lock:
             db = self._db_pool.get(project_id)
             if db is not None and db.conn:
@@ -916,7 +924,77 @@ class ProjectManager:
             db.connect()
             db.init_schema()
             self._db_pool[project_id] = db
-            return db
+            schema_recreated = db.stale_schema_recreated
+        if schema_recreated:
+            self._handle_stale_schema(project_id)
+        return db
+
+    def _handle_stale_schema(self, project_id: str) -> None:
+        """Mark a discarded legacy index unavailable and queue its rebuild."""
+        try:
+            project = self.get_project(project_id)
+        except KeyError:
+            return
+
+        available_sources = [
+            source for source in project.sources
+            if source.xml_path and self.source_path(project_id, source.xml_path).is_dir()
+        ]
+        if not available_sources:
+            message = (
+                '\u0418\u043d\u0434\u0435\u043a\u0441 \u0441\u043e\u0437\u0434\u0430\u043d \u043f\u043e \u0441\u0442\u0430\u0440\u043e\u0439 \u0441\u0445\u0435\u043c\u0435 \u0438 \u0431\u044b\u043b \u043f\u0435\u0440\u0435\u0441\u043e\u0437\u0434\u0430\u043d. '
+                '\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 XML \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430; \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u0435 \u0435\u0451 \u0437\u0430\u043d\u043e\u0432\u043e \u0438 \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u043f\u0435\u0440\u0435\u0438\u043d\u0434\u0435\u043a\u0441\u0430\u0446\u0438\u044e.'
+            )
+            with self._registry_lock():
+                project = self.get_project(project_id)
+                project.status = 'error'
+                self._save_project_to_disk(project_id, project)
+            self._index_errors[project_id] = message
+            self.get_db(project_id).update_state(status='error', progress_phase='')
+            logger.warning('Проект %s: %s', project_id, message)
+            return
+
+        with self._schema_reindex_lock:
+            if project_id in self._schema_reindex_pending:
+                return
+            self._schema_reindex_pending.add(project_id)
+            with self._registry_lock():
+                project = self.get_project(project_id)
+                project.status = 'indexing'
+                self._save_project_to_disk(project_id, project)
+            self.get_db(project_id).update_state(
+                status='indexing', progress_current=0, progress_total=0,
+                progress_phase='scanning')
+            self._schema_reindex_queue.put(project_id)
+            if self._schema_reindex_worker is None or not self._schema_reindex_worker.is_alive():
+                self._schema_reindex_worker = threading.Thread(
+                    target=self._run_schema_reindex_queue, daemon=True,
+                    name='schema-reindex-queue')
+                self._schema_reindex_worker.start()
+
+    def _run_schema_reindex_queue(self) -> None:
+        while True:
+            try:
+                project_id = self._schema_reindex_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                lock = self._reindex_lock(project_id)
+                result = self.reindex_async(project_id)
+                while result['status'] == 'already_running':
+                    lock.acquire()
+                    lock.release()
+                    result = self.reindex_async(project_id)
+                if result['status'] == 'started':
+                    lock.acquire()
+                    lock.release()
+                elif result['status'] == 'error':
+                    logger.error('Не удалось поставить на переиндексацию %s: %s',
+                                 project_id, result.get('error', 'неизвестная ошибка'))
+            finally:
+                with self._schema_reindex_lock:
+                    self._schema_reindex_pending.discard(project_id)
+                self._schema_reindex_queue.task_done()
 
     def get_search(self, project_id: str) -> SearchEngine:
         """Get SearchEngine instance for project."""
@@ -2034,6 +2112,9 @@ class ProjectManager:
         # отпускает соединение: закрыть его под ней — на Windows access
         # violation, а файлы останутся занятыми. Сначала переиндексации: в
         # конце они сами запускают прогрев сравнений.
+        schema_worker = self._schema_reindex_worker
+        if schema_worker is not None:
+            schema_worker.join(timeout=120)
         with self._base_diff_lock:
             reindexing = list(self._reindexing)
             platform_workers = list(self._platform_workers)

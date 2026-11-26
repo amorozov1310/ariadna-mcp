@@ -477,6 +477,10 @@ class Database:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # True only when connect() removed an on-disk index whose schema is
+        # older than this process. ProjectManager uses this to rebuild data
+        # from the registered XML sources instead of exposing an empty DB.
+        self.stale_schema_recreated = False
         self.conn: sqlite3.Connection | None = None  # the single writer
         self._local = threading.local()               # per-thread readers (Этап 4/D7)
         # Все выданные читающие соединения — чтобы close() закрыл и те, что
@@ -650,15 +654,19 @@ class Database:
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='calls'"
                 ).fetchone()[0]
                 has_new_schema = self.has_current_schema(probe)
+                has_progress_phase = probe.execute(
+                    "SELECT COUNT(*) FROM pragma_table_info('index_state') WHERE name='progress_phase'"
+                ).fetchone()[0]
             finally:
                 probe.close()
         except sqlite3.Error:
             return
-        if has_calls_table and not has_new_schema:
+        if has_calls_table and (not has_progress_phase or not has_new_schema):
             for suffix in ('', '-wal', '-shm'):
                 path = self.db_path + suffix
                 if os.path.exists(path):
                     os.remove(path)
+            self.stale_schema_recreated = True
 
     def init_schema(self):
         if not self.conn:
