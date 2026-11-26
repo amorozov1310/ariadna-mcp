@@ -477,9 +477,9 @@ class Database:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        # True only when connect() removed an on-disk index whose schema is
-        # older than this process. ProjectManager uses this to rebuild data
-        # from the registered XML sources instead of exposing an empty DB.
+        self.rebuild_marker_path = db_path + '.reindex-required'
+        # True, если connect() удалил индекс со старой схемой. ProjectManager
+        # пересобирает его из XML, чтобы не показывать пустую БД.
         self.stale_schema_recreated = False
         self.conn: sqlite3.Connection | None = None  # the single writer
         self._local = threading.local()               # per-thread readers (Этап 4/D7)
@@ -662,11 +662,26 @@ class Database:
         except sqlite3.Error:
             return
         if has_calls_table and (not has_progress_phase or not has_new_schema):
+            # Сначала сохранить необходимость перестроения, затем удалить
+            # старый индекс. После остановки процесса ProjectManager увидит
+            # маркер и возобновит построение при следующем открытии.
+            with open(self.rebuild_marker_path, 'w', encoding='utf-8') as marker:
+                marker.write('Index schema changed; rebuild from XML sources is required.\n')
             for suffix in ('', '-wal', '-shm'):
                 path = self.db_path + suffix
                 if os.path.exists(path):
                     os.remove(path)
             self.stale_schema_recreated = True
+
+    @property
+    def rebuild_required(self) -> bool:
+        return os.path.exists(self.rebuild_marker_path)
+
+    def clear_rebuild_marker(self) -> None:
+        try:
+            os.remove(self.rebuild_marker_path)
+        except FileNotFoundError:
+            pass
 
     def init_schema(self):
         if not self.conn:

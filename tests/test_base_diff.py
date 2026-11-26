@@ -507,16 +507,27 @@ def test_form_event_intercepts(release_pm, monkeypatch):
     assert client.get(url, params=params).content == detail.content
 
 
-def test_old_base_index_is_rebuilt_and_cannot_seed_new_index(pm):
+def test_old_base_index_is_rebuilt_and_cannot_seed_new_index(pm, monkeypatch):
     with pm.get_db('typical').conn as conn:
         conn.execute('DROP TABLE module_text')
 
+    calls = {}
+    real_reindex = pm.reindex
+
+    def counted_reindex(project_id, source_id=None):
+        calls[project_id] = calls.get(project_id, 0) + 1
+        return real_reindex(project_id, source_id=source_id)
+
+    monkeypatch.setattr(pm, 'reindex', counted_reindex)
     pm.reindex('custom')
+    assert calls == {'custom': 1}
     assert 'Возврат 120;' in execute_tool(pm, 'get_procedure_code', {
         'project_id': 'custom', 'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
 
     pm.close_all()
     pm.reindex('typical')
+    pm._schema_reindex_queue.join()
+    assert calls == {'custom': 1, 'typical': 1}
     assert 'Возврат 100;' in execute_tool(pm, 'get_procedure_code', {
         'project_id': 'typical', 'module_name': 'ЦеныСервер', 'procedure_name': 'РассчитатьЦену'})
 
