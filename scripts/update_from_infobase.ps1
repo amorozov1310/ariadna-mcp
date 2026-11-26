@@ -199,29 +199,41 @@ function Invoke-DeltaRefresh($Item) {
         if ($status -in @('404', '405')) { return $false }
         if ($status -ne '200') { Fail 2 "Ариадна ответила $status на запрос манифеста «$($Item.Source)»: $(Get-Content $manifestPath -Raw -ErrorAction SilentlyContinue)" }
         if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-            Write-Log 'Python 3 не найден: для совместимости передаётся полный архив'
+            Write-Log 'Python 3 is unavailable; falling back to full archive upload'
             return $false
         }
         $summary = & python (Join-Path $PSScriptRoot 'build_source_delta.py') $Item.Dir $manifestPath $deltaPath
         if ($LASTEXITCODE -ne 0) { Fail 2 'Не удалось построить архив разницы' }
         $baseVersion = (Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json).version
         $curl = @('-sS', '-o', $responsePath, '-w', '%{http_code}', '-X', 'POST',
-                  '-F', "base_version=$baseVersion", '-F', 'wait=1',
-                  '-F', "timeout=$($TimeoutMinutes * 60)",
-                  '--max-time', "$($TimeoutMinutes * 60 + 600)",
+                  '-F', "base_version=$baseVersion", '-F', 'wait=0',
                   '-F', "delta_archive=@$deltaPath;type=application/zip")
         if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
         $status = & curl.exe @curl "$baseUrl/delta"
         if ($status -in @('404', '405')) { return $false }
         if ($status -eq '409' -and $attempt -eq 1) {
-            Write-Log "Манифест источника «$($Item.Source)» изменился — запрашиваем его повторно"
+            Write-Log "Source manifest changed for $($Item.Source); fetching it again"
             continue
         }
         $body = if (Test-Path $responsePath) { Get-Content $responsePath -Raw -Encoding UTF8 } else { '' }
-        if ($status -ne '200') { Fail 2 "Ариадна ответила $status на передачу разницы «$($Item.Source)»: $body" }
-        $json = $body | ConvertFrom-Json
-        Write-Log ("Источник «{0}»: разница передана ({1}); {2}, модулей {3}, процедур {4}" -f `
-            $Item.Source, $summary, $json.status, $json.index.total_modules, $json.index.total_procedures)
+        if ($status -notin @('200', '202')) { Fail 2 "Ariadna returned $status for delta $($Item.Source): $body" }
+        $targetVersion = ($summary | ConvertFrom-Json).target_version
+        $deadline = [DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
+        $state = $null
+        do {
+            $manifestCurl = @('-sS', '-o', $manifestPath, '-w', '%{http_code}')
+            if ($Token) { $manifestCurl += @('-H', "Authorization: Bearer $Token") }
+            $manifestStatus = & curl.exe @manifestCurl "$baseUrl/manifest"
+            if ($manifestStatus -eq '200') {
+                $state = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($state.version -eq $targetVersion -and $state.indexed) { break }
+            }
+            Start-Sleep -Seconds 2
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+        if (-not $state -or $state.version -ne $targetVersion -or -not $state.indexed) {
+            Fail 2 "Source indexing did not finish within $TimeoutMinutes minutes: $($Item.Source)"
+        }
+        Write-Log ("Source {0}: delta uploaded and indexed: {1}" -f $Item.Source, $summary)
         Remove-Item $deltaPath -ErrorAction SilentlyContinue
         return $true
     }

@@ -187,47 +187,53 @@ PY
 delta_refresh() {
     local sid="$1" dir="$2" url="$ARIADNA_URL/api/projects/$(urlencode "$PROJECT")/sources/$(urlencode "$sid")"
     local manifest="$LOG_DIR/server_manifest.json" delta="$DUMP_DIR/delta_$sid.zip"
-    local resp="$LOG_DIR/ariadna_response.json" status attempt get_args
+    local resp="$LOG_DIR/ariadna_response.json" status attempt get_args curl_args
     for attempt in 1 2; do
         get_args=(-sS -o "$manifest" -w '%{http_code}')
         [ -n "${ARIADNA_TOKEN:-}" ] && get_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
-        status="$(curl "${get_args[@]}" "$url/manifest")" \
-            || fail 2 "нет связи с Ариадной при запросе манифеста источника «$sid»"
+        status="$(curl "${get_args[@]}" "$url/manifest")" || fail 2 'connection lost while requesting source manifest'
         if [ "$status" = 404 ] || [ "$status" = 405 ]; then return 1; fi
-        [ "$status" = 200 ] || fail 2 "Ариадна ответила $status на запрос манифеста «$sid»: $(cat "$manifest" 2>/dev/null)"
+        [ "$status" = 200 ] || fail 2 "Ariadna returned $status for source manifest $sid: $(cat "$manifest" 2>/dev/null)"
         if ! command -v python3 >/dev/null; then
-            log 'Python 3 не найден: для совместимости передаётся полный архив'
+            log 'Python 3 is unavailable; falling back to full archive upload'
             return 1
         fi
         python3 "$SCRIPT_DIR/build_source_delta.py" "$dir" "$manifest" "$delta" > "$LOG_DIR/delta_summary.json" \
-            || fail 2 'не удалось построить архив разницы (нужен Python 3)'
-        local base
+            || fail 2 'failed to build delta archive'
+        local base summary target_version elapsed=0 indexed=0
+        summary="$(cat "$LOG_DIR/delta_summary.json")"
         base="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["version"])' "$manifest")"
-        local curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F "base_version=$base"
-                         -F wait=1 -F "timeout=$((TIMEOUT_MIN * 60))"
-                         --max-time $((TIMEOUT_MIN * 60 + 600))
-                         -F "delta_archive=@$delta;type=application/zip")
+        curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F "base_version=$base" -F wait=0
+                   -F "delta_archive=@$delta;type=application/zip")
         [ -n "${ARIADNA_TOKEN:-}" ] && curl_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
-        status="$(curl "${curl_args[@]}" "$url/delta")" || fail 2 'нет связи с Ариадной при передаче разницы'
+        status="$(curl "${curl_args[@]}" "$url/delta")" || fail 2 'connection lost while uploading source delta'
         if [ "$status" = 404 ] || [ "$status" = 405 ]; then return 1; fi
         if [ "$status" = 409 ] && [ "$attempt" = 1 ]; then
-            log "Манифест источника «$sid» изменился — запрашиваем его повторно"
+            log "Source manifest changed for $sid; fetching it again"
             continue
         fi
-        [ "$status" = 200 ] || fail 2 "Ариадна ответила $status на передачу разницы «$sid»: $(cat "$resp" 2>/dev/null)"
-        local summary index_summary
-        summary="$(cat "$LOG_DIR/delta_summary.json")"
-        index_summary="$(python3 - "$resp" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1], encoding='utf-8')); i = d.get('index') or {}
-print('{}, модулей {}, процедур {}'.format(d.get('status'), i.get('total_modules'), i.get('total_procedures')))
+        [[ "$status" = 200 || "$status" = 202 ]] || fail 2 "Ariadna returned $status for delta $sid: $(cat "$resp" 2>/dev/null)"
+        target_version="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["target_version"])' "$LOG_DIR/delta_summary.json")"
+        while (( elapsed < TIMEOUT_MIN * 60 )); do
+            status="$(curl "${get_args[@]}" "$url/manifest")" || fail 2 'connection lost while polling source manifest'
+            if [ "$status" = 200 ]; then
+                indexed="$(python3 - "$manifest" "$target_version" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1],encoding='utf-8'))
+print('1' if m.get('version')==sys.argv[2] and m.get('indexed') else '0')
 PY
 )"
-        log "Источник «$sid»: передана разница $summary; $index_summary"
+                [ "$indexed" = 1 ] && break
+            fi
+            sleep 2; elapsed=$((elapsed + 2))
+        done
+        [ "$indexed" = 1 ] || fail 2 "source indexing did not finish within $TIMEOUT_MIN minutes: $sid"
+        log "Source $sid: delta uploaded and indexed: $summary"
         rm -f "$delta"
         return 0
     done
-    fail 2 "манифест источника «$sid» менялся дважды; повторите запуск"
+    fail 2 "source manifest changed twice; retry the update: $sid"
+
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

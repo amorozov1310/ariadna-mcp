@@ -6,8 +6,10 @@ Each project gets its own SQLite at /data/projects/{id}/index.db — or at
 """
 
 import json
+import hashlib
 import logging
 import queue
+import contextlib
 import shutil     # не используется напрямую — тесты подменяют shutil.rmtree через модуль
 import sqlite3
 import time
@@ -26,7 +28,8 @@ from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
-from .source_manifest import invalidate_manifest, recover_source
+from .source_manifest import (MANIFEST_NAME, build_manifest, invalidate_manifest,
+                              read_or_create_manifest, recover_source, write_manifest)
 
 logger = logging.getLogger('ariadna')
 
@@ -39,6 +42,8 @@ logger = logging.getLogger('ariadna')
 # её не видит — его запуск параллельно с сервером не поддерживается.
 _REINDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _REINDEX_LOCKS_GUARD = threading.Lock()
+_SOURCE_LOCKS: dict[tuple[str, str, str], threading.RLock] = {}
+_SOURCE_LOCKS_GUARD = threading.Lock()
 
 # Реестр projects.json меняется по схеме «перечитать → изменить → записать»
 # из потоков серверов (Web UI и MCP — один ProjectManager на процесс,
@@ -122,6 +127,8 @@ class SourceInfo:
     # ProjectManager.source_path.
     xml_path: str = ''
     indexed_at: str = ''
+    indexed_version: str = ''
+    published_version: str = ''
 
 
 @dataclass
@@ -219,8 +226,8 @@ class ProjectManager:
         self._reindexing: set[threading.Thread] = set()
         # Восстановление схемы идёт через одного воркера: несколько больших
         # проектов не запускают полную индексацию одновременно.
-        self._schema_reindex_queue: queue.Queue[str] = queue.Queue()
-        self._schema_reindex_pending: set[str] = set()
+        self._schema_reindex_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        self._schema_reindex_pending: set[tuple[str, str | None]] = set()
         self._schema_reindex_lock = threading.Lock()
         self._schema_reindex_worker: threading.Thread | None = None
         self._schema_reindex_worker_running = False
@@ -247,7 +254,8 @@ class ProjectManager:
                 continue
             for source_dir in sources_dir.iterdir():
                 if source_dir.is_dir() and not source_dir.is_symlink():
-                    recover_source(source_dir / 'xml')
+                    with self.source_operation_lock(project_dir.name, source_dir.name):
+                        recover_source(source_dir / 'xml')
         # Ключ блокировки реестра — от каталога, который точно существует, и
         # один раз: resolve() самого projects.json на Windows в момент его
         # замены (файла нет) мог дать другую запись пути, чем при
@@ -503,6 +511,8 @@ class ProjectManager:
                 if mine is None:
                     continue
                 src['indexed_at'] = mine['indexed_at']
+                src['indexed_version'] = mine.get('indexed_version', '')
+                src['published_version'] = mine.get('published_version', '')
 
         self._write_registry_file(disk)
         # Кэш этого экземпляра с записанным файлом не совпадает (остальные
@@ -638,11 +648,86 @@ class ProjectManager:
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)
                 raise ProjectFilesNotRemovedError(project_id, path, e) from e
 
+    @contextlib.contextmanager
+    def source_operation_lock(self, project_id: str, source_id: str):
+        """Serialize source mutations across API handlers and ProjectManager calls."""
+        key = (str(self.data_dir), project_id, source_id)
+        with _SOURCE_LOCKS_GUARD:
+            lock = _SOURCE_LOCKS.setdefault(key, threading.RLock())
+        already_owned = getattr(lock, '_is_owned', lambda: False)()
+        with lock:
+            if already_owned:
+                yield
+                return
+            lock_dir = self.data_dir / '.source-locks'
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256('\0'.join(key).encode('utf-8')).hexdigest()
+            with (lock_dir / f'{digest}.lock').open('a+b') as stream:
+                if os.name == 'nt':
+                    import msvcrt
+                    import errno
+                    stream.seek(0, os.SEEK_END)
+                    if stream.tell() == 0:
+                        stream.write(b'0')
+                        stream.flush()
+                    stream.seek(0)
+                    while True:
+                        try:
+                            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                            break
+                        except OSError as exc:
+                            if exc.errno not in (errno.EACCES, errno.EDEADLK, errno.EAGAIN):
+                                raise
+                            time.sleep(0.05)
+                    try:
+                        yield
+                    finally:
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                    try:
+                        yield
+                    finally:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    def register_source_xml_path(self, project_id: str, source_id: str) -> None:
+        """Register the canonical XML directory after an empty-source delta."""
+        with self._registry_lock():
+            project = self.get_project(project_id)
+            source = next((item for item in project.sources if item.id == source_id), None)
+            if source is None:
+                raise KeyError(source_id)
+            if not source.xml_path:
+                source.xml_path = f'sources/{source_id}/xml'
+                self._save_registry()
+
+    def record_source_manifest(self, project_id: str, source_id: str, manifest: dict) -> None:
+        with self._registry_lock():
+            project = self.get_project(project_id)
+            source = next((item for item in project.sources if item.id == source_id), None)
+            if source is None:
+                raise KeyError(source_id)
+            source.xml_path = source.xml_path or f'sources/{source_id}/xml'
+            source.published_version = manifest['version']
+            self._save_registry()
+
+    def enqueue_reindex(self, project_id: str, source_id: str | None = None) -> dict:
+        return self._enqueue_reindex(project_id, source_id)
+
     # ============================================
     # SOURCE MANAGEMENT
     # ============================================
 
-    def add_source(
+    def add_source(self, project_id: str, source_id: str, label: str,
+                   source_type: str = 'main', xml_archive: BinaryIO | None = None,
+                   xml_archive_filename: str = '') -> SourceInfo:
+        with self.source_operation_lock(project_id, source_id):
+            return self._add_source_unlocked(project_id, source_id, label, source_type,
+                                             xml_archive, xml_archive_filename)
+
+    def _add_source_unlocked(
         self,
         project_id: str,
         source_id: str,
@@ -678,12 +763,16 @@ class ProjectManager:
         elif (source_dir / 'xml').exists():
             xml_path = f'sources/{source_id}/xml'
         invalidate_manifest(source_dir / 'xml')
+        published = build_manifest(source_dir / 'xml') if xml_path else None
+        if published and (source_dir / 'xml').is_dir():
+            write_manifest(source_dir / 'xml' / MANIFEST_NAME, published)
 
         source = SourceInfo(
             id=source_id,
             label=label,
             source_type=source_type,
             xml_path=xml_path,
+            published_version=published['version'] if published else '',
         )
         with self._registry_lock():
             # Реестр мог измениться, пока распаковывался архив.
@@ -693,7 +782,14 @@ class ProjectManager:
             self._save_registry()
         return source
 
-    def update_source(
+    def update_source(self, project_id: str, source_id: str, label: str | None = None,
+                      source_type: str | None = None, xml_archive: BinaryIO | None = None,
+                      xml_archive_filename: str = '') -> SourceInfo:
+        with self.source_operation_lock(project_id, source_id):
+            return self._update_source_unlocked(project_id, source_id, label, source_type,
+                                                xml_archive, xml_archive_filename)
+
+    def _update_source_unlocked(
         self,
         project_id: str,
         source_id: str,
@@ -732,6 +828,10 @@ class ProjectManager:
             # только после успешной проверки и распаковки нового архива.
             extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
             invalidate_manifest(source_dir / 'xml')
+            published = build_manifest(source_dir / 'xml')
+            write_manifest(source_dir / 'xml' / MANIFEST_NAME, published)
+            changes['published_version'] = published['version']
+            changes['indexed_version'] = ''
             changes['xml_path'] = f'sources/{source_id}/xml'
 
         # Update metadata fields
@@ -799,13 +899,14 @@ class ProjectManager:
         }
 
     def remove_source(self, project_id: str, source_id: str):
+        with self.source_operation_lock(project_id, source_id):
+            with self._no_reindex(project_id):
+                self._remove_source(project_id, source_id)
+
+    def _remove_source(self, project_id: str, source_id: str):
         """Remove source from project (registry, files, AND indexed DB rows).
         Во время переиндексации проекта — ReindexInProgressError, ничего не
         удаляется (см. _no_reindex)."""
-        with self._no_reindex(project_id):
-            self._remove_source(project_id, source_id)
-
-    def _remove_source(self, project_id: str, source_id: str):
         project = self.get_project(project_id)
         source = next((s for s in project.sources if s.id == source_id), None)
         if source is None:
@@ -947,17 +1048,11 @@ class ProjectManager:
             return db
 
     def _handle_stale_schema(self, project_id: str, db: Database) -> None:
-        """Пометить удалённый устаревший индекс и поставить его в очередь."""
-        try:
-            project = self.get_project(project_id)
-        except KeyError:
-            return
-
-        available_sources = [
-            source for source in project.sources
-            if source.xml_path and self.source_path(project_id, source.xml_path).is_dir()
-        ]
-        if not available_sources:
+        """Queue schema rebuilds through the same project worker as source updates."""
+        project = self.get_project(project_id)
+        available = [s for s in project.sources
+                     if s.xml_path and self.source_path(project_id, s.xml_path).is_dir()]
+        if not available:
             message = (
                 '\u0418\u043d\u0434\u0435\u043a\u0441 \u0441\u043e\u0437\u0434\u0430\u043d \u043f\u043e \u0441\u0442\u0430\u0440\u043e\u0439 \u0441\u0445\u0435\u043c\u0435 \u0438 \u0431\u044b\u043b \u043f\u0435\u0440\u0435\u0441\u043e\u0437\u0434\u0430\u043d. '
                 '\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 XML \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430; \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u0435 \u0435\u0451 \u0437\u0430\u043d\u043e\u0432\u043e \u0438 \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u043f\u0435\u0440\u0435\u0438\u043d\u0434\u0435\u043a\u0441\u0430\u0446\u0438\u044e.'
@@ -968,56 +1063,75 @@ class ProjectManager:
                 self._save_project_to_disk(project_id, project)
             self._set_index_error(project_id, message)
             db.update_state(status='error', progress_phase='')
-            logger.warning('Проект %s: %s', project_id, message)
             return
+        with self._registry_lock():
+            project = self.get_project(project_id)
+            project.status = 'indexing'
+            self._save_project_to_disk(project_id, project)
+        db.update_state(status='indexing', progress_current=0, progress_total=0,
+                        progress_phase='scanning')
+        self._enqueue_reindex(project_id, None)
 
+    def _enqueue_reindex(self, project_id: str, source_id: str | None) -> dict:
+        key = (project_id, source_id)
         with self._schema_reindex_lock:
-            with self._registry_lock():
-                project = self.get_project(project_id)
-                project.status = 'indexing'
-                self._save_project_to_disk(project_id, project)
-            db.update_state(
-                status='indexing', progress_current=0, progress_total=0,
-                progress_phase='scanning')
-            # Текущий синхронный или асинхронный reindex уже перестроит
-            # индекс. В очередь попадают только открытия со стороны чтения.
-            if self._reindex_lock(project_id).locked() or project_id in self._schema_reindex_pending:
-                return
-            self._schema_reindex_pending.add(project_id)
-            self._schema_reindex_queue.put(project_id)
+            if key not in self._schema_reindex_pending:
+                self._schema_reindex_pending.add(key)
+                self._schema_reindex_queue.put(key)
             if not self._schema_reindex_worker_running:
                 self._schema_reindex_worker_running = True
                 self._schema_reindex_worker = threading.Thread(
                     target=self._run_schema_reindex_queue, daemon=True,
-                    name='schema-reindex-queue')
+                    name='project-reindex-queue')
                 self._schema_reindex_worker.start()
+        return {'status': 'queued', 'project_id': project_id, 'source_id': source_id}
 
     def _run_schema_reindex_queue(self) -> None:
         while True:
             with self._schema_reindex_lock:
                 try:
-                    project_id = self._schema_reindex_queue.get_nowait()
+                    project_id, source_id = self._schema_reindex_queue.get_nowait()
                 except queue.Empty:
                     self._schema_reindex_worker_running = False
                     self._schema_reindex_worker = None
                     return
             try:
-                lock = self._reindex_lock(project_id)
-                result = self.reindex_async(project_id)
-                if result['status'] == 'already_running':
-                    # The in-flight synchronous/asynchronous reindex claimed
-                    # the stale index and already owns the rebuild.
-                    lock.acquire()
-                    lock.release()
-                elif result['status'] == 'started':
-                    lock.acquire()
-                    lock.release()
-                elif result['status'] == 'error':
-                    logger.error('Не удалось поставить на переиндексацию %s: %s',
-                                 project_id, result.get('error', 'неизвестная ошибка'))
+                source_locks = contextlib.ExitStack()
+                if source_id:
+                    source_locks.enter_context(self.source_operation_lock(project_id, source_id))
+                else:
+                    for source in sorted(self.get_project(project_id).sources, key=lambda item: item.id):
+                        source_locks.enter_context(self.source_operation_lock(project_id, source.id))
+                with source_locks:
+                    project_lock = self._reindex_lock(project_id)
+                    while True:
+                        project_lock.acquire()
+                        project_lock.release()
+                        project = self.get_project(project_id)
+                        if source_id is None:
+                            current_db = self.get_db(project_id)
+                            if not current_db.rebuild_required and project.status == 'ready':
+                                break  # A synchronous reindex already satisfied this queued rebuild.
+                        else:
+                            source = next((s for s in project.sources if s.id == source_id), None)
+                            if (source is not None and source.published_version
+                                    and source.indexed_version == source.published_version
+                                    and project.status == 'ready'):
+                                break  # Another queued job indexed this published version.
+                        result = self.reindex_async(project_id, source_id=source_id)
+                        if result['status'] != 'already_running':
+                            break
+                    if result['status'] == 'started':
+                        project_lock.acquire()
+                        project_lock.release()
+                    elif result['status'] == 'error':
+                        logger.error('Could not start queued reindex %s/%s: %s',
+                                     project_id, source_id or '*', result.get('error'))
+            except Exception:
+                logger.exception('Queued reindex failed for %s/%s', project_id, source_id or '*')
             finally:
                 with self._schema_reindex_lock:
-                    self._schema_reindex_pending.discard(project_id)
+                    self._schema_reindex_pending.discard((project_id, source_id))
                 self._schema_reindex_queue.task_done()
 
     def get_search(self, project_id: str) -> SearchEngine:
@@ -1687,6 +1801,15 @@ class ProjectManager:
                     db.set_parser_fingerprint(source.id, current_fp, reason)
                 duration_sec += stats.get('duration_sec', 0)
                 source.indexed_at = datetime.now().isoformat()
+                if source.xml_path:
+                    source_root = self.source_path(project_id, source.xml_path)
+                    try:
+                        published = read_or_create_manifest(source_root, source_root / MANIFEST_NAME)
+                        source.published_version = published['version']
+                        source.indexed_version = published['version']
+                    except Exception:
+                        logger.exception('Could not record indexed source version %s/%s',
+                                         project_id, source.id)
                 progress['done'] += len(walked.get(source.id, []))
 
             # Resolve the call graph (1.2) — recomputed in full every time,

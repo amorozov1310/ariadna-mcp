@@ -8,6 +8,7 @@ import stat
 import tempfile
 import zipfile
 import zlib
+import uuid
 from pathlib import Path, PurePosixPath
 
 from .archives import UnsafeArchiveError, _Budget, _check_name
@@ -89,24 +90,53 @@ def manifest_version(files: dict) -> str:
 
 
 def recover_source(root: Path) -> None:
-    """Откатывает незавершённую замену или удаляет старую резервную копию."""
+    """Roll back an interrupted file-level transaction; never remove another process stage."""
     root = Path(root)
-    backup = root.with_name(root.name + '.previous')
-    if backup.exists():
-        if root.exists():
-            # Новый каталог уже опубликован целиком; осталось дочистить старый.
-            shutil.rmtree(backup, ignore_errors=True)
-        else:
-            replace_with_retry(backup, root)
-    for stage in root.parent.glob(f'.{root.name}-delta-stage-*'):
-        if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
+    journal = root.parent / f'.{root.name}-delta-journal'
+    if not journal.is_dir():
+        return
+    try:
+        state = json.loads((journal / 'journal.json').read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        shutil.rmtree(journal, ignore_errors=True)
+        return
+    except (OSError, ValueError) as exc:
+        raise UnsafeArchiveError(f'Corrupt source update journal: {journal}') from exc
+    if state.get('state') == 'committed':
+        shutil.rmtree(journal, ignore_errors=True)
+        return
+    operations = state.get('operations', [])
+    resolved = []
+    for item in operations:
+        name = item.get('path')
+        rel = PurePosixPath(name) if name == MANIFEST_NAME else _safe_relpath(name)
+        path = root.joinpath(*rel.parts)
+        _assert_inside(root, path)
+        resolved.append((item, path, journal / 'backup' / item['backup']))
+    # Remove new files and empty shape-conflict directories before restoring old
+    # files. This handles transitions such as file -> directory and its inverse.
+    for item, path, _backup in sorted(resolved, key=lambda entry: len(entry[1].parts), reverse=True):
+        if path.is_file() and not _is_reparse(path):
+            path.unlink(missing_ok=True)
+        elif path.is_dir() and not _is_reparse(path):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+    for item, path, backup in sorted(resolved, key=lambda entry: len(entry[1].parts)):
+        if item.get('existed') and backup.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_name(f'.{path.name}.restore-{uuid.uuid4().hex}')
+            shutil.copy2(backup, temp)
+            replace_with_retry(temp, path)
+    shutil.rmtree(journal, ignore_errors=True)
 
 
 def read_or_create_manifest(root: Path, sidecar: Path) -> dict:
     """Читает кэш из выгрузки; legacy-выгрузка сканируется и кэшируется разово."""
     root, sidecar = Path(root), Path(sidecar)
     recover_source(root)
+    _check_tree(root)
     cache_paths = [sidecar]
     if root.is_dir():
         cache_paths.append(root.parent / MANIFEST_NAME)  # миграция раннего sidecar формата
@@ -179,161 +209,202 @@ def _write_changed_file(zf: zipfile.ZipFile, info: zipfile.ZipInfo, dest: Path,
         raise UnsafeArchiveError(f'Хеш файла не совпадает: {info.filename}')
 
 
-def _replace_directory(stage: Path, root: Path) -> None:
-    backup = root.with_name(root.name + '.previous')
-    if backup.exists():
-        rmtree_with_retry(backup)
-    moved_old = False
-    if root.exists():
-        replace_with_retry(root, backup)
-        moved_old = True
-    try:
-        replace_with_retry(stage, root)
-    except Exception:
-        if moved_old and backup.exists() and not root.exists():
-            replace_with_retry(backup, root)
-        raise
-    # Новая выгрузка и её манифест уже опубликованы одним переименованием.
-    # Если cleanup временно не удастся, recover_source дочистит backup позже.
-    shutil.rmtree(backup, ignore_errors=True)
+def _journal_atomic(path: Path, value: dict) -> None:
+    temp = path.with_suffix('.tmp')
+    with temp.open('w', encoding='utf-8') as stream:
+        json.dump(value, stream, ensure_ascii=False, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    replace_with_retry(temp, path)
+
+
+def _remove_empty_parents(path: Path, root: Path) -> None:
+    current = path.parent
+    while current != root and current.is_relative_to(root):
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
 
 
 def apply_delta(root: Path, sidecar: Path, archive, filename: str,
                 expected_version: str) -> dict:
-    """Проверяет ZIP и атомарно публикует stage с hardlink-копиями неизменённых файлов."""
+    """Validate and transactionally apply changed files without cloning the source tree."""
     root, sidecar = Path(root), Path(sidecar)
     root.parent.mkdir(parents=True, exist_ok=True)
     recover_source(root)
+    _check_tree(root)
     fd, upload = tempfile.mkstemp(prefix='.delta-upload-', dir=root.parent)
-    stage = None
+    journal = root.parent / f'.{root.name}-delta-journal'
     try:
-        # Ограничение проверяется на принимаемом потоке до какой-либо обработки.
         size = 0
         with os.fdopen(fd, 'wb') as out:
             while chunk := archive.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
-                    raise UnsafeArchiveError(f'Разница больше лимита {MAX_UPLOAD_BYTES} байт')
+                    raise UnsafeArchiveError(f'Delta exceeds upload limit {MAX_UPLOAD_BYTES}')
                 out.write(chunk)
-
         with zipfile.ZipFile(upload) as zf:
             budget = _Budget()
             entries: dict[str, zipfile.ZipInfo] = {}
-            seen_paths = set()
+            seen = set()
             for info in zf.infolist():
-                raw_name = info.filename[:-1] if info.is_dir() and info.filename.endswith('/') else info.filename
-                _check_name(raw_name)
-                if len(raw_name.encode('utf-8')) > MAX_PATH_BYTES:
-                    raise UnsafeArchiveError(f'Слишком длинное имя в архиве: {info.filename!r}')
-                if info.flag_bits & 0x1:
-                    raise UnsafeArchiveError(f'Зашифрованный архив не поддерживается: {info.filename!r}')
+                raw = info.filename[:-1] if info.is_dir() and info.filename.endswith('/') else info.filename
+                _check_name(raw)
+                if len(raw.encode('utf-8')) > MAX_PATH_BYTES:
+                    raise UnsafeArchiveError('Archive path is too long')
+                if info.flag_bits & 1:
+                    raise UnsafeArchiveError('Encrypted archives are not supported')
                 mode = info.external_attr >> 16
-                file_type = stat.S_IFMT(mode)
-                if stat.S_ISLNK(mode) or (file_type and file_type != stat.S_IFREG and not info.is_dir()):
-                    raise UnsafeArchiveError(f'Недопустимый тип файла: {info.filename!r}')
-                rel = _safe_relpath(raw_name)
+                kind = stat.S_IFMT(mode)
+                if stat.S_ISLNK(mode) or (kind and kind != stat.S_IFREG and not info.is_dir()):
+                    raise UnsafeArchiveError(f'Unsupported file type: {info.filename!r}')
+                rel = _safe_relpath(raw)
                 key = rel.as_posix()
-                if key in seen_paths:
-                    raise UnsafeArchiveError(f'Повторяющийся путь в архиве: {info.filename!r}')
-                seen_paths.add(key)
+                if key in seen:
+                    raise UnsafeArchiveError(f'Duplicate archive path: {info.filename!r}')
+                seen.add(key)
                 if info.is_dir():
                     if info.file_size:
-                        raise UnsafeArchiveError(f'Запись-каталог содержит данные: {info.filename!r}')
-                    budget.add(0)  # каталоги тоже входят в лимит записей
+                        raise UnsafeArchiveError('Directory entries cannot contain data')
                     continue
-                if rel.as_posix() == DELTA_META and info.file_size > MAX_DELTA_META_BYTES:
-                    raise UnsafeArchiveError(f'Манифест разницы больше {MAX_DELTA_META_BYTES} байт')
+                if key == DELTA_META and info.file_size > MAX_DELTA_META_BYTES:
+                    raise UnsafeArchiveError('Delta description exceeds limit')
                 entries[key] = info
                 budget.add(info.file_size)
             if DELTA_META not in entries:
-                raise UnsafeArchiveError('В архиве нет описания разницы')
+                raise UnsafeArchiveError('Delta description is missing')
             meta = json.loads(zf.read(entries.pop(DELTA_META)))
             current = read_or_create_manifest(root, sidecar)
+            _check_tree(root)
             if expected_version != current['version'] or meta.get('base_version') != expected_version:
-                raise ValueError('Манифест источника изменился; запросите его заново')
-
-            target_files = meta.get('files')
+                raise ValueError('Source manifest changed; fetch it again')
+            target = meta.get('files')
             deleted = meta.get('deleted')
-            if not isinstance(target_files, dict) or not isinstance(deleted, list):
-                raise UnsafeArchiveError('Некорректное описание разницы')
-            if len(target_files) > budget.max_files or len(deleted) > budget.max_files:
-                raise UnsafeArchiveError(f'Манифест превышает лимит {budget.max_files} файлов')
-            folded_names = set()
-            for name, value in target_files.items():
+            if not isinstance(target, dict) or not isinstance(deleted, list):
+                raise UnsafeArchiveError('Invalid delta description')
+            if len(target) > budget.max_files or len(deleted) > budget.max_files:
+                raise UnsafeArchiveError('Delta file count exceeds limit')
+            normalized = set()
+            for name, value in target.items():
                 _safe_relpath(name)
-                if name in (DELTA_META, MANIFEST_NAME):
-                    raise UnsafeArchiveError(f'Путь зарезервирован: {name!r}')
                 folded = os.path.normcase(name)
-                if folded in folded_names:
-                    raise UnsafeArchiveError(f'Имена конфликтуют на файловой системе: {name!r}')
-                folded_names.add(folded)
+                if folded in normalized:
+                    raise UnsafeArchiveError(f'Conflicting target paths: {name!r}')
+                normalized.add(folded)
+                if name in (DELTA_META, MANIFEST_NAME) or not _included(Path(name)):
+                    raise UnsafeArchiveError(f'Reserved or excluded target path: {name!r}')
                 if (not isinstance(value, dict) or not isinstance(value.get('sha256'), str)
                         or len(value['sha256']) != 64
                         or any(c not in '0123456789abcdef' for c in value['sha256'])
-                        or not isinstance(value.get('size'), int) or value['size'] < 0):
-                    raise UnsafeArchiveError(f'Некорректная запись манифеста: {name!r}')
-            if any(not isinstance(name, str) for name in deleted) or len(set(deleted)) != len(deleted):
-                raise UnsafeArchiveError('Некорректный или повторяющийся список удалений')
+                        or type(value.get('size')) is not int or value['size'] < 0):
+                    raise UnsafeArchiveError(f'Invalid file manifest entry: {name!r}')
+            if any(not isinstance(n, str) for n in deleted) or len(set(deleted)) != len(deleted):
+                raise UnsafeArchiveError('Invalid deleted paths')
             for name in deleted:
                 _safe_relpath(name)
-            # Нельзя иметь одновременно файл и его подкаталог в целевом дереве.
-            for name in target_files:
+            folded_target = {os.path.normcase(n) for n in target}
+            for name in target:
                 parts = name.split('/')
-                if any('/'.join(parts[:i]) in target_files for i in range(1, len(parts))):
-                    raise UnsafeArchiveError(f'Целевой путь одновременно файл и каталог: {name!r}')
-            if manifest_version(target_files) != meta.get('target_version'):
-                raise UnsafeArchiveError('Хеш целевого манифеста не совпадает')
-
+                if any(os.path.normcase('/'.join(parts[:i])) in folded_target
+                       for i in range(1, len(parts))):
+                    raise UnsafeArchiveError(f'Target contains file/directory conflict: {name!r}')
+            if manifest_version(target) != meta.get('target_version'):
+                raise UnsafeArchiveError('Target manifest hash does not match')
             changed = set(entries)
-            expected_changed = {p for p, value in target_files.items()
-                                if current['files'].get(p) != value}
-            if (changed != expected_changed
-                    or set(deleted) != set(current['files']) - set(target_files)):
-                raise UnsafeArchiveError('Список файлов разницы не совпадает с манифестом')
-            if (not changed and not deleted
-                    and meta['target_version'] == current['version']):
+            expected_changed = {p for p, value in target.items() if current['files'].get(p) != value}
+            expected_deleted = set(current['files']) - set(target)
+            if changed != expected_changed or set(deleted) != expected_deleted:
+                raise UnsafeArchiveError('Delta file list does not match target manifest')
+            if not changed and not deleted and meta['target_version'] == current['version']:
+                _check_tree(root)
+                for name, expected in target.items():
+                    path = root.joinpath(*_safe_relpath(name).parts)
+                    if (not path.is_file() or _is_reparse(path)
+                            or path.stat().st_size != expected['size']):
+                        raise UnsafeArchiveError(f'Target file failed validation: {name}')
                 return {'manifest': current, 'changed': False}
 
-            _check_tree(root)
-            stage = Path(tempfile.mkdtemp(prefix=f'.{root.name}-delta-stage-', dir=root.parent))
-            # Сначала подготовить целевое дерево без удаляемых имён. На Windows
-            # это также корректно обрабатывает переименование только по регистру.
-            for name, expected in target_files.items():
-                rel = _safe_relpath(name)
-                dest = stage.joinpath(*rel.parts)
-                if name in entries:
-                    _write_changed_file(zf, entries[name], dest, expected)
-                    continue
-                source = root.joinpath(*rel.parts)
-                _assert_inside(root, source)
-                if _is_reparse(source) or not source.is_file():
-                    raise UnsafeArchiveError(f'Неизменённый файл отсутствует или является ссылкой: {name}')
-                if source.stat().st_size != expected['size']:
-                    raise UnsafeArchiveError(f'Размер неизменённого файла не совпадает: {name}')
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.link(source, dest)
-                except OSError as e:
-                    raise UnsafeArchiveError(
-                        f'Не удалось создать hardlink неизменённого файла {name!r}; '
-                        'нужна файловая система с поддержкой hardlink') from e
+            operations = []
+            affected = sorted(changed | set(deleted) | {MANIFEST_NAME})
+            if journal.exists():
+                raise UnsafeArchiveError('Another source transaction is active')
+            (journal / 'backup').mkdir(parents=True)
+            for index, name in enumerate(affected):
+                path = root.joinpath(*_safe_relpath(name).parts) if name != MANIFEST_NAME else root / MANIFEST_NAME
+                existed = path.is_file() and not _is_reparse(path)
+                backup_name = f'{index:08d}.bak'
+                operations.append({'path': name, 'backup': backup_name, 'existed': existed})
+            state = {'state': 'applying', 'operations': operations}
+            _journal_atomic(journal / 'journal.json', state)
+            for item in operations:
+                path = root / item['path']
+                if item['existed']:
+                    shutil.copy2(path, journal / 'backup' / item['backup'])
 
-            # Проверить наличие и размер каждого целевого файла до публикации.
-            # Хеши изменённых файлов уже проверены при распаковке; неизменённые
-            # связаны с проверенным прежним состоянием hardlink-ом.
-            for name, expected in target_files.items():
-                path = stage.joinpath(*_safe_relpath(name).parts)
+            # Stage incoming bytes in the transaction journal so a crash cannot
+            # leave a partial temporary file in the published XML tree.
+            staged_files = {}
+            new_dir = journal / 'new'
+            new_dir.mkdir()
+            for index, name in enumerate(sorted(changed)):
+                staged = new_dir / f'{index:08d}.new'
+                digest = hashlib.sha256()
+                count = 0
+                with zf.open(entries[name]) as src, staged.open('wb') as out:
+                    while chunk := src.read(1024 * 1024):
+                        digest.update(chunk)
+                        count += len(chunk)
+                        out.write(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if {'sha256': digest.hexdigest(), 'size': count} != target[name]:
+                    raise UnsafeArchiveError(f'File hash mismatch: {name}')
+                staged_files[name] = staged
+
+            # Remove old tracked paths first to allow file/directory shape changes.
+            for item in operations:
+                path = root / item['path']
+                if item['path'] == MANIFEST_NAME:
+                    continue
+                if item['path'] in deleted or item['path'] in changed:
+                    if path.is_file() and not _is_reparse(path):
+                        path.unlink()
+                    _remove_empty_parents(path, root)
+
+            for name in sorted(changed):
+                expected = target[name]
+                dest = root.joinpath(*_safe_relpath(name).parts)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if staged_files[name].stat().st_size != expected['size']:
+                    raise UnsafeArchiveError(f'File size mismatch: {name}')
+                replace_with_retry(staged_files[name], dest)
+
+            # Excluded files are intentionally not represented in target and remain untouched.
+            for name, expected in target.items():
+                path = root.joinpath(*_safe_relpath(name).parts)
                 if not path.is_file() or _is_reparse(path) or path.stat().st_size != expected['size']:
-                    raise UnsafeArchiveError(f'Целевой файл не прошёл проверку: {name}')
-            result = {'version': meta['target_version'], 'files': target_files}
-            write_manifest(stage / MANIFEST_NAME, result)
-            _replace_directory(stage, root)
-            stage = None
+                    raise UnsafeArchiveError(f'Target file failed validation: {name}')
+            result = {'version': meta['target_version'], 'files': target}
+            manifest_temp = journal / 'new-manifest.json'
+            with manifest_temp.open('w', encoding='utf-8') as stream:
+                json.dump(result, stream, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+                stream.flush()
+                os.fsync(stream.fileno())
+            replace_with_retry(manifest_temp, root / MANIFEST_NAME)
+            _check_tree(root)
+            state['state'] = 'committed'
+            _journal_atomic(journal / 'journal.json', state)
+            shutil.rmtree(journal, ignore_errors=True)
             return {'manifest': result, 'changed': True}
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, json.JSONDecodeError,
-            RuntimeError, EOFError, zlib.error) as e:
-        raise UnsafeArchiveError(f'Архив разницы повреждён: {e}') from e
+
+    except Exception as exc:
+        if journal.exists():
+            recover_source(root)
+        if isinstance(exc, (zipfile.BadZipFile, zipfile.LargeZipFile,
+                            json.JSONDecodeError, RuntimeError, EOFError, zlib.error)):
+            raise UnsafeArchiveError(f'Corrupt delta archive: {exc}') from exc
+        raise
     finally:
         Path(upload).unlink(missing_ok=True)
-        if stage is not None and stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)

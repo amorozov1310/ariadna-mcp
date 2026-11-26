@@ -46,7 +46,7 @@ def main():
         for name in changed:
             archive.write(root / Path(name), name)
     print(json.dumps({'changed_files': len(changed), 'deleted_files': len(deleted),
-                      'archive_bytes': out.stat().st_size}, ensure_ascii=False))
+                      'archive_bytes': out.stat().st_size, 'target_version': meta['target_version']}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

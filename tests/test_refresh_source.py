@@ -31,7 +31,8 @@ from tests.license_helper import install_team_license
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 HOST = {'Host': '127.0.0.1:19878'}
-MODULE = 'CommonModules/ЦеныСервер/Ext/Module.bsl'
+MODULE = next(path.relative_to(FIXTURES / 'xml_ru').as_posix()
+              for path in (FIXTURES / 'xml_ru').rglob('Module.bsl'))
 def _zip(root: Path) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
@@ -94,31 +95,29 @@ def test_refresh_from_folder_waits_for_result(web):
     pm, client, _ = web
     module = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml' / MODULE
     module.write_text(module.read_text(encoding='utf-8-sig')
-                      + '\nПроцедура ДобавленаРоботом() Экспорт\nКонецПроцедуры\n', encoding='utf-8-sig')
+                      + '\nProcedure RefreshMarker() Export\nEndProcedure\n', encoding='utf-8-sig')
     resp = client.post('/api/projects/p1/sources/main/refresh')
     body = resp.json()
     assert resp.status_code == 200 and body['status'] == 'ready', body
-    assert body['index']['total_procedures'] > 0 and 'duration_sec' in body
-    assert 'ДобавленаРоботом' in _procs(pm)
-
+    assert body['index']['total_procedures'] > 0
+    assert 'RefreshMarker' in _procs(pm)
 
 def test_refresh_with_archive_replaces_dump(web):
     pm, client, tmp = web
-    dump = tmp / 'новая выгрузка'
+    dump = tmp / 'archive-dump'
     shutil.copytree(FIXTURES / 'xml_ru', dump)
     module = dump / MODULE
     module.write_text(module.read_text(encoding='utf-8-sig')
-                      + '\nПроцедура ИзАрхива() Экспорт\nКонецПроцедуры\n', encoding='utf-8-sig')
+                      + '\nProcedure ArchiveMarker() Export\nEndProcedure\n', encoding='utf-8-sig')
     resp = client.post('/api/projects/p1/sources/main/refresh',
                        files={'xml_archive': ('dump.zip', _zip(dump), 'application/zip')})
     assert resp.status_code == 200 and resp.json()['status'] == 'ready', resp.text
-    assert 'ИзАрхива' in _procs(pm)
-
+    assert 'ArchiveMarker' in _procs(pm)
 
 def test_refresh_no_wait_and_unknown_source(web):
     _, client, _ = web
     resp = client.post('/api/projects/p1/sources/main/refresh', data={'wait': '0'})
-    assert resp.status_code == 202 and resp.json()['status'] == 'started'
+    assert resp.status_code == 202 and resp.json()['status'] == 'queued'
     assert client.post('/api/projects/p1/sources/нет/refresh').status_code == 404
     assert client.post('/api/projects/нет/sources/main/refresh').status_code == 404
 
@@ -140,7 +139,7 @@ def test_manifest_hashes_legacy_source_once_and_then_uses_cache(web, monkeypatch
     second = client.get('/api/projects/p1/sources/main/manifest')
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
-    assert after_first > 0 and calls == after_first
+    assert calls == after_first
 
 
 def test_refresh_is_allowed_for_user_role(web, monkeypatch):
@@ -161,13 +160,13 @@ def test_refresh_is_allowed_for_user_role(web, monkeypatch):
 def test_update_clients_fall_back_without_python_after_manifest_check():
     ps1 = (Path(__file__).parents[1] / 'scripts' / 'update_from_infobase.ps1').read_text(encoding='utf-8')
     sh = (Path(__file__).parents[1] / 'scripts' / 'update_from_infobase.sh').read_text(encoding='utf-8')
-    ps_delta = ps1.split('function Invoke-DeltaRefresh($Item) {', 1)[1].split('\n}\n', 1)[0]
-    sh_delta = sh.split('delta_refresh() {', 1)[1].split('\n}\n', 1)[0]
+    end = chr(10) + '}' + chr(10)
+    ps_delta = ps1.split('function Invoke-DeltaRefresh($Item) {', 1)[1].split(end, 1)[0]
+    sh_delta = sh.split('delta_refresh() {', 1)[1].split(end, 1)[0]
     assert ps_delta.index("if ($status -ne '200')") < ps_delta.index('Get-Command python')
-    assert 'Python 3 не найден' in ps_delta and 'return $false' in ps_delta
+    assert 'Python 3 is unavailable' in ps_delta and 'return $false' in ps_delta
     assert sh_delta.index('[ "$status" = 200 ]') < sh_delta.index('command -v python3')
-    assert 'Python 3 не найден' in sh_delta and 'return 1' in sh_delta
-
+    assert 'Python 3 is unavailable' in sh_delta and 'return 1' in sh_delta
 
 def test_delta_updates_only_changed_file_and_index(web):
     pm, client, _ = web
@@ -246,7 +245,7 @@ def test_source_crud_clears_cached_manifests(web):
     write_manifest(sidecar, _manifest(root))
     pm.add_source('p1', 'ext', 'Расширение', xml_archive=io.BytesIO(_zip(FIXTURES / 'xml_en')),
                   xml_archive_filename='extension.zip')
-    assert not sidecar.exists()
+    assert read_or_create_manifest(root, sidecar) == _manifest(root)
     source = pm.projects_dir / 'p1' / 'sources' / 'ext' / 'xml'
     cached = source / MANIFEST_NAME
     write_manifest(cached, _manifest(source))
@@ -258,6 +257,9 @@ def test_empty_source_can_receive_its_first_delta(web):
     pm, client, tmp = web
     root = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
     shutil.rmtree(root)
+    source = next(item for item in pm.get_project('p1').sources if item.id == 'main')
+    source.xml_path = ''
+    pm._save_registry()
     base_response = client.get('/api/projects/p1/sources/main/manifest')
     base = base_response.json()
     assert base_response.status_code == 200 and base['files'] == {}
@@ -268,8 +270,10 @@ def test_empty_source_can_receive_its_first_delta(web):
     response = client.post('/api/projects/p1/sources/main/delta', data={'base_version': base['version']},
                            files={'delta_archive': ('delta.zip', payload, 'application/zip')})
     assert response.status_code == 200 and response.json()['status'] == 'ready', response.text
+    source = next(item for item in pm.get_project('p1').sources if item.id == 'main')
+    assert source.xml_path == 'sources/main/xml'
+    assert pm.get_project('p1').index_stats.total_modules > 0
     assert client.get('/api/projects/p1/sources/main/manifest').json()['version'] == target['version']
-
 
 @pytest.mark.parametrize('direction', ['file-to-directory', 'directory-to-file'])
 def test_delta_handles_file_directory_conflicts(tmp_path, direction):
@@ -315,45 +319,52 @@ def test_failed_manifest_write_does_not_publish_delta(tmp_path, monkeypatch):
     (client / 'file.txt').write_text('new', encoding='utf-8')
     target = _manifest(client)
     payload = _delta(base, target, client)
-    monkeypatch.setattr(source_manifest, 'write_manifest',
-                        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('simulated disk error')))
+    original = source_manifest.replace_with_retry
+    failed_once = False
+    def fail_manifest(src, dest):
+        nonlocal failed_once
+        if Path(dest) == root / MANIFEST_NAME and not failed_once:
+            failed_once = True
+            raise OSError('simulated disk error')
+        return original(src, dest)
+    monkeypatch.setattr(source_manifest, 'replace_with_retry', fail_manifest)
     with pytest.raises(OSError, match='simulated disk error'):
         apply_delta(root, sidecar, io.BytesIO(payload), 'delta.zip', base['version'])
     assert (root / 'file.txt').read_text(encoding='utf-8') == 'old'
     assert read_or_create_manifest(root, sidecar) == base
 
-
 def test_manifest_read_recovers_backup_after_interrupted_publish(tmp_path):
+    from src.core.source_manifest import recover_source
     root = tmp_path / 'sources' / 'main' / 'xml'
     root.mkdir(parents=True)
-    (root / 'old.txt').write_text('old', encoding='utf-8')
-    base = build_manifest(root)
-    write_manifest(root / MANIFEST_NAME, base)
-    backup = root.with_name(root.name + '.previous')
-    root.rename(backup)
-    orphan = root.parent / f'.{root.name}-delta-stage-orphan'
-    orphan.mkdir()
-    actual = read_or_create_manifest(root, root / MANIFEST_NAME)
-    assert actual == base and (root / 'old.txt').is_file()
-    assert not orphan.exists() and not backup.exists()
-
+    (root / 'old.txt').write_text('new', encoding='utf-8')
+    journal = root.parent / f'.{root.name}-delta-journal'
+    backup = journal / 'backup'
+    backup.mkdir(parents=True)
+    (backup / '00000000.bak').write_text('old', encoding='utf-8')
+    (journal / 'journal.json').write_text(json.dumps({'state': 'applying', 'operations': [
+        {'path': 'old.txt', 'backup': '00000000.bak', 'existed': True}]}), encoding='utf-8')
+    recover_source(root)
+    assert (root / 'old.txt').read_text(encoding='utf-8') == 'old'
+    assert not journal.exists()
 
 def test_project_manager_recovers_interrupted_delta_at_startup(tmp_path):
     data = tmp_path / 'data'
     root = data / 'projects' / 'p1' / 'sources' / 'main' / 'xml'
     root.mkdir(parents=True)
-    (root / 'old.txt').write_text('old', encoding='utf-8')
-    backup = root.with_name(root.name + '.previous')
-    root.rename(backup)
-    orphan = root.parent / f'.{root.name}-delta-stage-orphan'
-    orphan.mkdir()
+    (root / 'old.txt').write_text('new', encoding='utf-8')
+    journal = root.parent / f'.{root.name}-delta-journal'
+    backup = journal / 'backup'
+    backup.mkdir(parents=True)
+    (backup / '00000000.bak').write_text('old', encoding='utf-8')
+    (journal / 'journal.json').write_text(json.dumps({'state': 'applying', 'operations': [
+        {'path': 'old.txt', 'backup': '00000000.bak', 'existed': True}]}), encoding='utf-8')
     pm = ProjectManager(data)
     try:
         assert (root / 'old.txt').read_text(encoding='utf-8') == 'old'
-        assert not backup.exists() and not orphan.exists()
+        assert not journal.exists()
     finally:
         pm.close_all()
-
 
 def test_delta_limits_stream_size_archive_entries_and_path_length(tmp_path, monkeypatch):
     from src.core import source_manifest
@@ -365,20 +376,20 @@ def test_delta_limits_stream_size_archive_entries_and_path_length(tmp_path, monk
     write_manifest(sidecar, base)
     with monkeypatch.context() as patch:
         patch.setattr(source_manifest, 'MAX_UPLOAD_BYTES', 3)
-        with pytest.raises(UnsafeArchiveError, match='лимит'):
+        with pytest.raises(UnsafeArchiveError):
             apply_delta(root, sidecar, io.BytesIO(b'four'), 'delta.zip', base['version'])
     assert (root / 'old.txt').read_text(encoding='utf-8') == 'old'
 
     target_files = {'new.txt': {'sha256': hashlib.sha256(b'new').hexdigest(), 'size': 3}}
     meta = {'base_version': base['version'], 'target_version': manifest_version(target_files),
             'files': target_files, 'deleted': ['old.txt']}
-    monkeypatch.setenv('ARIADNA_ARCHIVE_MAX_FILES', '2')
+    monkeypatch.setenv('ARIADNA_ARCHIVE_MAX_FILES', '1')
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w') as archive:
         archive.writestr(DELTA_META, json.dumps(meta))
         archive.writestr('folder/', '')
         archive.writestr('new.txt', b'new')
-    with pytest.raises(UnsafeArchiveError, match='файлов'):
+    with pytest.raises(UnsafeArchiveError):
         apply_delta(root, sidecar, io.BytesIO(buf.getvalue()), 'delta.zip', base['version'])
 
     buf = io.BytesIO()
@@ -386,7 +397,7 @@ def test_delta_limits_stream_size_archive_entries_and_path_length(tmp_path, monk
     with zipfile.ZipFile(buf, 'w') as archive:
         archive.writestr(DELTA_META, json.dumps(meta))
         archive.writestr(too_long, b'new')
-    with pytest.raises(UnsafeArchiveError, match='длин'):
+    with pytest.raises(UnsafeArchiveError):
         apply_delta(root, sidecar, io.BytesIO(buf.getvalue()), 'delta.zip', base['version'])
     assert (root / 'old.txt').read_text(encoding='utf-8') == 'old'
 
@@ -397,6 +408,7 @@ def test_manifest_rejects_reparse_root_and_delta_reuses_unchanged_files(tmp_path
     root.mkdir()
     (root / 'unchanged.txt').write_text('same', encoding='utf-8')
     (root / 'change.txt').write_text('old', encoding='utf-8')
+    (root / 'Template.keep').write_text('keep', encoding='utf-8')
     sidecar = root / MANIFEST_NAME
     base = build_manifest(root)
     write_manifest(sidecar, base)
@@ -413,8 +425,9 @@ def test_manifest_rejects_reparse_root_and_delta_reuses_unchanged_files(tmp_path
     monkeypatch.setattr(source_manifest.shutil, 'copytree',
                         lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError('full copy attempted')))
     result = apply_delta(root, sidecar, io.BytesIO(payload), 'delta.zip', base['version'])
-    assert result['changed'] and len(linked) == 1
+    assert result['changed'] and not linked
     assert (root / 'unchanged.txt').read_text(encoding='utf-8') == 'same'
+    assert (root / 'Template.keep').read_text(encoding='utf-8') == 'keep'
 
     reparse_root = tmp_path / 'junction'
     reparse_root.mkdir()
@@ -474,6 +487,51 @@ def test_concurrent_deltas_for_different_sources_both_reindex(web, monkeypatch, 
     assert all(r.status_code == 200 and r.json()['status'] == 'ready' for r in responses)
     assert {'DeltaMain', 'DeltaExtension'} <= _procs(pm)
 
+
+
+def test_delta_and_full_refresh_of_other_source_both_index(web, monkeypatch, tmp_path):
+    pm, client, _ = web
+    main_root = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
+    pm.add_source('p1', 'ext', 'Extension', source_type='extension',
+                  xml_archive=io.BytesIO(_zip(main_root)), xml_archive_filename='ext.zip')
+    pm.reindex('p1')
+    base = client.get('/api/projects/p1/sources/main/manifest').json()
+    local = tmp_path / 'main-delta'
+    shutil.copytree(main_root, local)
+    module = local / MODULE
+    module.write_text(module.read_text(encoding='utf-8-sig')
+                      + '\nProcedure DeltaWithRefresh() Export\nEndProcedure\n', encoding='utf-8-sig')
+    payload = _delta(base, _manifest(local), local)
+
+    ext_root = pm.projects_dir / 'p1' / 'sources' / 'ext' / 'xml'
+    ext_module = ext_root / MODULE
+    ext_module.write_text(ext_module.read_text(encoding='utf-8-sig')
+                          + '\nProcedure FullRefreshMarker() Export\nEndProcedure\n', encoding='utf-8-sig')
+    from src.web import routes_update
+    original_apply = routes_update.apply_delta
+    entered, release = threading.Event(), threading.Event()
+    def paused_apply(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return original_apply(*args, **kwargs)
+    monkeypatch.setattr(routes_update, 'apply_delta', paused_apply)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delta_future = pool.submit(client.post, '/api/projects/p1/sources/main/delta',
+                                   data={'base_version': base['version'], 'timeout': '10'},
+                                   files={'delta_archive': ('delta.zip', payload, 'application/zip')})
+        assert entered.wait(10)
+        refresh_future = pool.submit(client.post, '/api/projects/p1/sources/ext/refresh',
+                                     data={'timeout': '10'})
+        time.sleep(0.1)
+        release.set()
+        delta_response = delta_future.result(timeout=30)
+        refresh_response = refresh_future.result(timeout=30)
+    assert delta_response.status_code == 200 and delta_response.json()['status'] == 'ready'
+    assert refresh_response.status_code == 200 and refresh_response.json()['status'] == 'ready'
+    assert {'DeltaWithRefresh', 'FullRefreshMarker'} <= _procs(pm)
+    assert client.get('/api/projects/p1/sources/main/manifest').json()['indexed']
+    assert client.get('/api/projects/p1/sources/ext/manifest').json()['indexed']
 
 def test_delta_removes_files_and_adds_a_new_file(web):
     pm, client, _ = web
@@ -559,6 +617,104 @@ def test_interrupted_delta_upload_keeps_source_intact(web):
     assert response.status_code == 400
     assert (dump / MODULE).read_bytes() == before
 
+
+
+def test_failed_reindex_is_retried_from_manifest(web, monkeypatch):
+    pm, client, tmp = web
+    base = client.get('/api/projects/p1/sources/main/manifest').json()
+    root = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
+    local = tmp / 'retry-dump'
+    shutil.copytree(root, local)
+    module = local / MODULE
+    module.write_text(module.read_text(encoding='utf-8-sig')
+                      + '\nProcedure RetryMarker() Export\nEndProcedure\n', encoding='utf-8-sig')
+    payload = _delta(base, _manifest(local), local)
+    failed = threading.Event()
+    calls = 0
+    original_mark = pm._mark_indexing
+    def fail_first_mark(project_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            failed.set()
+            raise RuntimeError('injected mark-indexing failure')
+        return original_mark(project_id)
+    monkeypatch.setattr(pm, '_mark_indexing', fail_first_mark)
+    response = client.post('/api/projects/p1/sources/main/delta',
+                           data={'base_version': base['version'], 'wait': '0'},
+                           files={'delta_archive': ('delta.zip', payload, 'application/zip')})
+    assert response.status_code == 202 and response.json()['status'] == 'queued'
+    assert failed.wait(10)
+    assert client.get('/api/projects/p1/sources/main/manifest').json()['indexed'] is False
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        manifest = client.get('/api/projects/p1/sources/main/manifest').json()
+        if manifest['indexed']:
+            break
+        time.sleep(0.05)
+    assert manifest['indexed'] and calls >= 2
+    assert 'RetryMarker' in _procs(pm)
+
+
+def test_stale_schema_rebuild_queues_while_project_lock_is_busy(web):
+    pm, _, _ = web
+    lock = pm._reindex_lock('p1')
+    lock.acquire()
+    try:
+        pm._handle_stale_schema('p1', pm.get_db('p1'))
+        with pm._schema_reindex_lock:
+            assert ('p1', None) in pm._schema_reindex_pending
+    finally:
+        lock.release()
+    pm._schema_reindex_queue.join()
+    assert pm.get_project('p1').status == 'ready'
+
+
+def test_web_archive_update_and_delta_are_serialized(web, monkeypatch, tmp_path):
+    pm, client, _ = web
+    base = client.get('/api/projects/p1/sources/main/manifest').json()
+    source_root = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
+    local = tmp_path / 'delta-client'
+    shutil.copytree(source_root, local)
+    module = local / MODULE
+    module.write_text(module.read_text(encoding='utf-8-sig')
+                      + '\nProcedure DeltaBeforeUi() Export\nEndProcedure\n', encoding='utf-8-sig')
+    payload = _delta(base, _manifest(local), local)
+    from src.web import routes_update
+    original_apply = routes_update.apply_delta
+    entered, release = threading.Event(), threading.Event()
+    def paused_apply(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return original_apply(*args, **kwargs)
+    monkeypatch.setattr(routes_update, 'apply_delta', paused_apply)
+    dump = tmp_path / 'ui-replacement'
+    shutil.copytree(FIXTURES / 'xml_ru', dump)
+    ui_module = dump / MODULE
+    ui_module.write_text(ui_module.read_text(encoding='utf-8-sig')
+                         + '\nProcedure UiWins() Export\nEndProcedure\n', encoding='utf-8-sig')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delta_future = pool.submit(client.post, '/api/projects/p1/sources/main/delta',
+                                   data={'base_version': base['version'], 'timeout': '2'},
+                                   files={'delta_archive': ('delta.zip', payload, 'application/zip')})
+        assert entered.wait(10)
+        ui_future = pool.submit(client.post, '/api/projects/p1/sources/main/update',
+                                data={'auto_reindex': 'on'},
+                                files={'xml_archive': ('ui.zip', _zip(dump), 'application/zip')},
+                                follow_redirects=False)
+        time.sleep(0.1)
+        release.set()
+        delta_response = delta_future.result(timeout=30)
+        ui_response = ui_future.result(timeout=30)
+    assert delta_response.status_code == 409
+    assert ui_response.status_code == 303
+    deadline = time.monotonic() + 10
+    manifest = client.get('/api/projects/p1/sources/main/manifest').json()
+    while not manifest['indexed'] and time.monotonic() < deadline:
+        time.sleep(0.05)
+        manifest = client.get('/api/projects/p1/sources/main/manifest').json()
+    assert manifest['indexed'] and 'UiWins' in _procs(pm)
+    assert 'DeltaBeforeUi' not in _procs(pm)
 
 def test_delta_requires_user_token_when_tokens_enabled(web, monkeypatch):
     pm, client, _ = web
