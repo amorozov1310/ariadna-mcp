@@ -96,11 +96,30 @@ def test_refresh_from_folder_waits_for_result(web):
     module = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml' / MODULE
     module.write_text(module.read_text(encoding='utf-8-sig')
                       + '\nProcedure RefreshMarker() Export\nEndProcedure\n', encoding='utf-8-sig')
-    resp = client.post('/api/projects/p1/sources/main/refresh')
+    resp = client.post('/api/projects/p1/sources/main/refresh', data={'timeout': '10'})
     body = resp.json()
     assert resp.status_code == 200 and body['status'] == 'ready', body
     assert body['index']['total_procedures'] > 0
     assert 'RefreshMarker' in _procs(pm)
+
+
+def test_refresh_retries_transient_index_start_failure(web, monkeypatch):
+    pm, client, _ = web
+    module = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml' / MODULE
+    module.write_text(module.read_text(encoding='utf-8-sig')
+                      + '\nProcedure StartRetryMarker() Export\nEndProcedure\n', encoding='utf-8-sig')
+    original = pm._mark_indexing
+    attempts = 0
+    def fail_once(project_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError('injected start failure')
+        return original(project_id)
+    monkeypatch.setattr(pm, '_mark_indexing', fail_once)
+    response = client.post('/api/projects/p1/sources/main/refresh', data={'timeout': '10'})
+    assert response.status_code == 200 and response.json()['status'] == 'ready', response.text
+    assert attempts >= 2 and 'StartRetryMarker' in _procs(pm)
 
 def test_refresh_with_archive_replaces_dump(web):
     pm, client, tmp = web

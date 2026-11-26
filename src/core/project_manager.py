@@ -1104,6 +1104,7 @@ class ProjectManager:
                         source_locks.enter_context(self.source_operation_lock(project_id, source.id))
                 with source_locks:
                     project_lock = self._reindex_lock(project_id)
+                    failures = 0
                     while True:
                         project_lock.acquire()
                         project_lock.release()
@@ -1119,14 +1120,35 @@ class ProjectManager:
                                     and project.status == 'ready'):
                                 break  # Another queued job indexed this published version.
                         result = self.reindex_async(project_id, source_id=source_id)
-                        if result['status'] != 'already_running':
-                            break
-                    if result['status'] == 'started':
-                        project_lock.acquire()
-                        project_lock.release()
-                    elif result['status'] == 'error':
-                        logger.error('Could not start queued reindex %s/%s: %s',
-                                     project_id, source_id or '*', result.get('error'))
+                        if result['status'] == 'already_running':
+                            continue
+                        if result['status'] == 'started':
+                            project_lock.acquire()
+                            project_lock.release()
+                            project = self.get_project(project_id)
+                            source = next((s for s in project.sources if s.id == source_id), None) \
+                                if source_id else None
+                            indexed = project.status == 'ready' and (
+                                source_id is None and not self.get_db(project_id).rebuild_required
+                                or source is not None and source.indexed_version == source.published_version)
+                            if indexed:
+                                break
+                            error = self.index_error(project_id) or 'index version did not advance'
+                        else:
+                            error = result.get('error', 'could not start queued indexing')
+                        if failures == 0:
+                            failures += 1
+                            time.sleep(0.1)
+                            continue
+                        logger.error('Queued reindex failed for %s/%s: %s',
+                                     project_id, source_id or '*', error)
+                        with self._registry_lock():
+                            failed_project = self.get_project(project_id)
+                            failed_project.status = 'error'
+                            self._save_project_to_disk(project_id, failed_project)
+                        self._set_index_error(project_id, error)
+                        self.get_db(project_id).update_state(status='error', progress_phase='')
+                        break
             except Exception:
                 logger.exception('Queued reindex failed for %s/%s', project_id, source_id or '*')
             finally:
