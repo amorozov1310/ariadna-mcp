@@ -4,7 +4,11 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
+import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -177,6 +181,68 @@ def test_directory_case_rename_uses_target_spelling(tmp_path):
     assert (root / "newparent" / "Nested" / "file.xml").read_bytes() == b"new"
 
 
+def test_directory_case_rename_preserves_excluded_logs_and_rollback_spelling(monkeypatch, tmp_path):
+    root = tmp_path / "xml"
+    note = root / "Old" / "note.xml"
+    note.parent.mkdir(parents=True)
+    note.write_bytes(b"old")
+    (note.parent / "logs").mkdir()
+    (note.parent / "logs" / "keep.txt").write_bytes(b"keep")
+    cache = tmp_path / "cache.json"
+    current = source_delta.manifest(root, cache)
+    target = _target({"old/note.xml": b"new"})
+
+    def fail_after_install(point):
+        if point == "e":
+            raise RuntimeError("stop")
+
+    monkeypatch.setattr(source_delta, "_checkpoint", fail_after_install)
+    with pytest.raises(RuntimeError):
+        source_delta.apply(root, _archive({"old/note.xml": b"new"}), target,
+                           current["version"], current, tmp_path / "state")
+    assert (root / "Old" / "note.xml").read_bytes() == b"old"
+    assert (root / "Old" / "logs" / "keep.txt").read_bytes() == b"keep"
+    assert "Old" in {entry.name for entry in os.scandir(root)}
+    assert "old" not in {entry.name for entry in os.scandir(root)}
+
+
+def test_directory_case_rename_moves_excluded_logs_with_tree(tmp_path):
+    root = tmp_path / "xml"
+    note = root / "Old" / "note.xml"
+    note.parent.mkdir(parents=True)
+    note.write_bytes(b"old")
+    (note.parent / "logs").mkdir()
+    (note.parent / "logs" / "keep.txt").write_bytes(b"keep")
+    cache = tmp_path / "cache.json"
+    current = source_delta.manifest(root, cache)
+    target = _target({"old/note.xml": b"new"})
+    source_delta.apply(root, _archive({"old/note.xml": b"new"}), target,
+                       current["version"], current, tmp_path / "state")
+    assert source_delta.manifest(root, cache)["files"] == target["files"]
+    assert "old" in {entry.name for entry in os.scandir(root)}
+    assert (root / "old" / "logs" / "keep.txt").read_bytes() == b"keep"
+
+
+def test_empty_directory_and_new_root_are_restored_after_rollback(monkeypatch, tmp_path):
+    root = tmp_path / "xml"
+    root.mkdir()
+    (root / "empty").mkdir()
+    cache = tmp_path / "cache.json"
+    current = source_delta.manifest(root, cache)
+    target = _target({"empty": b"file"})
+
+    def fail_after_install(point):
+        if point == "e":
+            raise RuntimeError("stop")
+
+    monkeypatch.setattr(source_delta, "_checkpoint", fail_after_install)
+    with pytest.raises(RuntimeError):
+        source_delta.apply(root, _archive({"empty": b"file"}), target,
+                           current["version"], current, tmp_path / "state")
+    assert (root / "empty").is_dir()
+    assert not (root / "empty").is_file()
+
+
 def test_nested_file_to_top_level_file_prunes_only_managed_ancestors(tmp_path):
     root = tmp_path / "xml"
     deep = root / "P" / "Q" / "R" / "a.xml"
@@ -190,6 +256,89 @@ def test_nested_file_to_top_level_file_prunes_only_managed_ancestors(tmp_path):
     assert (root / "P").is_file()
     assert (root / "P").read_bytes() == b"new"
     assert source_delta.manifest(root, cache)["files"] == target["files"]
+
+
+def test_recovery_skips_journal_owned_by_another_process(tmp_path):
+    root = tmp_path / "xml"
+    root.mkdir()
+    workspace = tmp_path / ".delta-state"
+    backup = workspace / "rollback-test"
+    backup.mkdir(parents=True)
+    (backup / "item.xml").write_bytes(b"old")
+    (root / "item.xml").write_bytes(b"new")
+    source_delta._atomic_json(source_delta._journal_path(workspace), {
+        "backup": str(backup), "staging": "", "old": ["item.xml"],
+        "new": ["item.xml"], "created_dirs": [], "committed": False,
+    })
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    code = (
+        "import pathlib,time; from src.core.source_delta import transaction_lock; "
+        f"w=pathlib.Path({str(workspace)!r}); "
+        f"r=pathlib.Path({str(ready)!r}); x=pathlib.Path({str(release)!r}); "
+        "ctx=transaction_lock(w); ctx.__enter__(); r.write_text('ready'); "
+        "\nwhile not x.exists(): time.sleep(.02)\nctx.__exit__(None,None,None)"
+    )
+    child = subprocess.Popen([sys.executable, "-c", code], cwd=Path.cwd())
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert ready.exists()
+        assert source_delta.recover(root, workspace) is False
+        assert (root / "item.xml").read_bytes() == b"new"
+    finally:
+        release.touch()
+        child.wait(timeout=10)
+
+
+def test_manifest_walk_errors_are_not_silently_ignored(monkeypatch, tmp_path):
+    root = tmp_path / "xml"
+    root.mkdir()
+    def failed_walk(*_args, onerror=None, **_kwargs):
+        onerror(PermissionError("cannot enumerate"))
+        return iter(())
+
+    monkeypatch.setattr(source_delta.os, "walk", failed_walk)
+    with pytest.raises(PermissionError, match="cannot enumerate"):
+        source_delta.manifest(root, tmp_path / "manifest.json")
+
+
+def test_manifest_cache_detects_replaced_file_with_same_size_and_mtime(tmp_path):
+    root = tmp_path / "xml"
+    root.mkdir()
+    path = root / "item.xml"
+    path.write_bytes(b"old")
+    cache = tmp_path / "manifest.json"
+    first = source_delta.manifest(root, cache)
+    old_stat = path.stat()
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"new")
+    os.utime(replacement, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    os.replace(replacement, path)
+    new_stat = path.stat()
+    os.utime(path, ns=(new_stat.st_atime_ns, old_stat.st_mtime_ns))
+    second = source_delta.manifest(root, cache)
+    assert second["version"] != first["version"]
+    assert second["files"]["item.xml"]["sha256"] == hashlib.sha256(b"new").hexdigest()
+
+
+def test_duplicate_json_keys_are_rejected():
+    with pytest.raises(source_delta.DeltaError, match="Повтор ключа"):
+        source_delta.parse_manifest_json('{"files":{"a":1,"a":2}}')
+    if os.name == "nt":
+        with pytest.raises(source_delta.DeltaError, match="Повтор ключа"):
+            source_delta.parse_manifest_json('{"files":{"A":1,"a":2}}')
+
+
+def test_client_and_server_share_logs_file_exclusion(tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_delta", Path("scripts/build_delta.py"))
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    assert builder._managed("logs") == source_delta._managed("logs")
+    assert builder._managed("Logs") == source_delta._managed("Logs")
 
 
 def test_project_startup_recovers_source_without_xml_path(tmp_path):
@@ -257,6 +406,38 @@ def test_project_startup_does_not_recover_external_corpus_journal(tmp_path):
         assert journal.exists()
         assert (backup / "old.xml").read_bytes() == b"old"
         assert (external / "new.xml").read_bytes() == b"new"
+    finally:
+        resumed.close_all()
+
+
+def test_owned_external_source_journal_recovers_on_startup_and_manifest(tmp_path):
+    from src.core.project_manager import ProjectManager
+
+    external = tmp_path / "corpus" / "xml"
+    external.mkdir(parents=True)
+    (external / "new.xml").write_bytes(b"new")
+    data = tmp_path / "sandbox"
+    pm = ProjectManager(data)
+    pm.create_project("p", "p")
+    pm.add_source("p", "s", "source")
+    pm.get_project("p").sources[0].xml_path = str(external)
+    pm._save_registry()
+    workspace = pm._source_delta_workspace("p", "s")
+    backup = workspace / "rollback-pending"
+    backup.mkdir(parents=True)
+    (backup / "old.xml").write_bytes(b"old")
+    source_delta._atomic_json(source_delta._journal_path(workspace), {
+        "backup": str(backup), "staging": "", "old": ["old.xml"],
+        "new": ["new.xml"], "created_dirs": [], "committed": False,
+    })
+    pm.close_all()
+    resumed = ProjectManager(data)
+    try:
+        manifest = resumed.source_file_manifest("p", "s")
+        assert manifest["files"] == {
+            "old.xml": {"sha256": hashlib.sha256(b"old").hexdigest(), "size": 3}}
+        assert not source_delta._journal_path(workspace).exists()
+        assert not (external / "new.xml").exists()
     finally:
         resumed.close_all()
 

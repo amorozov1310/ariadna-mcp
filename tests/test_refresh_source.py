@@ -194,8 +194,17 @@ def test_manifest_recovers_pending_transaction_before_returning_version(web, mon
             raise RuntimeError('simulated crash after installing files')
 
     real_recover = source_delta.recover
+    recover_calls = 0
+
+    def fail_rollback(*args, **kwargs):
+        nonlocal recover_calls
+        recover_calls += 1
+        if recover_calls == 1:
+            return real_recover(*args, **kwargs)
+        raise OSError('rollback unavailable')
+
     monkeypatch.setattr(source_delta, '_checkpoint', fail_at)
-    monkeypatch.setattr(source_delta, 'recover', lambda *_a, **_kw: (_ for _ in ()).throw(OSError('rollback unavailable')))
+    monkeypatch.setattr(source_delta, 'recover', fail_rollback)
     with pytest.raises(OSError):
         source_delta.apply(pm.get_source_xml_path('p1', 'main'), archive, target,
                            before['version'], before, workspace)
@@ -211,9 +220,28 @@ def test_manifest_recovers_pending_transaction_before_returning_version(web, mon
 def test_refresh_never_reports_ready_when_reindex_is_already_running(web, monkeypatch):
     pm, client, _ = web
     monkeypatch.setattr(pm, 'reindex_async', lambda *_a, **_kw: {'status': 'already_running'})
-    response = client.post('/api/projects/p1/sources/main/refresh')
+    response = client.post('/api/projects/p1/sources/main/refresh', data={'timeout': '1'})
     assert response.status_code == 409
     assert response.json()['status'] == 'busy'
+
+
+def test_refresh_retries_already_running_until_launch_succeeds(web, monkeypatch):
+    pm, client, _ = web
+    real_reindex = pm.reindex_async
+    calls = 0
+
+    def busy_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {'status': 'already_running'}
+        return real_reindex(*args, **kwargs)
+
+    monkeypatch.setattr(pm, 'reindex_async', busy_once)
+    response = client.post('/api/projects/p1/sources/main/refresh', data={'timeout': '5'})
+    assert response.status_code == 200, response.text
+    assert response.json()['status'] == 'ready'
+    assert calls >= 2
 
 
 def test_manifest_and_ui_update_do_not_observe_or_change_delta_midflight(web):
@@ -260,6 +288,128 @@ def test_full_tree_update_invalidates_cached_source_hashes(web):
     after = pm.source_file_manifest('p1', 'main')
     assert after['version'] != before['version']
     assert after['files'][rel]['sha256'] != before['files'][rel]['sha256']
+
+
+def test_full_tree_update_recovers_old_delta_journal_first(web):
+    pm, _, _ = web
+    root = pm.get_source_xml_path('p1', 'main')
+    old_path = root / Path(*MODULE.split('/'))
+    old_bytes = old_path.read_bytes()
+    old_path.write_bytes(b'partial-delta')
+    workspace = pm._source_delta_workspace('p1', 'main')
+    backup = workspace / 'rollback-pending'
+    backup_path = backup / Path(*MODULE.split('/'))
+    backup_path.parent.mkdir(parents=True)
+    backup_path.write_bytes(old_bytes)
+    source_delta._atomic_json(source_delta._journal_path(workspace), {
+        'backup': str(backup), 'staging': '', 'old': [MODULE], 'new': [MODULE],
+        'created_dirs': [], 'removed_dirs': [], 'committed': False,
+    })
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as zf:
+        zf.writestr('replacement.xml', b'full replacement')
+    archive.seek(0)
+    pm.update_source('p1', 'main', xml_archive=archive, xml_archive_filename='full.zip')
+    new_root = pm.get_source_xml_path('p1', 'main')
+    assert (new_root / 'replacement.xml').read_bytes() == b'full replacement'
+    assert not (new_root / Path(*MODULE.split('/'))).exists()
+    assert not source_delta._journal_path(workspace).exists()
+
+
+def test_first_delta_registers_xml_path_before_committed_checkpoint(web, monkeypatch):
+    pm, _, _ = web
+    pm.add_source('p1', 'fresh', 'fresh')
+    root = pm.projects_dir / 'p1' / 'sources' / 'fresh' / 'xml'
+    baseline = pm.source_file_manifest('p1', 'fresh')
+    payload = b'<Configuration/>'
+    target_files = {'Configuration.xml': {'sha256': hashlib.sha256(payload).hexdigest(),
+                                          'size': len(payload)}}
+    target = {'version': _manifest_version(target_files), 'files': target_files}
+
+    def crash_after_commit(point):
+        if point == 'f':
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(source_delta, '_checkpoint', crash_after_commit)
+    with pytest.raises(KeyboardInterrupt):
+        pm.apply_source_delta('p1', 'fresh', io.BytesIO(_zip_from_files({'Configuration.xml': payload})),
+                              baseline['version'], target)
+    assert pm.get_source_xml_path('p1', 'fresh') == root
+    assert (root / 'Configuration.xml').read_bytes() == payload
+    source_delta.recover(root, pm._source_delta_workspace('p1', 'fresh'))
+
+
+def test_refresh_registers_existing_files_before_returning_ready(web):
+    pm, client, _ = web
+    source = pm.add_source('p1', 'unregistered', 'unregistered')
+    root = pm.projects_dir / 'p1' / 'sources' / 'unregistered' / 'xml'
+    root.mkdir(parents=True)
+    (root / 'existing.xml').write_text('<Configuration/>', encoding='utf-8')
+    source.xml_path = ''
+    pm._save_registry()
+    response = client.post('/api/projects/p1/sources/unregistered/refresh', data={'timeout': '30'})
+    assert response.status_code == 200, response.text
+    assert response.json()['status'] == 'ready'
+    assert pm.get_project('p1').sources[-1].xml_path == 'sources/unregistered/xml'
+
+
+def test_removing_source_also_removes_manifest_cache(web):
+    pm, _, _ = web
+    cache = pm._source_manifest_cache_path('p1', 'main')
+    pm.source_file_manifest('p1', 'main')
+    assert cache.exists()
+    pm.remove_source('p1', 'main')
+    assert not cache.exists()
+    pm.add_source('p1', 'main', 'recreated')
+    assert pm.source_file_manifest('p1', 'main')['files'] == {}
+
+
+def _zip_from_files(files):
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as zf:
+        for path, payload in files.items():
+            zf.writestr(path, payload)
+    return archive.getvalue()
+
+
+def test_delta_rejects_duplicate_target_json_keys_and_corrupt_zip(web):
+    _, client, _ = web
+    manifest = client.get('/api/projects/p1/sources/main/manifest').json()
+    duplicate = client.post('/api/projects/p1/sources/main/delta', data={
+        'base_version': manifest['version'], 'target_manifest': '{"files":{},"files":{}}',
+        'wait': '1', 'timeout': '1'}, files={'delta_archive': ('bad.zip', b'', 'application/zip')})
+    assert duplicate.status_code == 400
+    empty_version = _manifest_version({})
+    corrupt = client.post('/api/projects/p1/sources/main/delta', data={
+        'base_version': manifest['version'],
+        'target_manifest': json.dumps({'version': empty_version, 'files': {}}),
+        'wait': '1', 'timeout': '1'}, files={'delta_archive': ('bad.zip', b'not zip', 'application/zip')})
+    assert corrupt.status_code == 400
+
+
+def test_delta_wait_zero_does_not_wait_before_applying(web, monkeypatch):
+    import src.web.routes_update as routes_update
+    _, client, _ = web
+    manifest = client.get('/api/projects/p1/sources/main/manifest').json()
+    target_files = manifest['files']
+    target = {'version': _manifest_version(target_files), 'files': target_files}
+
+    async def should_not_wait(*_args):
+        raise AssertionError('wait=0 must not wait for project idle')
+
+    monkeypatch.setattr(routes_update, '_wait_idle', should_not_wait)
+    response = client.post('/api/projects/p1/sources/main/delta', data={
+        'base_version': manifest['version'], 'target_manifest': json.dumps(target),
+        'wait': '0', 'timeout': '1'}, files={'delta_archive': ('empty.zip', _zip_from_files({}), 'application/zip')})
+    assert response.status_code == 202
+    assert response.json()['status'] == 'started'
+
+
+def test_robot_scripts_retry_busy_statuses():
+    bash = (Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.sh').read_text(encoding='utf-8')
+    powershell = (Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.ps1').read_text(encoding='utf-8')
+    assert '[ "$status" = 409 ] && [ "$SECONDS" -lt "$deadline" ]' in bash
+    assert "$status -ne '409' -or [Environment]::TickCount64 -ge $Deadline" in powershell
 
 
 def test_refresh_no_wait_and_unknown_source(web):

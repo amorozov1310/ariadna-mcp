@@ -187,34 +187,45 @@ PY
 
 delta_refresh() {
     local sid="$1" dir="$2" n="$3" attempt="${4:-1}"
+    local deadline="${5:-$((SECONDS + TIMEOUT_MIN * 60))}"
     local base="$ARIADNA_URL/api/projects/$(urlencode "$PROJECT")/sources/$(urlencode "$sid")"
     local manifest="$LOG_DIR/manifest_$n.json" target="$LOG_DIR/target_$n.json"
     local archive="$DUMP_DIR/delta_$n.zip" resp="$LOG_DIR/ariadna_response.json" status auth=()
     [ -n "${ARIADNA_TOKEN:-}" ] && auth+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
-    status="$(curl -sS -o "$manifest" -w '%{http_code}' "${auth[@]}" "$base/manifest")" \
-        || fail 2 "не удалось запросить манифест Ариадны ($base/manifest)"
+    while :; do
+        status="$(curl -sS --max-time 60 -o "$manifest" -w '%{http_code}' "${auth[@]}" "$base/manifest")" \
+            || fail 2 "Не удалось связаться с Ариадной ($base/manifest)"
+        [ "$status" = 409 ] && [ "$SECONDS" -lt "$deadline" ] || break
+        sleep 5
+    done
     if [ "$status" = 404 ] || ! command -v python3 >/dev/null; then
         return 1
     fi
-    [ "$status" = 200 ] || fail 2 "Ариадна ответила $status на запрос манифеста: $(cat "$manifest")"
+    [ "$status" = 200 ] || fail 2 "Ошибка получения манифеста: HTTP $status: $(cat "$manifest")"
     python3 "$(dirname "$0")/build_delta.py" "$dir" "$manifest" "$archive" "$target" >/dev/null \
-        || fail 2 'не удалось собрать разницу'
+        || fail 2 'Не удалось собрать разницу'
     local base_version
     base_version="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["version"])' "$manifest")" \
-        || fail 2 'не удалось прочитать версию манифеста'
-    local curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F wait=1 -F "timeout=$((TIMEOUT_MIN * 60))"
-                     -F "base_version=$base_version" -F "target_manifest=<$target"
-                     -F "delta_archive=@$archive;type=application/zip"
-                     --max-time $((TIMEOUT_MIN * 60 + 600)))
-    [ -n "${ARIADNA_TOKEN:-}" ] && curl_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
-    status="$(curl "${curl_args[@]}" "$base/delta")" || fail 2 "нет связи с Ариадной ($base/delta)"
-    if [ "$status" = 409 ] && grep -q 'запросите его заново' "$resp" && [ "$attempt" -eq 1 ]; then
-        log "Манифест изменился во время передачи; запрашиваю его повторно"
-        delta_refresh "$sid" "$dir" "$n" 2
-        return $?
-    fi
-    [ "$status" = 200 ] || fail 2 "Ариадна ответила $status на разницу «$sid»: $(cat "$resp")"
-    log "Источник «$sid»: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print("{}, {} с; модулей {}, процедур {}".format(d.get("status"),d.get("duration_sec"),(d.get("index") or {}).get("total_modules"),(d.get("index") or {}).get("total_procedures"))' "$resp")"
+        || fail 2 'Не удалось прочитать версию манифеста'
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        local remaining=$((deadline - SECONDS))
+        local curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F wait=1 -F "timeout=$remaining"
+                         -F "base_version=$base_version" -F "target_manifest=<$target"
+                         -F "delta_archive=@$archive;type=application/zip"
+                         --max-time $((remaining + 60)))
+        [ -n "${ARIADNA_TOKEN:-}" ] && curl_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
+        status="$(curl "${curl_args[@]}" "$base/delta")" || fail 2 "Не удалось связаться с Ариадной ($base/delta)"
+        if [ "$status" = 409 ] && grep -q 'изменил' "$resp" && [ "$attempt" -eq 1 ]; then
+            log "Манифест изменился во время передачи; пересобираю разницу"
+            delta_refresh "$sid" "$dir" "$n" 2 "$deadline"
+            return $?
+        fi
+        [ "$status" = 409 ] && [ "$SECONDS" -lt "$deadline" ] || break
+        log "Источник занят; повтор через 5 секунд"
+        sleep 5
+    done
+    [ "$status" = 200 ] || fail 2 "Ошибка обновления источника $sid: HTTP $status: $(cat "$resp")"
+    log "Источник $sid: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print("{}, {} с; модулей {}, процедур {}".format(d.get("status"),d.get("duration_sec"),(d.get("index") or {}).get("total_modules"),(d.get("index") or {}).get("total_procedures"))' "$resp")"
     rm -f "$archive"
     return 0
 }

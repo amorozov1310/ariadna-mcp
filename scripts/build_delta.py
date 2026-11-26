@@ -14,6 +14,11 @@ def _raise_walk_error(error):
     raise error
 
 
+def _managed(path: str) -> bool:
+    parts = Path(path).parts
+    return not any(part.startswith('Template.') or part.casefold() == 'logs' for part in parts)
+
+
 def _is_reparse_point(path: Path) -> bool:
     try:
         import stat
@@ -40,14 +45,14 @@ def main() -> int:
             candidate = Path(base) / directory
             if _is_reparse_point(candidate):
                 raise ValueError(f'Символическая ссылка в исходной выгрузке: {candidate}')
-        dirs[:] = sorted(d for d in dirs if not d.startswith('Template.') and d.casefold() != 'logs')
+        dirs[:] = sorted(d for d in dirs if _managed(d))
         for name in sorted(names):
-            if name.startswith('Template.'):
-                continue
             path = Path(base) / name
             if _is_reparse_point(path):
                 raise ValueError(f'Символическая ссылка в исходной выгрузке: {path}')
             rel = path.relative_to(args.root).as_posix()
+            if not _managed(rel):
+                continue
             if len(rel) > 1024 or '\\' in rel or '..' in Path(rel).parts:
                 raise ValueError(f'Недопустимый путь: {rel}')
             h = hashlib.sha256()

@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..core.project_manager import ReindexInProgressError
-from ..core.source_delta import DeltaConflict, DeltaError
+from ..core.source_delta import DeltaBusy, DeltaConflict, DeltaError, parse_manifest_json
 from .app import get_pm
 
 router = APIRouter()
@@ -44,22 +44,33 @@ async def _wait_idle(pm, project_id: str, deadline: float) -> bool:
 
 async def _reindex_source(pm, project_id: str, source_id: str, wait: str,
                           timeout: int, started: float, deadline: float):
-    """Общий штатный путь завершения refresh после обновления файлов."""
-    if not await _wait_idle(pm, project_id, deadline):
-        return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
-                             'detail': 'Проект всё ещё индексируется'}, status_code=409)
-    result = pm.reindex_async(project_id, source_id=source_id)
-    if result['status'] == 'already_running':
-        return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
-                             'detail': 'Переиндексация проекта уже выполняется'}, status_code=409)
+    """Запускает штатную переиндексацию источника."""
+    no_wait = wait in ('0', 'false', 'no', '')
+    while True:
+        if not no_wait and not await _wait_idle(pm, project_id, deadline):
+            return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
+                                 'detail': 'Проект всё ещё индексируется'}, status_code=409)
+        ensure = getattr(pm, 'ensure_source_xml_path', None)
+        if ensure is not None:
+            try:
+                ensure(project_id, source_id)
+            except DeltaError as e:
+                raise HTTPException(409, f'Выгрузка недоступна для переиндексации: {e}') from e
+        result = pm.reindex_async(project_id, source_id=source_id)
+        if result['status'] != 'already_running':
+            break
+        if no_wait or time.monotonic() >= deadline:
+            return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
+                                 'detail': 'Переиндексация уже выполняется'}, status_code=409)
+        await asyncio.sleep(min(_POLL_SEC, max(0, deadline - time.monotonic())))
     if result['status'] == 'error':
         raise HTTPException(500, f"Не удалось начать переиндексацию: {result.get('error', '')}")
     body = {'project_id': project_id, 'source_id': source_id}
-    if wait in ('0', 'false', 'no', ''):
+    if no_wait:
         return JSONResponse({**body, 'status': 'started'}, status_code=202)
     if not await _wait_idle(pm, project_id, deadline):
         return JSONResponse({**body, 'status': 'running',
-                             'detail': f'Индексация идёт дольше {timeout} с — проверьте статус позже: '
+                             'detail': f'Индексация ещё идёт после {timeout} с; проверьте состояние: '
                                        f'GET /api/projects/{project_id}/status'}, status_code=202)
     project = pm.get_project(project_id)
     body.update(status=project.status, duration_sec=round(time.monotonic() - started, 1))
@@ -68,7 +79,7 @@ async def _reindex_source(pm, project_id: str, source_id: str, wait: str,
         body['index'] = {k: getattr(stats, k, 0) for k in
                          ('total_objects', 'total_modules', 'total_procedures', 'total_calls')}
     if project.status != 'ready':
-        body['detail'] = 'Индексация завершилась с ошибкой — подробности в журнале сервера'
+        body['detail'] = 'Переиндексация завершилась с ошибкой; подробности доступны в статусе проекта'
         return JSONResponse(body, status_code=500)
     return JSONResponse(body)
 
@@ -99,6 +110,8 @@ async def refresh_source(
             await run_in_threadpool(pm.update_source, project_id, source_id,
                                     xml_archive=xml_archive.file,
                                     xml_archive_filename=xml_archive.filename)
+        except DeltaBusy as e:
+            raise HTTPException(409, f'Выгрузка не заменена: {e}') from e
         except ReindexInProgressError as e:
             raise HTTPException(409, f'Выгрузка не заменена: {e}') from e
         except (ValueError, KeyError) as e:
@@ -149,11 +162,11 @@ async def refresh_source_delta(request: Request, project_id: str, source_id: str
         raise HTTPException(404, f"Источник «{source_id}» не найден в проекте «{project_id}»")
     started = time.monotonic()
     deadline = started + max(1, timeout)
-    if not await _wait_idle(pm, project_id, deadline):
+    if str(form.get('wait', '1')) not in ('0', 'false', 'no', '') and not await _wait_idle(pm, project_id, deadline):
         return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
                              'detail': 'Проект всё ещё индексируется — разница не применена'}, status_code=409)
     try:
-        target = json.loads(str(form.get('target_manifest', '')))
+        target = parse_manifest_json(str(form.get('target_manifest', '')))
         archive.file.seek(0, 2)
         if archive.file.tell() > max_body:
             raise DeltaError('Размер архива превышает лимит')
@@ -161,6 +174,8 @@ async def refresh_source_delta(request: Request, project_id: str, source_id: str
         await run_in_threadpool(pm.apply_source_delta, project_id, source_id, archive.file,
                                 str(form.get('base_version', '')), target)
     except DeltaConflict as e:
+        raise HTTPException(409, str(e)) from e
+    except DeltaBusy as e:
         raise HTTPException(409, str(e)) from e
     except ReindexInProgressError as e:
         raise HTTPException(409, f'Разница не применена: {e}') from e

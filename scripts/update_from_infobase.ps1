@@ -190,38 +190,48 @@ function Invoke-Refresh($Item, [string]$ZipPath) {
                $json.duration_sec, $json.index.total_modules, $json.index.total_procedures)
 }
 
-function Invoke-DeltaRefresh($Item, [int]$Number, [int]$Attempt = 1) {
+function Invoke-DeltaRefresh($Item, [int]$Number, [int]$Attempt = 1, [long]$Deadline = 0) {
+    if ($Deadline -eq 0) { $Deadline = [Environment]::TickCount64 + ($TimeoutMinutes * 60000) }
     $base = "$AriadnaUrl/api/projects/$([uri]::EscapeDataString($Project))/sources/$([uri]::EscapeDataString($Item.Source))"
     $manifest = Join-Path $LogDir "manifest_$Number.json"
     $target = Join-Path $LogDir "target_$Number.json"
     $zip = Join-Path $DumpDir "delta_$Number.zip"
     $resp = Join-Path $LogDir 'ariadna_response.json'
-    $getArgs = @('-sS', '-o', $manifest, '-w', '%{http_code}')
+    $getArgs = @('-sS', '--max-time', '60', '-o', $manifest, '-w', '%{http_code}')
     if ($Token) { $getArgs += @('-H', "Authorization: Bearer $Token") }
-    $status = & curl.exe @getArgs "$base/manifest"
+    do {
+        $status = & curl.exe @getArgs "$base/manifest"
+        if ($status -ne '409' -or [Environment]::TickCount64 -ge $Deadline) { break }
+        Write-Log 'Источник занят; повтор запроса манифеста через 5 секунд'
+        Start-Sleep -Seconds 5
+    } while ($true)
     if ($status -eq '404') { return $false }
-    if ($status -ne '200') { Fail 2 "Ошибка запроса манифеста: HTTP $status" }
-    # Проверка после ответа манифеста позволяет старому серверу выбрать полный режим без Python.
+    if ($status -ne '200') { Fail 2 "Ошибка получения манифеста: HTTP $status" }
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if (-not $python) { return $false }
     & $python.Source (Join-Path $PSScriptRoot 'build_delta.py') $Item.Dir $manifest $zip $target | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail 2 'Не удалось собрать разницу' }
     $baseVersion = (Get-Content $manifest -Raw -Encoding UTF8 | ConvertFrom-Json).version
     $curl = @('-sS', '-o', $resp, '-w', '%{http_code}', '-X', 'POST',
-              '-F', 'wait=1', '-F', "timeout=$($TimeoutMinutes * 60)",
-              '-F', "base_version=$baseVersion", '-F', "target_manifest=<$target",
-              '-F', "delta_archive=@$zip;type=application/zip",
-              '--max-time', "$($TimeoutMinutes * 60 + 600)")
+              '-F', 'wait=1', '-F', "base_version=$baseVersion", '-F', "target_manifest=<$target",
+              '-F', "delta_archive=@$zip;type=application/zip")
     if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
-    $status = & curl.exe @curl "$base/delta"
-    $body = if (Test-Path $resp) { Get-Content $resp -Raw -Encoding UTF8 } else { '' }
-    if ($status -eq '409' -and $Attempt -eq 1 -and $body -match 'запросите его заново') {
-        Write-Log 'Манифест изменился во время передачи; запрашиваю его повторно'
-        return (Invoke-DeltaRefresh $Item $Number 2)
-    }
-    if ($status -ne '200') { Fail 2 "Ариадна ответила $status на разницу: $body" }
+    do {
+        $remaining = [Math]::Max(1, [int](($Deadline - [Environment]::TickCount64) / 1000))
+        $postArgs = $curl + @('-F', "timeout=$remaining", '--max-time', "$($remaining + 60)")
+        $status = & curl.exe @postArgs "$base/delta"
+        $body = if (Test-Path $resp) { Get-Content $resp -Raw -Encoding UTF8 } else { '' }
+        if ($status -eq '409' -and $Attempt -eq 1 -and $body -match 'изменил') {
+            Write-Log 'Манифест изменился во время передачи; пересобираю разницу'
+            return (Invoke-DeltaRefresh $Item $Number 2 $Deadline)
+        }
+        if ($status -ne '409' -or [Environment]::TickCount64 -ge $Deadline) { break }
+        Write-Log 'Источник занят; повтор запроса через 5 секунд'
+        Start-Sleep -Seconds 5
+    } while ($true)
+    if ($status -ne '200') { Fail 2 "Ошибка обновления источника: HTTP $status; $body" }
     $json = $body | ConvertFrom-Json
-    Write-Log ("Источник «{0}»: {1}, {2} с; модулей {3}, процедур {4}" -f $Item.Source, $json.status,
+    Write-Log ("Источник {0}: {1}, {2} с; модулей {3}, процедур {4}" -f $Item.Source, $json.status,
                $json.duration_sec, $json.index.total_modules, $json.index.total_procedures)
     Remove-Item $zip -ErrorAction SilentlyContinue
     return $true

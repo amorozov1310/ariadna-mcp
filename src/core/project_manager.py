@@ -247,11 +247,10 @@ class ProjectManager:
                 local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
                 root = self.get_source_xml_path(project.id, source.id) or local_root
                 workspace = self._source_delta_workspace(project.id, source.id)
-                # Корпус, на который указывает абсолютный xml_path, может быть
-                # общим и только читаемым (slow-тесты). Старт sandbox его не трогает.
-                is_local = self._is_local_source_root(root, project.id, source.id)
-                if is_local:
-                    source_delta.recover(root, workspace)
+                # Корпус из slow-тестов остаётся нетронутым: его журналы не лежат
+                # в каталоге XML. Восстановление касается только журнала проекта
+                # и выполняется, лишь если удалось взять его блокировку.
+                source_delta.recover(root, workspace)
 
     def _retire_project_db(self, project_id: str) -> None:
         """Закрыть Database проекта и убрать его из пула — перед удалением
@@ -701,8 +700,15 @@ class ProjectManager:
         xml_archive_filename: str = '',
     ) -> SourceInfo:
         with self._no_reindex(project_id):
-            return self._update_source_unlocked(project_id, source_id, label, source_type,
-                                                xml_archive, xml_archive_filename)
+            source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+            if source is None:
+                raise ValueError(f"Source '{source_id}' not found in project '{project_id}'")
+            workspace = self._source_delta_workspace(project_id, source_id)
+            root = self._source_file_root(project_id, source_id, source)
+            with source_delta.transaction_lock(workspace):
+                source_delta.recover(root, workspace, lock_held=True)
+                return self._update_source_unlocked(project_id, source_id, label, source_type,
+                                                    xml_archive, xml_archive_filename)
 
     def _update_source_unlocked(
         self,
@@ -814,7 +820,19 @@ class ProjectManager:
         Во время переиндексации проекта — ReindexInProgressError, ничего не
         удаляется (см. _no_reindex)."""
         with self._no_reindex(project_id):
-            self._remove_source(project_id, source_id)
+            source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+            if source is None:
+                return
+            workspace = self._source_delta_workspace(project_id, source_id)
+            root = self._source_file_root(project_id, source_id, source)
+            with source_delta.transaction_lock(workspace):
+                source_delta.recover(root, workspace, lock_held=True)
+                self._remove_source(project_id, source_id)
+                self._source_manifest_cache_path(project_id, source_id).unlink(missing_ok=True)
+            try:
+                workspace.rmdir()
+            except OSError:
+                pass
 
     def _remove_source(self, project_id: str, source_id: str):
         project = self.get_project(project_id)
@@ -867,7 +885,7 @@ class ProjectManager:
         return self.projects_dir / project_id / '.source-manifests' / f'{source_id}.json'
 
     def _source_delta_workspace(self, project_id: str, source_id: str) -> Path:
-        return self.projects_dir / project_id / 'sources' / source_id / '.delta-state'
+        return self.projects_dir / project_id / '.source-delta' / source_id
 
     def _is_local_source_root(self, root: Path, project_id: str, source_id: str) -> bool:
         local_root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
@@ -886,18 +904,37 @@ class ProjectManager:
         return (self.get_source_xml_path(project_id, source_id)
                 or self.projects_dir / project_id / 'sources' / source_id / 'xml')
 
+    def ensure_source_xml_path(self, project_id: str, source_id: str) -> None:
+        """Зарегистрировать существующую локальную выгрузку перед ответом ready."""
+        project = self.get_project(project_id)
+        source = next((s for s in project.sources if s.id == source_id), None)
+        if source is None or source.xml_path:
+            return
+        root = self._source_file_root(project_id, source_id, source)
+        if root.is_dir():
+            source_delta._safe_tree(root)
+        has_files = False
+        if root.is_dir():
+            for _base, _dirs, files in os.walk(root, followlinks=False,
+                                               onerror=source_delta._raise_walk_error):
+                if files:
+                    has_files = True
+                    break
+        if has_files:
+            with self._registry_lock():
+                source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+                if source is not None and not source.xml_path:
+                    source.xml_path = f'sources/{source_id}/xml'
+                    self._save_registry()
+
     def source_file_manifest(self, project_id: str, source_id: str) -> dict:
         """Файловый манифест выгрузки; кэш расположен рядом с проектом, вне xml/."""
         with self._no_reindex(project_id):
             root = self._source_file_root(project_id, source_id)
             workspace = self._source_delta_workspace(project_id, source_id)
-            if not self._is_local_source_root(root, project_id, source_id):
-                if source_delta._journal_path(workspace).exists():
-                    raise source_delta.DeltaError("Операция восстановления ожидает следующего обновления источника")
-                source_delta.recover(root, workspace)  # очищает только сиротские staging/rollback в workspace
-            else:
-                source_delta.recover(root, workspace)
-            return source_delta.manifest(root, self._source_manifest_cache_path(project_id, source_id))
+            with source_delta.transaction_lock(workspace):
+                source_delta.recover(root, workspace, lock_held=True)
+                return source_delta.manifest(root, self._source_manifest_cache_path(project_id, source_id))
 
     def apply_source_delta(self, project_id: str, source_id: str, archive: BinaryIO,
                            base_version: str, target_manifest: dict) -> dict:
@@ -911,17 +948,20 @@ class ProjectManager:
             workspace = self._source_delta_workspace(project_id, source_id)
             # Восстановить предыдущую транзакцию до вычисления версии, иначе
             # base_version может описать файлы, которые сейчас откатятся.
-            source_delta.recover(root, workspace)
-            cache = self._source_manifest_cache_path(project_id, source_id)
-            current = source_delta.manifest(root, cache)
-            result = source_delta.apply(root, archive, target_manifest, base_version, current, workspace)
-            if not source.xml_path:
-                with self._registry_lock():
-                    source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
-                    if source is not None:
-                        source.xml_path = f'sources/{source_id}/xml'
-                        self._save_registry()
-            return result
+            with source_delta.transaction_lock(workspace):
+                source_delta.recover(root, workspace, lock_held=True)
+                cache = self._source_manifest_cache_path(project_id, source_id)
+                current = source_delta.manifest(root, cache)
+                # Регистрируем путь до публикации, чтобы сбой после commit не
+                # оставил файлы невидимыми для индексатора.
+                if not source.xml_path:
+                    with self._registry_lock():
+                        source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+                        if source is not None:
+                            source.xml_path = f'sources/{source_id}/xml'
+                            self._save_registry()
+                return source_delta.apply(root, archive, target_manifest, base_version, current,
+                                          workspace, lock_held=True)
 
 
 
