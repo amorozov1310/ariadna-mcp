@@ -514,6 +514,9 @@ def _platform_help(pm: ProjectManager, args: dict) -> str:
         return f'В справке платформы {version} нет записи «{query}».' + hint
     mode = pm.platform_mode(project.id) if project else ''
     parts = [f'Справка платформы {version}', *(format_entry(e, mode=mode) for e in entries)]
+    if project and not mode and not pm.platform_mode_known(project.id):
+        parts.insert(1, 'Режим совместимости проекта пока неизвестен: основная конфигурация ещё не '
+                        'проиндексирована, предупреждения о совместимости не показаны.')
     if more:
         parts.append(f'Следующая страница: offset={offset + limit}.')
     return '\n\n'.join(parts)
@@ -1010,7 +1013,13 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
                     raise
                 return f'Справка {index.version} удалена во время проверки.'
             heading = f'Проверка «{project_id}» по справке {index.version}. '
-            heading += f'Режим совместимости {mode}.' if mode else 'Числовой режим совместимости не задан.'
+            if mode:
+                heading += f'Режим совместимости {mode}.'
+            elif pm.platform_mode_known(project_id):
+                heading += 'Числовой режим совместимости не задан.'
+            else:
+                heading += ('Режим совместимости неизвестен: основная конфигурация ещё не проиндексирована — '
+                            'выполните reindex, чтобы учесть его.')
             summary = (f"Модулей — {modules}. Ошибки — {counts['error']}, "
                        f"предупреждения — {counts['warning']}, не проверено — {counts['unchecked']}.")
             if not page:

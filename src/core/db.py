@@ -672,7 +672,8 @@ class Database:
             self.connect()
         for table in ['card_chunks', 'card_fts', 'card_modules', 'form_attributes', 'object_properties',
                       'object_queries', 'object_query_refs',
-                      'module_stat', 'object_stat', 'graph_state', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts', 'modules',
+                      'module_stat', 'object_stat', 'graph_state', 'factory_cache', 'calls_resolved', 'calls', 'procedures', 'module_text_fts',
+                      'module_text', 'form_events', 'modules',
                        'subsystem_content', 'forms', 'attributes', 'metadata_objects',
                        'sources', 'index_state', 'parser_state']:
             self.conn.execute(f"DELETE FROM {table}")

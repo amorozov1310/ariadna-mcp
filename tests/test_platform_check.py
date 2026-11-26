@@ -116,6 +116,9 @@ def test_help_mode_by_project(project):
     assert 'Недоступно' in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', args)
     assert 'Недоступно' not in execute_tool(pm, 'platform_help', dict(args, project_id='other'))
+    # Режим берётся из индекса: у непроиндексированного проекта он «неизвестен», а не «не задан».
+    assert 'пока неизвестен' in execute_tool(pm, 'platform_help', dict(args, project_id='other'))
+    assert 'пока неизвестен' not in execute_tool(pm, 'platform_help', dict(args, project_id='demo'))
     config = source / 'Configuration.xml'
     xml = config.read_text(encoding='utf-8')
     for mode in ('Version8_3_25', 'DontUse'):

@@ -993,6 +993,14 @@ class ProjectManager:
         ).fetchone()
         return row[0] if row else ''
 
+    def platform_mode_known(self, project_id: str) -> bool:
+        """Режим совместимости берётся из индекса: до индексации основной
+        конфигурации он неизвестен, а не «не задан»."""
+        row = self.get_db(project_id).read_conn().execute(
+            "SELECT indexed_at FROM sources WHERE id=?", (self.main_source(project_id),)
+        ).fetchone()
+        return bool(row and row[0])
+
     def platform_help_version(self, project_id: str | None = None) -> str:
         version = self.get_project(project_id).platform_version if project_id else ''
         return version or self.platform_help.newest()
