@@ -1570,7 +1570,14 @@ class ProjectManager:
     def _diff_key(db: Database) -> tuple:
         row = db.read_conn().execute(
             "SELECT updated_at, status FROM index_state WHERE id = 1").fetchone()
-        return (db.db_path, row['updated_at'] if row else '', row['status'] if row else '')
+        try:
+            stat = os.stat(db.db_path)
+            file_revision = (stat.st_dev, stat.st_ino, stat.st_mtime_ns,
+                             stat.st_ctime_ns, stat.st_size)
+        except OSError:
+            file_revision = None
+        return (db.db_path, row['updated_at'] if row else '', row['status'] if row else '',
+                file_revision)
 
     def get_base_diff(self, project_id: str, source_id: str | None = None):
         """Отличия проекта от базы (src/core/base_diff.py). Пересчитывается,
