@@ -1206,22 +1206,31 @@ class ProjectManager:
                 raise
             if db.stale_schema_recreated or db.rebuild_required:
                 self._handle_stale_schema(project_id, db)
+            # Параллельные открытия резервируют места до публикации и могут
+            # временно обойти мягкий предел. Сжимаем пул после каждого открытия.
+            self._trim_db_pool()
             return db
 
     @contextmanager
     def read_lease(self, project_id: str):
         """Закрепить индекс в пуле на всю пользовательскую операцию."""
-        while True:
-            db = self.get_db(project_id)
-            with self._db_pins_changed:
-                if self._closing:
-                    raise RuntimeError("ProjectManager is closed")
-                if self._db_pool.get(project_id) is db:
-                    self._db_pins[project_id] = self._db_pins.get(project_id, 0) + 1
-                    break
+        # Сначала резервируем запись пула, чтобы get_db не вытеснил только что
+        # открытый объект до начала аренды читателя.
+        self._pin_db(project_id)
         try:
+            db = self.get_db(project_id)
             with db.read_lease():
                 yield db
+        finally:
+            self._unpin_db(project_id)
+
+    @contextmanager
+    def project_pin(self, project_id: str):
+        """Удерживать Database в пуле, не перенося читатель между потоками."""
+        self._pin_db(project_id)
+        try:
+            self.get_db(project_id)
+            yield
         finally:
             self._unpin_db(project_id)
 
