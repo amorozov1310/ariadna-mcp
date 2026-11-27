@@ -26,6 +26,7 @@ from .db import Database, IndexRemovedError
 from .fsretry import replace_with_retry, rmtree_with_retry
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
+from . import source_delta
 
 logger = logging.getLogger('ariadna')
 
@@ -240,6 +241,16 @@ class ProjectManager:
         # замены (файла нет) мог дать другую запись пути, чем при
         # существующем файле, — и чтение брало другую блокировку.
         self._registry_lock_key = str(self.data_dir.resolve() / 'projects.json')
+        # Завершить атомарное восстановление выгрузок до запуска фоновых потоков.
+        for project in self._load_registry().values():
+            for source in project.sources:
+                local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
+                root = self.get_source_xml_path(project.id, source.id) or local_root
+                workspace = self._source_delta_workspace(project.id, source.id)
+                # Корпус из slow-тестов остаётся нетронутым: его журналы не лежат
+                # в каталоге XML. Восстановление касается только журнала проекта
+                # и выполняется, лишь если удалось взять его блокировку.
+                self._recover_source_delta(project.id, source.id, root, workspace)
 
     def _retire_project_db(self, project_id: str) -> None:
         """Закрыть Database проекта и убрать его из пула — перед удалением
@@ -688,6 +699,26 @@ class ProjectManager:
         xml_archive: BinaryIO | None = None,
         xml_archive_filename: str = '',
     ) -> SourceInfo:
+        with self._no_reindex(project_id):
+            source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+            if source is None:
+                raise ValueError(f"Source '{source_id}' not found in project '{project_id}'")
+            workspace = self._source_delta_workspace(project_id, source_id)
+            root = self._source_file_root(project_id, source_id, source)
+            with source_delta.transaction_lock(workspace):
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
+                return self._update_source_unlocked(project_id, source_id, label, source_type,
+                                                    xml_archive, xml_archive_filename)
+
+    def _update_source_unlocked(
+        self,
+        project_id: str,
+        source_id: str,
+        label: str | None = None,
+        source_type: str | None = None,
+        xml_archive: BinaryIO | None = None,
+        xml_archive_filename: str = '',
+    ) -> SourceInfo:
         """
         Update an existing source: replace its files and/or change its label/type.
 
@@ -718,6 +749,7 @@ class ProjectManager:
             # только после успешной проверки и распаковки нового архива.
             extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
             changes['xml_path'] = f'sources/{source_id}/xml'
+            self._source_manifest_cache_path(project_id, source_id).unlink(missing_ok=True)
 
         # Update metadata fields
         if label is not None:
@@ -788,7 +820,19 @@ class ProjectManager:
         Во время переиндексации проекта — ReindexInProgressError, ничего не
         удаляется (см. _no_reindex)."""
         with self._no_reindex(project_id):
-            self._remove_source(project_id, source_id)
+            source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+            if source is None:
+                return
+            workspace = self._source_delta_workspace(project_id, source_id)
+            root = self._source_file_root(project_id, source_id, source)
+            with source_delta.transaction_lock(workspace):
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
+                self._remove_source(project_id, source_id)
+                self._source_manifest_cache_path(project_id, source_id).unlink(missing_ok=True)
+            try:
+                workspace.rmdir()
+            except OSError:
+                pass
 
     def _remove_source(self, project_id: str, source_id: str):
         project = self.get_project(project_id)
@@ -836,6 +880,122 @@ class ProjectManager:
             if s.id == source_id and s.xml_path:
                 return self.source_path(project_id, s.xml_path)
         return None
+
+    def _source_manifest_cache_path(self, project_id: str, source_id: str) -> Path:
+        return self.projects_dir / project_id / '.source-manifests' / f'{source_id}.json'
+
+    def _source_delta_workspace(self, project_id: str, source_id: str) -> Path:
+        return self.projects_dir / project_id / '.source-delta' / source_id
+
+    def _recover_source_delta(self, project_id: str, source_id: str, root: Path,
+                              workspace: Path, *, lock_held: bool = False) -> bool:
+        """Восстановить файлы и регистрацию пути из журнала одной транзакции."""
+        journal = source_delta._journal_path(workspace)
+        try:
+            data = json.loads(journal.read_text('utf-8')) if journal.exists() else {}
+        except (OSError, ValueError):
+            data = {}
+        recovered = source_delta.recover(root, workspace, lock_held=lock_held)
+        if recovered and not data.get('committed') and 'prior_xml_path' in data:
+            with self._registry_lock():
+                project = self._load_registry().get(project_id)
+                source = next((s for s in project.sources if s.id == source_id), None) if project else None
+                if source is not None and source.xml_path != data['prior_xml_path']:
+                    source.xml_path = data['prior_xml_path']
+                    self._save_registry()
+        return recovered
+
+    def _is_local_source_root(self, root: Path, project_id: str, source_id: str) -> bool:
+        local_root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
+        try:
+            return (Path(root).absolute() == local_root.absolute()
+                    and not source_delta.is_reparse_point(local_root))
+        except OSError:
+            return False
+
+    def _source_file_root(self, project_id: str, source_id: str, source=None) -> Path:
+        if source is None:
+            project = self.get_project(project_id)
+            source = next((s for s in project.sources if s.id == source_id), None)
+        if source is None:
+            raise KeyError(f"Source '{source_id}' not found")
+        return (self.get_source_xml_path(project_id, source_id)
+                or self.projects_dir / project_id / 'sources' / source_id / 'xml')
+
+    def ensure_source_xml_path(self, project_id: str, source_id: str) -> None:
+        """Зарегистрировать существующую локальную выгрузку перед ответом ready."""
+        project = self.get_project(project_id)
+        source = next((s for s in project.sources if s.id == source_id), None)
+        if source is None or source.xml_path:
+            return
+        root = self._source_file_root(project_id, source_id, source)
+        if root.is_dir():
+            source_delta._safe_tree(root)
+        has_files = False
+        if root.is_dir():
+            for _base, _dirs, files in os.walk(root, followlinks=False,
+                                               onerror=source_delta._raise_walk_error):
+                if files:
+                    has_files = True
+                    break
+        if has_files:
+            with self._registry_lock():
+                source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+                if source is not None and not source.xml_path:
+                    source.xml_path = f'sources/{source_id}/xml'
+                    self._save_registry()
+
+    def source_file_manifest(self, project_id: str, source_id: str) -> dict:
+        """Файловый манифест выгрузки; кэш расположен рядом с проектом, вне xml/."""
+        with self._no_reindex(project_id):
+            root = self._source_file_root(project_id, source_id)
+            workspace = self._source_delta_workspace(project_id, source_id)
+            with source_delta.transaction_lock(workspace):
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
+                return source_delta.manifest(root, self._source_manifest_cache_path(project_id, source_id))
+
+    def apply_source_delta(self, project_id: str, source_id: str, archive: BinaryIO,
+                           base_version: str, target_manifest: dict) -> dict:
+        """Применить разницу под той же блокировкой, что защищает индексацию."""
+        with self._no_reindex(project_id):
+            project = self.get_project(project_id)
+            source = next((s for s in project.sources if s.id == source_id), None)
+            if source is None:
+                raise KeyError(f"Source '{source_id}' not found")
+            root = self._source_file_root(project_id, source_id, source)
+            workspace = self._source_delta_workspace(project_id, source_id)
+            # Восстановить предыдущую транзакцию до вычисления версии, иначе
+            # base_version может описать файлы, которые сейчас откатятся.
+            with source_delta.transaction_lock(workspace):
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
+                cache = self._source_manifest_cache_path(project_id, source_id)
+                current = source_delta.manifest(root, cache)
+                if current['version'] != base_version:
+                    raise source_delta.DeltaConflict("Манифест источника изменился; запросите его заново")
+                # Регистрируем путь до публикации, чтобы сбой после commit не
+                # оставил файлы невидимыми для индексатора.
+                registered = False
+                prior_xml_path = source.xml_path
+                if not source.xml_path:
+                    with self._registry_lock():
+                        source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+                        if source is not None:
+                            source.xml_path = f'sources/{source_id}/xml'
+                            self._save_registry()
+                            registered = True
+                try:
+                    return source_delta.apply(root, archive, target_manifest, base_version, current,
+                                              workspace, lock_held=True,
+                                              journal_context={'prior_xml_path': prior_xml_path})
+                except Exception:
+                    if registered:
+                        with self._registry_lock():
+                            source = next((s for s in self.get_project(project_id).sources
+                                           if s.id == source_id), None)
+                            if source is not None and source.xml_path == f'sources/{source_id}/xml':
+                                source.xml_path = ''
+                                self._save_registry()
+                    raise
 
 
 
@@ -2078,6 +2238,11 @@ class ProjectManager:
             for k in ('objects', 'attributes', 'forms', 'modules', 'duration_sec'):
                 stats[k] = meta_stats.get(k, 0)
         elif xml_path and xml_path.exists():
+            # Выгрузка сменилась на такую, где метаданных нет (например, разница
+            # удалила Configuration.xml) — прежние метаданные этого источника
+            # больше не описывают выгрузку: иначе API отдавал бы ready со
+            # старыми объектами. Код переразбирается ниже как обычно.
+            self._clear_source_metadata(indexer.db, source.id)
             logger.warning("Проект %s, источник %s: в выгрузке нет Configuration.xml — "
                            "метаданные не индексируются, только код. Нужна выгрузка "
                            "Конфигуратора «Выгрузить конфигурацию в файлы».",
@@ -2117,18 +2282,26 @@ class ProjectManager:
 
         return stats
 
-    def _clear_source_data(self, db: Database, source_id: str):
-        """Remove all data for a specific source from the DB."""
+    def _clear_source_metadata(self, db: Database, source_id: str):
+        """Удалить метаданные источника, оставив разобранный код.
+
+        Нужен, когда источник переходит в режим без метаданных (в выгрузке
+        больше нет Configuration.xml): строки прежних объектов иначе
+        оставались бы в индексе и API показывал бы удалённые объекты."""
         conn = db.conn
         if not conn:
             return
-        # Get object IDs for this source
         obj_ids = [r[0] for r in conn.execute(
             "SELECT id FROM metadata_objects WHERE source_id=?", (source_id,)
         ).fetchall()]
-
         if obj_ids:
             placeholders = ','.join('?' * len(obj_ids))
+            module_ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM modules WHERE object_id IN ({placeholders})", obj_ids
+            ).fetchall()]
+            if module_ids:
+                module_placeholders = ','.join('?' * len(module_ids))
+                conn.execute(f"DELETE FROM module_text_fts WHERE rowid IN ({module_placeholders})", module_ids)
             conn.execute(f"DELETE FROM forms WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM attributes WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM subsystem_content WHERE subsystem_id IN ({placeholders})", obj_ids)
@@ -2136,12 +2309,23 @@ class ProjectManager:
             conn.execute(f"DELETE FROM object_help_fts WHERE rowid IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM object_queries WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM object_query_refs WHERE object_id IN ({placeholders})", obj_ids)
+        conn.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
+        # FTS5 не поддерживает FK; каскад мог удалить модули и оставить их
+        # rowid в полнотекстовом индексе.
+        conn.execute("DELETE FROM module_text_fts WHERE rowid NOT IN (SELECT id FROM modules)")
+        db.mark_graph_dirty()
+        conn.execute("INSERT INTO metadata_fts(metadata_fts) VALUES('rebuild')")
+        conn.execute("INSERT INTO attributes_fts(attributes_fts) VALUES('rebuild')")
+        conn.commit()
 
-        conn.execute("DELETE FROM parser_state WHERE source_id=?", (source_id,))
-
+    def _clear_source_data(self, db: Database, source_id: str):
+        """Remove all data for a specific source from the DB."""
+        conn = db.conn
+        if not conn:
+            return
         # module_text_fts has no FK to modules (FTS5 virtual tables can't
         # carry one) — its rowid mirrors modules.id, so remove those rows
-        # explicitly before the cascade-deleted modules disappear.
+        # explicitly before clearing metadata cascades to the modules.
         mod_ids = [r[0] for r in conn.execute(
             "SELECT id FROM modules WHERE source_id=?", (source_id,)
         ).fetchall()]
@@ -2149,6 +2333,8 @@ class ProjectManager:
             placeholders = ','.join('?' * len(mod_ids))
             conn.execute(f"DELETE FROM module_text_fts WHERE rowid IN ({placeholders})", mod_ids)
 
+        self._clear_source_metadata(db, source_id)
+        conn.execute("DELETE FROM parser_state WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM modules WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM sources WHERE id=?", (source_id,))

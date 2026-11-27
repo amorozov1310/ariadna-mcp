@@ -9,6 +9,7 @@
 
 import os
 import re
+import tempfile
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from urllib.parse import quote
@@ -37,6 +38,46 @@ _ADMIN_POST = re.compile(r'^/api/(projects$|projects/[^/]+/(update|delete|compar
 _ADMIN_GET = re.compile(r'^/(projects/new$|(?:api/)?admin(/|$))')
 
 _stores: dict[str, TokenStore] = {}
+_DELTA_ROUTE = re.compile(r'^/api/projects/[^/]+/sources/[^/]+/delta$')
+
+
+async def _call_next_with_delta_limit(request: Request, call_next):
+    """Ограничить тело разницы до того, как FastAPI начнёт разбирать multipart."""
+    if request.method != 'POST' or not _DELTA_ROUTE.match(request.url.path):
+        return await call_next(request)
+    limit = int(os.environ.get('ARIADNA_DELTA_MAX_BODY', str(34 * 1024**3)))
+    try:
+        declared = int(request.headers.get('content-length', ''))
+    except ValueError:
+        return JSONResponse({'detail': 'Для архива разницы нужен Content-Length'}, status_code=411)
+    if declared > limit:
+        return JSONResponse({'detail': 'Размер запроса превышает лимит'}, status_code=413)
+    spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode='w+b')
+    size = 0
+    try:
+        async for block in request.stream():
+            size += len(block)
+            if size > limit:
+                return JSONResponse({'detail': 'Размер запроса превышает лимит'}, status_code=413)
+            spool.write(block)
+        spool.seek(0)
+        remaining = size
+
+        async def replay():
+            nonlocal remaining
+            if remaining <= 0:
+                return {'type': 'http.request', 'body': b'', 'more_body': False}
+            block = spool.read(min(64 * 1024, remaining))
+            remaining -= len(block)
+            return {'type': 'http.request', 'body': block, 'more_body': remaining > 0}
+
+        request._receive = replay
+        # BaseHTTPMiddleware's cached receive wrapper emits an empty body after
+        # Request.stream() completes, so make it consume the spooled replay.
+        request._stream_consumed = False
+        return await call_next(request)
+    finally:
+        spool.close()
 
 
 def tokens() -> TokenStore:
@@ -72,7 +113,7 @@ async def auth_middleware(request: Request, call_next):
     store = tokens()
     path = request.url.path
     if not store.enabled() or _PUBLIC.match(path):
-        return await call_next(request)
+        return await _call_next_with_delta_limit(request, call_next)
     user = store.verify(bearer(request.headers.get('authorization'))
                         or request.cookies.get(COOKIE))
     if user is None:
@@ -95,7 +136,7 @@ async def auth_middleware(request: Request, call_next):
         raise_page = HTTPException(403, 'Это действие доступно только администратору.')
         from .app import http_exception_handler
         return await http_exception_handler(request, raise_page)
-    return await call_next(request)
+    return await _call_next_with_delta_limit(request, call_next)
 
 
 def _safe_next(target: str) -> str:

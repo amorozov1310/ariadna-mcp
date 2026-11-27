@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from .app import templates, get_pm
 from ..core.project_manager import (PROJECT_GONE, ProjectFilesNotRemovedError,
                                      ReindexInProgressError)
+from ..core.source_delta import DeltaBusy
 
 logger = logging.getLogger('ariadna')
 
@@ -303,7 +304,13 @@ async def update_source(
         )
 
         if auto_reindex:
-            pm.reindex_async(project_id, source_id=source_id)
+            result = pm.reindex_async(project_id, source_id=source_id)
+            if result['status'] == 'already_running':
+                raise HTTPException(409, 'Выгрузка обновлена, но переиндексация уже выполняется; проверьте статус проекта')
+    except DeltaBusy as e:
+        raise HTTPException(409, f'Источник занят другой операцией: {e}') from e
+    except ReindexInProgressError as e:
+        raise HTTPException(409, f'Выгрузка не изменена: {e}') from e
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
@@ -316,6 +323,8 @@ async def remove_source(project_id: str, source_id: str, next: str = Form('')):
     pm = get_pm()
     try:
         await run_in_threadpool(pm.remove_source, project_id, source_id)
+    except DeltaBusy as e:
+        raise HTTPException(409, f'Источник занят другой операцией: {e}') from e
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить часть проекта: {e}")
     except (ValueError, KeyError) as e:
