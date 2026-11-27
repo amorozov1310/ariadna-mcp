@@ -2204,6 +2204,11 @@ class ProjectManager:
             for k in ('objects', 'attributes', 'forms', 'modules', 'duration_sec'):
                 stats[k] = meta_stats.get(k, 0)
         elif xml_path and xml_path.exists():
+            # Выгрузка сменилась на такую, где метаданных нет (например, разница
+            # удалила Configuration.xml) — прежние метаданные этого источника
+            # больше не описывают выгрузку: иначе API отдавал бы ready со
+            # старыми объектами. Код переразбирается ниже как обычно.
+            self._clear_source_metadata(indexer.db, source.id)
             logger.warning("Проект %s, источник %s: в выгрузке нет Configuration.xml — "
                            "метаданные не индексируются, только код. Нужна выгрузка "
                            "Конфигуратора «Выгрузить конфигурацию в файлы».",
@@ -2243,16 +2248,18 @@ class ProjectManager:
 
         return stats
 
-    def _clear_source_data(self, db: Database, source_id: str):
-        """Remove all data for a specific source from the DB."""
+    def _clear_source_metadata(self, db: Database, source_id: str):
+        """Удалить метаданные источника, оставив разобранный код.
+
+        Нужен, когда источник переходит в режим без метаданных (в выгрузке
+        больше нет Configuration.xml): строки прежних объектов иначе
+        оставались бы в индексе и API показывал бы удалённые объекты."""
         conn = db.conn
         if not conn:
             return
-        # Get object IDs for this source
         obj_ids = [r[0] for r in conn.execute(
             "SELECT id FROM metadata_objects WHERE source_id=?", (source_id,)
         ).fetchall()]
-
         if obj_ids:
             placeholders = ','.join('?' * len(obj_ids))
             conn.execute(f"DELETE FROM forms WHERE object_id IN ({placeholders})", obj_ids)
@@ -2262,7 +2269,18 @@ class ProjectManager:
             conn.execute(f"DELETE FROM object_help_fts WHERE rowid IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM object_queries WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM object_query_refs WHERE object_id IN ({placeholders})", obj_ids)
+        conn.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
+        db.mark_graph_dirty()
+        conn.execute("INSERT INTO metadata_fts(metadata_fts) VALUES('rebuild')")
+        conn.execute("INSERT INTO attributes_fts(attributes_fts) VALUES('rebuild')")
+        conn.commit()
 
+    def _clear_source_data(self, db: Database, source_id: str):
+        """Remove all data for a specific source from the DB."""
+        conn = db.conn
+        if not conn:
+            return
+        self._clear_source_metadata(db, source_id)
         conn.execute("DELETE FROM parser_state WHERE source_id=?", (source_id,))
 
         # module_text_fts has no FK to modules (FTS5 virtual tables can't

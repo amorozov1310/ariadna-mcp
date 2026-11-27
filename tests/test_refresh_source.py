@@ -111,6 +111,27 @@ def test_delta_refresh_updates_one_file_and_indexes(web):
     assert 'НоваяРазница' in _procs(pm)
 
 
+def test_delta_without_configuration_xml_clears_old_metadata(web):
+    """Разница удалила Configuration.xml и файлы объектов: индекс не должен
+    остаться ready со старыми объектами источника."""
+    pm, client, _ = web
+    conn = pm.get_db('p1').read_conn()
+    assert conn.execute('SELECT COUNT(*) FROM metadata_objects').fetchone()[0] > 0
+    manifest = client.get('/api/projects/p1/sources/main/manifest').json()
+    keep = {name: spec for name, spec in manifest['files'].items() if name.endswith('Module.bsl')}
+    assert 'Configuration.xml' not in keep and keep
+    target = {'version': _manifest_version(keep), 'files': keep}
+    response = client.post('/api/projects/p1/sources/main/delta', data={
+        'base_version': manifest['version'], 'target_manifest': json.dumps(target, ensure_ascii=False),
+        'wait': '1', 'timeout': '30'},
+        files={'delta_archive': ('delta.zip', _zip_from_files({}), 'application/zip')})
+    assert response.status_code == 200, response.text
+    assert response.json()['status'] == 'ready'
+    conn = pm.get_db('p1').read_conn()
+    assert conn.execute('SELECT COUNT(*) FROM metadata_objects').fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM modules WHERE source_id='main'").fetchone()[0] > 0
+
+
 def test_delta_refresh_rejects_stale_manifest(web):
     _, client, _ = web
     manifest = client.get('/api/projects/p1/sources/main/manifest').json()
