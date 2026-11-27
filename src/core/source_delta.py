@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import tempfile
+import time
 import zipfile
 import contextlib
 from pathlib import Path, PurePosixPath
@@ -97,18 +98,39 @@ def parse_manifest_json(raw: str) -> dict:
     return json.loads(raw, object_pairs_hook=_unique_object_pairs)
 
 
+_WINDOWS_RESERVED_CHARS = '<>:"|?*'
+
+
 def _path(value: str) -> str:
+    """Проверить путь файла выгрузки по правилам POSIX и Windows сразу:
+    разделитель — только «/», путь относительный, без пустых компонентов и
+    «.»/«..», без двоеточий (буква диска, потоки NTFS) и служебных символов
+    Windows; компонент не заканчивается точкой или пробелом."""
     if (not isinstance(value, str) or not value or len(value) > MAX_PATH
             or "\\" in value or value.startswith("/") or "\x00" in value
-            or any(ord(c) < 32 or ord(c) == 127 for c in value)
-            or (len(value) > 1 and value[1] == ":")):
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
         raise DeltaError(f"Недопустимый путь файла: {value!r}")
-    p = PurePosixPath(value)
-    if any(part in ("", ".", "..") for part in p.parts) or p.as_posix() != value:
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts) or PurePosixPath(value).as_posix() != value:
         raise DeltaError(f"Недопустимый путь файла: {value!r}")
-    if any(part.startswith("Template.") for part in p.parts):
+    for part in parts:
+        if (any(c in _WINDOWS_RESERVED_CHARS for c in part)
+                or part.rstrip(" .") != part):
+            raise DeltaError(f"Недопустимый путь файла: {value!r}")
+    if any(part.startswith("Template.") for part in parts):
         raise DeltaError(f"Макеты нельзя передавать: {value!r}")
     return value
+
+
+def _staging_target(staging: Path, rel: str) -> Path:
+    """Путь файла в каталоге распаковки. После разворачивания ссылок он обязан
+    оставаться внутри staging: путь из манифеста уже проверен, но каталог
+    распаковки мог быть подменён ссылкой."""
+    staging_real = staging.resolve()
+    out = staging.joinpath(*PurePosixPath(rel).parts)
+    if not out.resolve().is_relative_to(staging_real):
+        raise DeltaError(f"Путь выходит за каталог распаковки: {rel}")
+    return out
 
 
 def _validate_path_set(paths) -> None:
@@ -189,7 +211,7 @@ def manifest(root: Path, cache_path: Path) -> dict:
                 rel = _path(rel)
                 st = full.stat()
                 prior = old.get(rel, {})
-                if (cache_valid and prior.get("size") == st.st_size
+                if (cache_valid and time.time_ns() - st.st_mtime_ns > 5_000_000_000 and prior.get("size") == st.st_size
                         and prior.get("mtime_ns") == st.st_mtime_ns
                         and prior.get("ctime_ns") == st.st_ctime_ns
                         and prior.get("ino") == st.st_ino):
@@ -240,10 +262,16 @@ def _actual_paths(root: Path) -> tuple[dict[str, str], dict[str, str]]:
     for base, names, filenames in os.walk(root, followlinks=False, onerror=_raise_walk_error):
         for name in names:
             rel = (Path(base) / name).relative_to(root).as_posix()
-            dirs[rel.casefold()] = rel
+            key = rel.casefold()
+            if key in dirs and dirs[key] != rel:
+                raise DeltaError(f"Коллизия регистра пути в выгрузке: {rel}")
+            dirs[key] = rel
         for name in filenames:
             rel = (Path(base) / name).relative_to(root).as_posix()
-            files[rel.casefold()] = rel
+            key = rel.casefold()
+            if key in files and files[key] != rel:
+                raise DeltaError(f"Коллизия регистра пути в выгрузке: {rel}")
+            files[key] = rel
     return files, dirs
 
 
@@ -447,7 +475,7 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
                 spec = normalized.get(rel)
                 if spec is None:
                     raise DeltaError(f"Файл архива отсутствует в целевом манифесте: {rel}")
-                out = staging.joinpath(*PurePosixPath(rel).parts)
+                out = _staging_target(staging, rel)
                 out.parent.mkdir(parents=True, exist_ok=True)
                 h = hashlib.sha256()
                 size = 0
@@ -465,8 +493,10 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
         changed = {p for p, spec in normalized.items() if old_files.get(p) != spec}
         if changed != supplied:
             raise DeltaError("Архив должен содержать все изменённые и добавленные файлы")
-        _checkpoint('b')
         removed = set(old_files) - set(normalized)
+        if set(old_files) - set(normalized) != removed:
+            raise DeltaError("Набор удалений не совпадает с целевым манифестом")
+        _checkpoint('b')
         if (len(removed) > SUSPICIOUS_DELETE_FLOOR
                 and len(removed) > len(old_files) / 2):
             raise DeltaError("Разница удаляет слишком много файлов; выполните полную передачу выгрузки")

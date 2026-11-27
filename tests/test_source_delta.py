@@ -69,6 +69,45 @@ def test_manifest_rejects_unsafe_paths(tmp_path, name):
         source_delta._path(name)
 
 
+@pytest.mark.parametrize("name", [
+    "a:b.xml",            # двоеточие в любом компоненте — буква диска или поток NTFS
+    "a/./b.xml",
+    "a//b.xml",
+    "//server/share.xml",
+    "a/b\x01.xml",
+    'a/b"c.xml',
+    "a/b?.xml",
+    "a/b*.xml",
+    "a/b<c.xml",
+    "a/b>c.xml",
+    "a/b|c.xml",
+    "a/b /c.xml",         # компонент с пробелом на конце Windows не создаёт
+    "a/b.xml.",
+])
+def test_manifest_rejects_paths_invalid_for_windows(name):
+    with pytest.raises(source_delta.DeltaError, match="Недопустимый путь"):
+        source_delta._path(name)
+
+
+def test_manifest_accepts_ordinary_nested_paths():
+    assert source_delta._path("CommonModules/ЦеныСервер/Ext/Module.bsl") == \
+        "CommonModules/ЦеныСервер/Ext/Module.bsl"
+
+
+def test_archive_entry_cannot_escape_staging_through_symlink(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (staging / "link").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("символические ссылки недоступны")
+    with pytest.raises(source_delta.DeltaError, match="за каталог распаковки"):
+        source_delta._staging_target(staging, "link/x.xml")
+    assert source_delta._staging_target(staging, "ok/x.xml") == staging / "ok" / "x.xml"
+
+
 def test_zip_rejects_case_insensitive_duplicate_paths(tmp_path):
     root = tmp_path / "xml"
     current = source_delta.manifest(root, tmp_path / "cache.json")
