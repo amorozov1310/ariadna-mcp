@@ -2294,12 +2294,9 @@ class ProjectManager:
         conn = db.conn
         if not conn:
             return
-        self._clear_source_metadata(db, source_id)
-        conn.execute("DELETE FROM parser_state WHERE source_id=?", (source_id,))
-
         # module_text_fts has no FK to modules (FTS5 virtual tables can't
         # carry one) — its rowid mirrors modules.id, so remove those rows
-        # explicitly before the cascade-deleted modules disappear.
+        # explicitly before clearing metadata cascades to the modules.
         mod_ids = [r[0] for r in conn.execute(
             "SELECT id FROM modules WHERE source_id=?", (source_id,)
         ).fetchall()]
@@ -2307,6 +2304,8 @@ class ProjectManager:
             placeholders = ','.join('?' * len(mod_ids))
             conn.execute(f"DELETE FROM module_text_fts WHERE rowid IN ({placeholders})", mod_ids)
 
+        self._clear_source_metadata(db, source_id)
+        conn.execute("DELETE FROM parser_state WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM modules WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
