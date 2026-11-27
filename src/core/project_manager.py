@@ -2212,8 +2212,18 @@ class ProjectManager:
                         break
                     if attempt == 0:
                         db.update_state(progress_phase='platform_check')
-                    key = warm_report(self.get_search(project_id), index, self.platform_mode(project_id),
-                                      ready_at, warmed_key)
+                    # Отчёт строится синхронно до публикации ready. Удерживаем
+                    # Database и читателя на весь проход: иначе пул может
+                    # вытеснить индекс между получением SearchEngine и чтением
+                    # отчёта, после чего ready будет опубликован без снимка.
+                    with self.project_pin(project_id):
+                        engine = self.get_search(project_id)
+                        try:
+                            with engine.db.read_lease():
+                                key = warm_report(engine, index, self.platform_mode(project_id),
+                                                  ready_at, warmed_key)
+                        finally:
+                            engine.db.close_thread_reader()
                     if key is None or key == warmed_key:
                         break
                     warmed_key = key
