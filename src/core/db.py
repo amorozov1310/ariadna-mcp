@@ -450,6 +450,7 @@ class _ReaderConnection:
         self._lock = threading.Lock()
         self._closed = False
         self._active = 0
+        self._shared = False
         self._idle = threading.Condition(self._lock)
         self._on_idle = on_idle
         self._lease_local = threading.local()
@@ -666,13 +667,23 @@ class Database:
             while len(self._readers) >= self.MAX_READERS:
                 oldest = next((candidate for candidate in self._readers
                                if candidate.active == 0), None)
-                if oldest is None:
-                    self._readers_lock.wait()
-                    if self._retired:
-                        raise IndexRemovedError(self.db_path)
-                    continue
-                self._readers.pop(oldest, None)
-                oldest.close()
+                if oldest is not None:
+                    # Не закрывать читателя, чей слот кэша потока вытесняется:
+                    # вызывающий код мог сохранить соединение на всю операцию
+                    # с несколькими SQL. _ReaderConnection сериализует execute(),
+                    # поэтому общий читатель безопасно обслуживает другой поток,
+                    # не ломая уже выданные ссылки. close()/retire() по-прежнему
+                    # закрывают все соединения на границе жизненного цикла.
+                    self._readers.move_to_end(oldest)
+                    if lease and not oldest.acquire():
+                        continue
+                    oldest._shared = True
+                    self._local.generation = self._generation
+                    self._local.conn = oldest
+                    return oldest
+                self._readers_lock.wait()
+                if self._retired:
+                    raise IndexRemovedError(self.db_path)
             conn = _ReaderConnection(self._open_with_retry(), self._closed_reader_error,
                                      self._notify_reader_available)
             if lease:
@@ -701,10 +712,14 @@ class Database:
         """Освободить читающее соединение завершающегося фонового потока."""
         conn = getattr(self._local, 'conn', None)
         if conn is not None:
-            conn.close()
-            with self._readers_lock:
-                self._readers.pop(conn, None)
-                self._readers_lock.notify_all()
+            # Соединение, выданное другим потокам при достижении лимита,
+            # принадлежит пулу Database до close()/retire(): один поток не
+            # может закрыть его, пока другой сохранил ссылку для операции.
+            if not conn._shared:
+                conn.close()
+                with self._readers_lock:
+                    self._readers.pop(conn, None)
+                    self._readers_lock.notify_all()
             self._local.conn = None
 
     def _closed_reader_error(self) -> sqlite3.Error:
@@ -897,10 +912,10 @@ class Database:
         время индексации открывалась десятки секунд. Здесь один GROUP BY по
         metadata_objects (десятки тысяч строк).
         """
-        conn = self.read_conn()
-        rows = conn.execute(
-            "SELECT kind, COUNT(*) as cnt FROM metadata_objects GROUP BY kind ORDER BY cnt DESC"
-        ).fetchall()
+        with self.read_lease() as conn:
+            rows = conn.execute(
+                "SELECT kind, COUNT(*) as cnt FROM metadata_objects GROUP BY kind ORDER BY cnt DESC"
+            ).fetchall()
         return {r['kind']: r['cnt'] for r in rows}
 
     def get_index_progress(self) -> dict:
@@ -914,8 +929,8 @@ class Database:
         подвисал ровно тогда, когда прогресс и нужен, и страница выглядела
         замершей. Здесь читается одна строка по первичному ключу.
         """
-        conn = self.read_conn()
-        state = conn.execute("SELECT * FROM index_state WHERE id=1").fetchone()
+        with self.read_lease() as conn:
+            state = conn.execute("SELECT * FROM index_state WHERE id=1").fetchone()
         if state is None:
             return {'status': 'empty', 'progress_current': 0,
                     'progress_total': 0, 'progress_phase': '', 'updated_at': ''}

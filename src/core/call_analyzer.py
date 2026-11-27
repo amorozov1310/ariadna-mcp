@@ -49,6 +49,20 @@ class CallAnalyzer:
         source_id: str | None = None,
         max_nodes: int = 200,
     ) -> CallTreeNode | None:
+        """Строит дерево, удерживая соединение до завершения всех SQL-запросов."""
+        with self.db.read_lease():
+            return self._build_call_tree(
+                procedure_name, module_name, direction, depth, source_id, max_nodes)
+
+    def _build_call_tree(
+        self,
+        procedure_name: str,
+        module_name: str | None = None,
+        direction: str = 'down',
+        depth: int = 3,
+        source_id: str | None = None,
+        max_nodes: int = 200,
+    ) -> CallTreeNode | None:
         """
         Build call tree.
         direction='down': who does this procedure call?

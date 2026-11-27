@@ -837,29 +837,30 @@ class ProjectManager:
         counts = {'objects': 0, 'attributes': 0, 'forms': 0, 'modules': 0,
                   'procedures': 0, 'calls': 0}
         try:
-            conn = self.get_db(project_id).read_conn()
-            obj_ids = [r[0] for r in conn.execute(
-                "SELECT id FROM metadata_objects WHERE source_id=?", (source_id,)).fetchall()]
-            counts['objects'] = len(obj_ids)
-            if obj_ids:
-                placeholders = ','.join('?' * len(obj_ids))
-                counts['attributes'] = conn.execute(
-                    f"SELECT COUNT(*) FROM attributes WHERE object_id IN ({placeholders})",
-                    obj_ids).fetchone()[0]
-                counts['forms'] = conn.execute(
-                    f"SELECT COUNT(*) FROM forms WHERE object_id IN ({placeholders})",
-                    obj_ids).fetchone()[0]
-            counts['modules'] = conn.execute(
-                "SELECT COUNT(*) FROM modules WHERE source_id=?", (source_id,)).fetchone()[0]
-            counts['procedures'] = conn.execute(
-                """SELECT COUNT(*) FROM procedures p JOIN modules m ON m.id = p.module_id
-                   WHERE m.source_id=?""", (source_id,)).fetchone()[0]
-            counts['calls'] = conn.execute(
-                """SELECT COUNT(*) FROM calls c JOIN procedures p ON p.id = c.caller_id
-                   JOIN modules m ON m.id = p.module_id
-                   WHERE m.source_id=? AND (c.callee_kind != 'manager_object' OR EXISTS
-                         (SELECT 1 FROM calls_resolved cr WHERE cr.call_id = c.id))""",
-                (source_id,)).fetchone()[0]
+            with self.read_lease(project_id) as db:
+                conn = db.read_conn()
+                obj_ids = [r[0] for r in conn.execute(
+                    "SELECT id FROM metadata_objects WHERE source_id=?", (source_id,)).fetchall()]
+                counts['objects'] = len(obj_ids)
+                if obj_ids:
+                    placeholders = ','.join('?' * len(obj_ids))
+                    counts['attributes'] = conn.execute(
+                        f"SELECT COUNT(*) FROM attributes WHERE object_id IN ({placeholders})",
+                        obj_ids).fetchone()[0]
+                    counts['forms'] = conn.execute(
+                        f"SELECT COUNT(*) FROM forms WHERE object_id IN ({placeholders})",
+                        obj_ids).fetchone()[0]
+                counts['modules'] = conn.execute(
+                    "SELECT COUNT(*) FROM modules WHERE source_id=?", (source_id,)).fetchone()[0]
+                counts['procedures'] = conn.execute(
+                    """SELECT COUNT(*) FROM procedures p JOIN modules m ON m.id = p.module_id
+                       WHERE m.source_id=?""", (source_id,)).fetchone()[0]
+                counts['calls'] = conn.execute(
+                    """SELECT COUNT(*) FROM calls c JOIN procedures p ON p.id = c.caller_id
+                       JOIN modules m ON m.id = p.module_id
+                       WHERE m.source_id=? AND (c.callee_kind != 'manager_object' OR EXISTS
+                             (SELECT 1 FROM calls_resolved cr WHERE cr.call_id = c.id))""",
+                    (source_id,)).fetchone()[0]
         except Exception:
             pass  # До первой индексации счётчики остаются нулевыми.
 
@@ -1415,17 +1416,19 @@ class ProjectManager:
         return (main or (sources[0] if sources else None)).id if sources else 'main'
 
     def platform_mode(self, project_id: str) -> str:
-        row = self.get_db(project_id).read_conn().execute(
-            "SELECT compatibility_mode FROM sources WHERE id=?", (self.main_source(project_id),)
-        ).fetchone()
+        with self.read_lease(project_id) as db:
+            row = db.read_conn().execute(
+                "SELECT compatibility_mode FROM sources WHERE id=?", (self.main_source(project_id),)
+            ).fetchone()
         return row[0] if row else ''
 
     def platform_mode_known(self, project_id: str) -> bool:
         """Режим совместимости берётся из индекса: до индексации основной
         конфигурации он неизвестен, а не «не задан»."""
-        row = self.get_db(project_id).read_conn().execute(
-            "SELECT indexed_at FROM sources WHERE id=?", (self.main_source(project_id),)
-        ).fetchone()
+        with self.read_lease(project_id) as db:
+            row = db.read_conn().execute(
+                "SELECT indexed_at FROM sources WHERE id=?", (self.main_source(project_id),)
+            ).fetchone()
         return bool(row and row[0])
 
     def platform_help_version(self, project_id: str | None = None) -> str:
@@ -1497,8 +1500,9 @@ class ProjectManager:
         """«Имя версия» конфигурации источника из индекса; '' — нет индекса."""
         source_id = source_id or self.main_source(project_id)
         try:
-            row = self.get_db(project_id).read_conn().execute(
-                "SELECT config_name, config_version FROM sources WHERE id = ?", (source_id,)).fetchone()
+            with self.read_lease(project_id) as db:
+                row = db.read_conn().execute(
+                    "SELECT config_name, config_version FROM sources WHERE id = ?", (source_id,)).fetchone()
         except (KeyError, IndexRemovedError):
             return ''
         return f"{row['config_name']} {row['config_version']}".strip() if row else ''
@@ -1800,7 +1804,10 @@ class ProjectManager:
 
     def broken_calls_ready(self, project_id: str) -> bool:
         """Посчитана ли проверка вызовов для текущего индекса (есть в кэше)."""
-        key = self._diff_key(self.get_db(project_id))
+        # _diff_key выполняет SQL через читателя. Удерживаем Database в пуле
+        # и соединение до завершения сверки с кэшем.
+        with self.read_lease(project_id) as db:
+            key = self._diff_key(db)
         with self._base_diff_lock:
             cached = self._broken_calls.get(project_id)
             if cached is not None:
@@ -1816,7 +1823,8 @@ class ProjectManager:
                 return False
         if self.broken_calls_ready(project_id):
             return True
-        key = self._diff_key(self.get_db(project_id))
+        with self.read_lease(project_id) as db:
+            key = self._diff_key(db)
         with self._base_diff_lock:
             if self._closing_checks:
                 return False
