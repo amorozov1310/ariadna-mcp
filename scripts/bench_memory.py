@@ -159,6 +159,50 @@ def _worker(project_count: int, pool_limit: int, modules: int, lines: int,
         return {'before_search': before, 'after_search': after, 'peak_connections': peak[0]}
 
 
+def _manifest_pool_benchmark() -> list[dict]:
+    """Four cold-pool HTTP batches against index manifests and call graphs."""
+    import src.core.project_manager as project_manager
+    from fastapi.testclient import TestClient
+    from src.core.project_manager import ProjectManager
+    from src.web import app as app_module
+
+    project_manager.DB_POOL_LIMIT = 8
+    rows = []
+    with tempfile.TemporaryDirectory(prefix='ariadna-manifest-bench-') as temp:
+        pm = ProjectManager(str(Path(temp) / 'data'))
+        project_ids = [f'manifest_{index:02d}' for index in range(16)]
+        for project_id in project_ids:
+            pm.create_project(project_id, project_id)
+        previous = app_module._pm
+        app_module.set_pm(pm)
+        try:
+            client = TestClient(app_module.app, headers={'Host': '127.0.0.1'})
+
+            def request(index: int):
+                project_id = project_ids[index % len(project_ids)]
+                if index % 2:
+                    return client.get(f'/api/projects/{project_id}/manifest')
+                return client.get(f'/api/projects/{project_id}/graph/calltree',
+                                  params={'procedure': 'Work'})
+
+            for batch in range(4):
+                with ThreadPoolExecutor(max_workers=32) as pool:
+                    responses = list(pool.map(request, range(batch * 128, (batch + 1) * 128)))
+                if any(response.status_code != 200 for response in responses):
+                    raise RuntimeError(f'HTTP batch {batch + 1} returned a non-200 response')
+                active_readers = sum(reader.active for db in pm._db_pool.values()
+                                     for reader in db._readers)
+                rows.append({'batch': batch + 1, 'requests': len(responses),
+                             'databases': len(pm._db_pool), 'pins': sum(pm._db_pins.values()),
+                             'active_readers': active_readers})
+                if len(pm._db_pool) > 8 or pm._db_pins or active_readers:
+                    raise RuntimeError(f'HTTP batch {batch + 1} left the database pool over limit')
+        finally:
+            app_module.set_pm(previous)
+            pm.close_all()
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--modules', type=int, default=120, help='синтетических модулей на проект')
@@ -194,6 +238,13 @@ def main() -> int:
                             f"{metrics['peak_connections']}")
         rows.append('')
     report = '\n'.join(rows)
+    report += '\nПосле 4 серий по 128 HTTP-запросов манифеста индекса и графа по 16 проектам '
+    report += '(до 32 одновременно; холодный пул):\n'
+    manifest_rows = _manifest_pool_benchmark()
+    for row in manifest_rows:
+        report += (f"  серия {row['batch']}: запросов {row['requests']}; Database в пуле "
+                   f"{row['databases']} (предел 8); закреплений {row['pins']}; "
+                   f"активных читателей {row['active_readers']}\n")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report + '\n', encoding='utf-8')
     print(report)
