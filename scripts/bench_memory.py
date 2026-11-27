@@ -274,6 +274,59 @@ def _background_warm_benchmark() -> dict:
             pm.close_all()
 
 
+def _reader_idle_benchmark() -> dict:
+    """Всплеск читателей одного индекса и ленивая по времени очистка."""
+    import src.core.db as db_module
+    import src.core.project_manager as project_manager
+    from src.core.db import Database
+    from src.core.project_manager import ProjectManager
+
+    old_idle = Database.READER_IDLE_SEC
+    old_max_readers = Database.MAX_READERS
+    old_pm_idle = project_manager.READER_IDLE_SEC
+    old_db_idle = db_module.READER_IDLE_SEC
+    Database.READER_IDLE_SEC = 0.5
+    Database.MAX_READERS = 16
+    project_manager.READER_IDLE_SEC = 0.5
+    db_module.READER_IDLE_SEC = 0.5
+    try:
+        with tempfile.TemporaryDirectory(prefix='ariadna-reader-idle-bench-') as temp:
+            pm = ProjectManager(str(Path(temp) / 'data'))
+            pm.create_project('idle', 'synthetic')
+            db = pm.get_db('idle')
+            barrier = threading.Barrier(17)
+
+            def read(_):
+                with pm.read_lease('idle') as leased_db:
+                    barrier.wait(timeout=10)
+                    return leased_db.read_conn().execute('SELECT 1').fetchone()[0]
+
+            try:
+                with ThreadPoolExecutor(max_workers=16) as pool:
+                    futures = [pool.submit(read, index) for index in range(16)]
+                    barrier.wait(timeout=10)
+                    if not all(future.result(timeout=10) == 1 for future in futures):
+                        raise RuntimeError('idle reader benchmark query failed')
+                before = {'connections': sum(not reader._closed for reader in db._readers),
+                          'rss_mb': round(_rss_mb(), 1)}
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and sum(
+                        not reader._closed for reader in db._readers) > 1:
+                    time.sleep(0.02)
+                after = {'connections': sum(not reader._closed for reader in db._readers),
+                         'rss_mb': round(_rss_mb(), 1)}
+                if after['connections'] > 1:
+                    raise RuntimeError(f'idle reader cleanup left too many connections: {after}')
+                return {'idle_sec': 0.5, 'before': before, 'after': after}
+            finally:
+                pm.close_all()
+    finally:
+        Database.READER_IDLE_SEC = old_idle
+        Database.MAX_READERS = old_max_readers
+        project_manager.READER_IDLE_SEC = old_pm_idle
+        db_module.READER_IDLE_SEC = old_db_idle
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--modules', type=int, default=120, help='синтетических модулей на проект')
@@ -321,6 +374,10 @@ def main() -> int:
               f"  РѕС‚С‡С‘С‚РѕРІ {background['reports']}/{background['projects']}; Database РІ РїСѓР»Рµ "
               f"{background['databases']} (РїСЂРµРґРµР» 8); Р·Р°РєСЂРµРїР»РµРЅРёР№ {background['pins']}; "
               f"Р°РєС‚РёРІРЅС‹С… С‡РёС‚Р°С‚РµР»РµР№ {background['active_readers']}\n")
+    idle = _reader_idle_benchmark()
+    report += (f"\nВсплеск 16 читателей, ожидание порога {idle['idle_sec']} с:\n"
+               f"  до очистки: {idle['before']['connections']} читательских соединений; RSS {idle['before']['rss_mb']} МБ\n"
+               f"  после очистки: {idle['after']['connections']} читательских соединений; RSS {idle['after']['rss_mb']} МБ\n")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report + '\n', encoding='utf-8')
     print(report)

@@ -3,18 +3,18 @@ RSS, SQLite-соединения, файловые дескрипторы (Windo
 «До» — неограниченный пул со старым писателем; «после» — лимит 8 и отдельный writer.
 
 N=1
-  до: до поиска {'rss_mb': 29.1, 'sqlite_connections': 1, 'fd_or_handles': 121}; после поиска {'rss_mb': 29.8, 'sqlite_connections': 2, 'fd_or_handles': 124}
-  после: до поиска {'rss_mb': 28.6, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 29.4, 'sqlite_connections': 2, 'fd_or_handles': 124}
+  до: до поиска {'rss_mb': 29.6, 'sqlite_connections': 1, 'fd_or_handles': 123}; после поиска {'rss_mb': 30.2, 'sqlite_connections': 2, 'fd_or_handles': 126}
+  после: до поиска {'rss_mb': 29.0, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 29.8, 'sqlite_connections': 2, 'fd_or_handles': 126}
   пиковое число соединений при N=1 одновременных операциях: 2
 
 N=8
-  до: до поиска {'rss_mb': 34.2, 'sqlite_connections': 8, 'fd_or_handles': 156}; после поиска {'rss_mb': 37.7, 'sqlite_connections': 16, 'fd_or_handles': 180}
-  после: до поиска {'rss_mb': 28.7, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 34.1, 'sqlite_connections': 16, 'fd_or_handles': 180}
+  до: до поиска {'rss_mb': 34.8, 'sqlite_connections': 8, 'fd_or_handles': 158}; после поиска {'rss_mb': 37.9, 'sqlite_connections': 16, 'fd_or_handles': 182}
+  после: до поиска {'rss_mb': 29.1, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 34.4, 'sqlite_connections': 16, 'fd_or_handles': 182}
   пиковое число соединений при N=8 одновременных операциях: 16
 
 N=32
-  до: до поиска {'rss_mb': 51.2, 'sqlite_connections': 32, 'fd_or_handles': 276}; после поиска {'rss_mb': 61.0, 'sqlite_connections': 64, 'fd_or_handles': 372}
-  после: до поиска {'rss_mb': 28.6, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 39.6, 'sqlite_connections': 16, 'fd_or_handles': 180}
+  до: до поиска {'rss_mb': 51.6, 'sqlite_connections': 32, 'fd_or_handles': 278}; после поиска {'rss_mb': 60.9, 'sqlite_connections': 64, 'fd_or_handles': 374}
+  после: до поиска {'rss_mb': 29.2, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 40.4, 'sqlite_connections': 16, 'fd_or_handles': 182}
   пиковое число соединений при N=32 одновременных операциях: 64
 
 После 4 серий по 128 HTTP-запросов манифеста индекса и графа по 16 проектам (до 32 одновременно; холодный пул):
@@ -25,4 +25,8 @@ N=32
 
 Р¤РѕРЅРѕРІС‹Р№ РїСЂРѕРіСЂРµРІ РїРѕСЃР»Рµ Р·Р°РіСЂСѓР·РєРё СЃРїСЂР°РІРєРё РїСЂРё 32 РїР°СЂР°Р»Р»РµР»СЊРЅС‹С… С‡РёС‚Р°С‚РµР»СЏС… Рё 16 РїСЂРѕРµРєС‚Р°С…:
   РѕС‚С‡С‘С‚РѕРІ 16/16; Database РІ РїСѓР»Рµ 8 (РїСЂРµРґРµР» 8); Р·Р°РєСЂРµРїР»РµРЅРёР№ 0; Р°РєС‚РёРІРЅС‹С… С‡РёС‚Р°С‚РµР»РµР№ 0
+
+Всплеск 16 читателей, ожидание порога 0.5 с:
+  до очистки: 16 читательских соединений; RSS 83.6 МБ
+  после очистки: 1 читательских соединений; RSS 83.6 МБ
 

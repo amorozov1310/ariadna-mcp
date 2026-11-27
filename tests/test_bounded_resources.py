@@ -797,3 +797,68 @@ def test_process_lock_maps_keep_only_active_locks(tmp_path):
     assert registry_lock_key not in _REGISTRY_LOCKS
     assert glossary_lock_key not in glossary._locks
     pm.close_all()
+
+
+def test_idle_readers_are_trimmed_without_closing_leased_readers(tmp_path, monkeypatch):
+    import src.core.db as db_module
+    import src.core.project_manager as project_manager
+
+    monkeypatch.setattr(Database, 'MAX_READERS', 8)
+    monkeypatch.setattr(Database, 'READER_IDLE_SEC', 0.05)
+    monkeypatch.setattr(db_module, 'READER_IDLE_SEC', 0.05)
+    monkeypatch.setattr(project_manager, 'READER_IDLE_SEC', 0.05)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p', 'p')
+    db = pm.get_db('p')
+    barrier = threading.Barrier(9)
+
+    def burst(_):
+        with pm.read_lease('p') as leased_db:
+            reader = leased_db.read_conn()
+            barrier.wait(timeout=5)
+            return reader.execute('SELECT 1').fetchone()[0]
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(burst, index) for index in range(8)]
+            barrier.wait(timeout=5)
+            assert all(future.result(timeout=5) == 1 for future in futures)
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and sum(not reader._closed for reader in db._readers) > 1:
+            time.sleep(0.01)
+        assert sum(not reader._closed for reader in db._readers) <= 1
+
+        held = threading.Event()
+        release = threading.Event()
+        leased_reader = []
+        def hold_lease():
+            with pm.read_lease('p') as leased_db:
+                reader = leased_db.read_conn()
+                leased_reader.append(reader)
+                held.set()
+                release.wait(timeout=5)
+                return reader.execute('SELECT 1').fetchone()[0]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(hold_lease)
+            assert held.wait(5)
+            time.sleep(0.12)
+            assert not leased_reader[0]._closed
+            # Нагрузка и таймер очистки одновременно используют арендованные
+            # читатели; каждый запрос должен завершиться без ошибки SQLite.
+            def query(_):
+                with pm.read_lease('p') as leased_db:
+                    return leased_db.read_conn().execute('SELECT 1').fetchone()[0]
+            with ThreadPoolExecutor(max_workers=8) as load:
+                assert list(load.map(query, range(40))) == [1] * 40
+            assert not leased_reader[0]._closed
+            release.set()
+            assert future.result(timeout=5) == 1
+
+        trim_thread = pm._reader_trim_thread
+        pm.close_all()
+        assert trim_thread is not None and not trim_thread.is_alive()
+    finally:
+        release.set() if 'release' in locals() else None
+        pm.close_all()
