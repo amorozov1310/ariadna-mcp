@@ -203,6 +203,77 @@ def _manifest_pool_benchmark() -> list[dict]:
     return rows
 
 
+def _background_warm_benchmark() -> dict:
+    """Загрузить синтетическую справку под нагрузкой чтения 16 индексов."""
+    import shutil
+    from fastapi.testclient import TestClient
+    from src.core.project_manager import ProjectManager
+    from src.web import app as app_module
+    from tests.fixtures.generate_platform_help import context_book
+
+    import src.core.project_manager as project_manager
+    project_manager.DB_POOL_LIMIT = 8
+    fixture = ROOT / 'tests' / 'fixtures' / 'platform_check'
+    version = '8.3.28.1'
+    project_ids = [f'background_{index:02d}' for index in range(16)]
+    with tempfile.TemporaryDirectory(prefix='ariadna-background-bench-') as temp:
+        pm = ProjectManager(str(Path(temp) / 'data'))
+        previous = app_module._pm
+        app_module.set_pm(pm)
+        try:
+            for project_id in project_ids:
+                pm.create_project(project_id, project_id)
+                source = pm.projects_dir / project_id / 'sources' / 'sample' / 'xml'
+                shutil.copytree(fixture, source)
+                pm.add_source(project_id, 'sample', 'synthetic')
+                pm.reindex(project_id)
+                project = pm.get_project(project_id)
+                project.platform_version = ''
+                pm._save_project_to_disk(project_id, project)
+
+            client = TestClient(app_module.app, headers={'Host': '127.0.0.1'})
+            barrier = threading.Barrier(33)
+
+            def reader(worker: int) -> int:
+                barrier.wait(timeout=15)
+                total = 0
+                for turn in range(64):
+                    project_id = project_ids[(worker + turn) % len(project_ids)]
+                    with pm.read_lease(project_id) as db:
+                        total += db.read_conn().execute('SELECT COUNT(*) FROM modules').fetchone()[0]
+                return total
+
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                reads = [pool.submit(reader, index) for index in range(32)]
+                barrier.wait(timeout=15)
+                response = client.post('/api/admin/platform-help', data={'version': version},
+                                       files={'context': ('shcntx_ru.hbk', context_book(version))})
+                if response.status_code != 200:
+                    raise RuntimeError(f'platform help upload returned {response.status_code}')
+                if not all(future.result(timeout=60) > 0 for future in reads):
+                    raise RuntimeError('background benchmark readers observed an empty index')
+
+            for thread in [thread for thread in threading.enumerate()
+                           if thread.name == f'platform-check-warm-{version}']:
+                thread.join(timeout=60)
+                if thread.is_alive():
+                    raise RuntimeError('platform report coordinator did not finish')
+            from src.core.platform_check import wait_report_jobs
+            wait_report_jobs(list(pm._db_pool.values()))
+            archives = sum(bool(list(pm._index_path(pid).parent.glob('platform-check-*.zip')))
+                           for pid in project_ids)
+            active_readers = sum(reader.active for db in pm._db_pool.values() for reader in db._readers)
+            result = {'projects': len(project_ids), 'reports': archives,
+                      'databases': len(pm._db_pool), 'pins': sum(pm._db_pins.values()),
+                      'active_readers': active_readers}
+            if (archives != len(project_ids) or len(pm._db_pool) > 8 or pm._db_pins or active_readers):
+                raise RuntimeError(f'background warm benchmark failed: {result}')
+            return result
+        finally:
+            app_module.set_pm(previous)
+            pm.close_all()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--modules', type=int, default=120, help='синтетических модулей на проект')
@@ -245,6 +316,11 @@ def main() -> int:
         report += (f"  серия {row['batch']}: запросов {row['requests']}; Database в пуле "
                    f"{row['databases']} (предел 8); закреплений {row['pins']}; "
                    f"активных читателей {row['active_readers']}\n")
+    background = _background_warm_benchmark()
+    report += ('\nР¤РѕРЅРѕРІС‹Р№ РїСЂРѕРіСЂРµРІ РїРѕСЃР»Рµ Р·Р°РіСЂСѓР·РєРё СЃРїСЂР°РІРєРё РїСЂРё 32 РїР°СЂР°Р»Р»РµР»СЊРЅС‹С… С‡РёС‚Р°С‚РµР»СЏС… Рё 16 РїСЂРѕРµРєС‚Р°С…:\n'
+              f"  РѕС‚С‡С‘С‚РѕРІ {background['reports']}/{background['projects']}; Database РІ РїСѓР»Рµ "
+              f"{background['databases']} (РїСЂРµРґРµР» 8); Р·Р°РєСЂРµРїР»РµРЅРёР№ {background['pins']}; "
+              f"Р°РєС‚РёРІРЅС‹С… С‡РёС‚Р°С‚РµР»РµР№ {background['active_readers']}\n")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report + '\n', encoding='utf-8')
     print(report)
