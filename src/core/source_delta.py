@@ -118,7 +118,7 @@ def _path(value: str) -> str:
         if (any(c in _WINDOWS_RESERVED_CHARS for c in part)
                 or part.rstrip(" .") != part):
             raise DeltaError(f"Недопустимый путь файла: {value!r}")
-    if any(part.startswith("Template.") for part in parts):
+    if any(part.casefold().startswith("template.") for part in parts):
         raise DeltaError(f"Макеты нельзя передавать: {value!r}")
     return value
 
@@ -180,7 +180,7 @@ def _safe_tree(root: Path) -> None:
 
 def _managed(path: str) -> bool:
     parts = PurePosixPath(path).parts
-    return not any(part.startswith("Template.") or part.casefold() == 'logs' for part in parts)
+    return not any(part.casefold().startswith("template.") or part.casefold() == 'logs' for part in parts)
 
 
 def manifest(root: Path, cache_path: Path) -> dict:
@@ -212,7 +212,7 @@ def manifest(root: Path, cache_path: Path) -> dict:
                 rel = _path(rel)
                 st = full.stat()
                 prior = old.get(rel, {})
-                if (cache_valid and time.time_ns() - st.st_mtime_ns > 5_000_000_000 and prior.get("size") == st.st_size
+                if (os.name != "nt" and cache_valid and time.time_ns() - st.st_mtime_ns > 5_000_000_000 and prior.get("size") == st.st_size
                         and prior.get("mtime_ns") == st.st_mtime_ns
                         and prior.get("ctime_ns") == st.st_ctime_ns
                         and prior.get("ino") == st.st_ino):
@@ -342,19 +342,26 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
             continue
         if target.is_file() or target.is_symlink():
             target.unlink(missing_ok=True)
+    # Смена регистра каталога выполняется через промежуточное имя. Откатить
+    # операции нужно в обратном порядке, используя целевой путь каждого шага:
+    # для вложенных Old/Sub -> old/sub это сначала old/sub -> old/Sub, затем
+    # old -> Old. Поиск только по casefold здесь создавал два дерева на POSIX.
     for move in reversed(data.get("dir_moves", [])):
-        old_rel, new_rel, temp_rel = move
-        _, dirs = _actual_paths(root)
-        actual_rel = dirs.get(old_rel.casefold())
-        candidate = root.joinpath(*PurePosixPath(actual_rel).parts) if actual_rel else None
+        old_rel, new_rel, temp_rel = move[:3]
+        if len(move) > 3 and move[3] == "planned":
+            continue
+        source = root.joinpath(*PurePosixPath(new_rel).parts)
         temp = root.joinpath(*PurePosixPath(temp_rel).parts)
-        old = root.joinpath(*PurePosixPath(old_rel).parts)
-        if candidate is not None and actual_rel != old_rel:
-            _merge_dir_contents(candidate, temp)
-            candidate.rmdir()
+        destination = root.joinpath(*PurePosixPath(old_rel).parts)
+        if source.is_dir() and new_rel != old_rel:
+            rollback_temp = source.with_name(f".delta-rollback-{os.getpid()}-{len(old_rel)}")
+            os.replace(source, rollback_temp)
+            destination.mkdir(parents=True, exist_ok=True)
+            _merge_dir_contents(rollback_temp, destination)
+            rollback_temp.rmdir()
         if temp.is_dir():
-            old.mkdir(parents=True, exist_ok=True)
-            _merge_dir_contents(temp, old)
+            destination.mkdir(parents=True, exist_ok=True)
+            _merge_dir_contents(temp, destination)
             temp.rmdir()
     for rel in data.get("old", []):
         saved = backup.joinpath(*PurePosixPath(rel).parts)
@@ -388,18 +395,21 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
 
 
 def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: str,
-          current: dict, workspace: Path | None = None, *, lock_held: bool = False) -> dict:
+          current: dict, workspace: Path | None = None, *, lock_held: bool = False,
+          journal_context: dict | None = None) -> dict:
     root = Path(root)
     workspace = Path(workspace) if workspace is not None else root.parent / f".{root.name}-delta-state"
     if not lock_held:
         with transaction_lock(workspace):
             recover(root, workspace, lock_held=True)
-            return _apply_locked(root, archive, target_manifest, base_version, current, workspace)
-    return _apply_locked(root, archive, target_manifest, base_version, current, workspace)
+            return _apply_locked(root, archive, target_manifest, base_version, current, workspace,
+                                 journal_context=journal_context)
+    return _apply_locked(root, archive, target_manifest, base_version, current, workspace,
+                         journal_context=journal_context)
 
 
 def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_version: str,
-                  current: dict, workspace: Path) -> dict:
+                  current: dict, workspace: Path, *, journal_context: dict | None = None) -> dict:
     """Устанавливает архив разницы; вызывающий удерживает reindex lock."""
     root = Path(root)
     if current["version"] != base_version:
@@ -480,13 +490,16 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
                 out.parent.mkdir(parents=True, exist_ok=True)
                 h = hashlib.sha256()
                 size = 0
-                with zf.open(info) as src, out.open("wb") as dst:
-                    while block := src.read(1024 * 1024):
-                        size += len(block)
-                        if size > spec["size"]:
-                            raise DeltaError(f"Размер файла не совпадает: {rel}")
-                        h.update(block)
-                        dst.write(block)
+                try:
+                    with zf.open(info) as src, out.open("wb") as dst:
+                        while block := src.read(1024 * 1024):
+                            size += len(block)
+                            if size > spec["size"]:
+                                raise DeltaError(f"Размер файла не совпадает: {rel}")
+                            h.update(block)
+                            dst.write(block)
+                except (RuntimeError, NotImplementedError) as exc:
+                    raise DeltaError(f"Зашифрованная запись или неподдерживаемый метод ZIP: {rel}") from exc
                 if size != spec["size"] or h.hexdigest() != spec["sha256"]:
                     raise DeltaError(f"Размер или SHA-256 не совпадает: {rel}")
                 supplied.add(rel)
@@ -526,7 +539,8 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
                 # написание на исходный путь дочернего каталога, чтобы запланировать
                 # и вложенную смену регистра (Old/Sub -> old/sub).
                 source = prior
-                for old_parent, new_parent, _ in dir_moves:
+                for move in dir_moves:
+                    old_parent, new_parent = move[:2]
                     old_parts = PurePosixPath(old_parent).parts
                     source_parts = PurePosixPath(source).parts
                     if (len(source_parts) > len(old_parts)
@@ -536,18 +550,25 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
                                                *source_parts[len(old_parts):]).as_posix()
                 if source != rel:
                     temp_rel = str(PurePosixPath(source).with_name(f".delta-case-{os.getpid()}-{len(dir_moves)}"))
-                    dir_moves.append([source, rel, temp_rel])
+                    dir_moves.append([source, rel, temp_rel, "planned"])
         journal_data = {"backup": str(backup), "old": sorted(affected & set(old_files)),
                         "new": sorted(changed), "staging": str(staging),
                         "created_dirs": sorted(created_dirs), "removed_dirs": [],
                         "dir_moves": dir_moves, "root_created": root_created,
                         "committed": False}
+        if journal_context:
+            journal_data.update(journal_context)
         _atomic_json(journal, journal_data)
         _checkpoint('c')
         root.mkdir(parents=True, exist_ok=True)
         _safe_tree(root)
-        for old_rel, new_rel, temp_rel in dir_moves:
+        for move in dir_moves:
+            old_rel, new_rel, temp_rel = move[:3]
+            move[3] = "moving"
+            _atomic_json(journal, journal_data)
             _rename_case(root, old_rel, new_rel, temp_rel)
+            move[3] = "moved"
+            _atomic_json(journal, journal_data)
         actual_files, _ = _actual_paths(root)
         for rel in sorted(affected & set(old_files), key=lambda x: x.count("/"), reverse=True):
             existing = actual_files.get(rel.casefold(), rel)

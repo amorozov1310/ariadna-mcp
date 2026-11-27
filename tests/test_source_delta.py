@@ -216,6 +216,29 @@ def test_target_manifest_uses_same_exclusion_filter_as_manifest(tmp_path):
                                current["version"], current)
 
 
+def test_template_exclusion_is_case_insensitive_on_client_and_server(tmp_path):
+    import importlib.util
+
+    root = tmp_path / "xml"
+    root.mkdir()
+    (root / "Template.Form.xml").write_bytes(b"preserve")
+    current = source_delta.manifest(root, tmp_path / "cache.json")
+    assert "Template.Form.xml" not in current["files"]
+    for name in ("template.Form.xml", "TEMPLATE.Form.xml"):
+        assert not source_delta._managed(name)
+        with pytest.raises(source_delta.DeltaError):
+            source_delta._path(name)
+        target = _target({name: b"overwrite"})
+        with pytest.raises(source_delta.DeltaError):
+            source_delta.apply(root, _archive({name: b"overwrite"}), target,
+                               current["version"], current)
+    assert (root / "Template.Form.xml").read_bytes() == b"preserve"
+    spec = importlib.util.spec_from_file_location("build_delta", Path("scripts/build_delta.py"))
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    assert not builder._managed("template.Form.xml")
+
+
 def test_delta_delete_large_majority_requires_full_transfer(tmp_path):
     root = tmp_path / "xml"
     root.mkdir()
@@ -292,6 +315,28 @@ def test_directory_case_rename_preserves_excluded_logs_and_rollback_spelling(mon
     assert (root / "Old" / "logs" / "keep.txt").read_bytes() == b"keep"
     assert "Old" in {entry.name for entry in os.scandir(root)}
     assert "old" not in {entry.name for entry in os.scandir(root)}
+
+
+def test_nested_case_rename_rollback_restores_each_original_spelling(monkeypatch, tmp_path):
+    root = tmp_path / "xml"
+    old = root / "Old" / "Sub" / "item.xml"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"before")
+    current = source_delta.manifest(root, tmp_path / "cache.json")
+    wanted = {"old/sub/item.xml": b"after"}
+
+    def fail_after_install(point):
+        if point == "e":
+            raise RuntimeError("stop after installing files")
+
+    monkeypatch.setattr(source_delta, "_checkpoint", fail_after_install)
+    with pytest.raises(RuntimeError, match="stop"):
+        source_delta.apply(root, _archive(wanted), _target(wanted), current["version"],
+                           current, tmp_path / "state")
+    assert (root / "Old" / "Sub" / "item.xml").read_bytes() == b"before"
+    assert "Old" in {entry.name for entry in os.scandir(root)}
+    assert "old" not in {entry.name for entry in os.scandir(root)}
+    assert not source_delta._journal_path(tmp_path / "state").exists()
 
 
 def test_directory_case_rename_moves_excluded_logs_with_tree(tmp_path):
@@ -459,7 +504,9 @@ def test_manifest_rehashes_fresh_file_even_with_reused_windows_identity(monkeypa
         return actual
 
     monkeypatch.setattr(Path, "stat", reused_identity)
-    monkeypatch.setattr(source_delta.time, "time_ns", lambda: old_stat.st_mtime_ns + 1_000_000_000)
+    # File достаточно старый, чтобы старая реализация попыталась взять SHA
+    # из кэша при совпавших size/mtime/ctime/ino.
+    monkeypatch.setattr(source_delta.time, "time_ns", lambda: old_stat.st_mtime_ns + 10_000_000_000)
     second = source_delta.manifest(root, cache)
     assert second["version"] != first["version"]
     assert second["files"]["item.xml"]["sha256"] == hashlib.sha256(b"new").hexdigest()
@@ -483,13 +530,34 @@ def test_client_and_server_share_logs_file_exclusion(tmp_path):
     assert builder._managed("Logs") == source_delta._managed("Logs")
 
 
+@pytest.mark.parametrize("failure", [RuntimeError("encrypted"), NotImplementedError("method")])
+def test_unsupported_or_encrypted_zip_entries_are_bad_delta(tmp_path, monkeypatch, failure):
+    root = tmp_path / "xml"
+    current = source_delta.manifest(root, tmp_path / "cache.json")
+    wanted = {"new.xml": b"payload"}
+    target = _target(wanted)
+    original_open = zipfile.ZipFile.open
+    archive = _archive(wanted)
+
+    def fail_open(self, name, *args, **kwargs):
+        if getattr(name, "filename", name) == "new.xml":
+            raise failure
+        return original_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", fail_open)
+    with pytest.raises(source_delta.DeltaError, match="Зашифрованная запись"):
+        source_delta.apply(root, archive, target, current["version"], current)
+
+
 def test_project_startup_recovers_source_without_xml_path(tmp_path):
     from src.core.project_manager import ProjectManager
 
     data = tmp_path / "data"
     pm = ProjectManager(data)
     pm.create_project("p", "p")
-    pm.add_source("p", "s", "source")
+    source = pm.add_source("p", "s", "source")
+    source.xml_path = 'sources/s/xml'
+    pm._save_registry()
     root = data / "projects" / "p" / "sources" / "s" / "xml"
     root.mkdir(parents=True)
     workspace = pm._source_delta_workspace("p", "s")
@@ -502,7 +570,7 @@ def test_project_startup_recovers_source_without_xml_path(tmp_path):
     staging.mkdir()
     source_delta._atomic_json(source_delta._journal_path(workspace), {
         "backup": str(backup), "staging": str(staging), "old": ["old.xml"],
-        "new": ["new.xml"], "created_dirs": [], "committed": False,
+        "new": ["new.xml"], "created_dirs": [], "prior_xml_path": "", "committed": False,
     })
     pm.close_all()
     resumed = ProjectManager(data)

@@ -250,7 +250,7 @@ class ProjectManager:
                 # Корпус из slow-тестов остаётся нетронутым: его журналы не лежат
                 # в каталоге XML. Восстановление касается только журнала проекта
                 # и выполняется, лишь если удалось взять его блокировку.
-                source_delta.recover(root, workspace)
+                self._recover_source_delta(project.id, source.id, root, workspace)
 
     def _retire_project_db(self, project_id: str) -> None:
         """Закрыть Database проекта и убрать его из пула — перед удалением
@@ -706,7 +706,7 @@ class ProjectManager:
             workspace = self._source_delta_workspace(project_id, source_id)
             root = self._source_file_root(project_id, source_id, source)
             with source_delta.transaction_lock(workspace):
-                source_delta.recover(root, workspace, lock_held=True)
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
                 return self._update_source_unlocked(project_id, source_id, label, source_type,
                                                     xml_archive, xml_archive_filename)
 
@@ -826,7 +826,7 @@ class ProjectManager:
             workspace = self._source_delta_workspace(project_id, source_id)
             root = self._source_file_root(project_id, source_id, source)
             with source_delta.transaction_lock(workspace):
-                source_delta.recover(root, workspace, lock_held=True)
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
                 self._remove_source(project_id, source_id)
                 self._source_manifest_cache_path(project_id, source_id).unlink(missing_ok=True)
             try:
@@ -887,6 +887,24 @@ class ProjectManager:
     def _source_delta_workspace(self, project_id: str, source_id: str) -> Path:
         return self.projects_dir / project_id / '.source-delta' / source_id
 
+    def _recover_source_delta(self, project_id: str, source_id: str, root: Path,
+                              workspace: Path, *, lock_held: bool = False) -> bool:
+        """Восстановить файлы и регистрацию пути из журнала одной транзакции."""
+        journal = source_delta._journal_path(workspace)
+        try:
+            data = json.loads(journal.read_text('utf-8')) if journal.exists() else {}
+        except (OSError, ValueError):
+            data = {}
+        recovered = source_delta.recover(root, workspace, lock_held=lock_held)
+        if recovered and not data.get('committed') and 'prior_xml_path' in data:
+            with self._registry_lock():
+                project = self._load_registry().get(project_id)
+                source = next((s for s in project.sources if s.id == source_id), None) if project else None
+                if source is not None and source.xml_path != data['prior_xml_path']:
+                    source.xml_path = data['prior_xml_path']
+                    self._save_registry()
+        return recovered
+
     def _is_local_source_root(self, root: Path, project_id: str, source_id: str) -> bool:
         local_root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
         try:
@@ -933,7 +951,7 @@ class ProjectManager:
             root = self._source_file_root(project_id, source_id)
             workspace = self._source_delta_workspace(project_id, source_id)
             with source_delta.transaction_lock(workspace):
-                source_delta.recover(root, workspace, lock_held=True)
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
                 return source_delta.manifest(root, self._source_manifest_cache_path(project_id, source_id))
 
     def apply_source_delta(self, project_id: str, source_id: str, archive: BinaryIO,
@@ -949,7 +967,7 @@ class ProjectManager:
             # Восстановить предыдущую транзакцию до вычисления версии, иначе
             # base_version может описать файлы, которые сейчас откатятся.
             with source_delta.transaction_lock(workspace):
-                source_delta.recover(root, workspace, lock_held=True)
+                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
                 cache = self._source_manifest_cache_path(project_id, source_id)
                 current = source_delta.manifest(root, cache)
                 if current['version'] != base_version:
@@ -957,6 +975,7 @@ class ProjectManager:
                 # Регистрируем путь до публикации, чтобы сбой после commit не
                 # оставил файлы невидимыми для индексатора.
                 registered = False
+                prior_xml_path = source.xml_path
                 if not source.xml_path:
                     with self._registry_lock():
                         source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
@@ -966,7 +985,8 @@ class ProjectManager:
                             registered = True
                 try:
                     return source_delta.apply(root, archive, target_manifest, base_version, current,
-                                              workspace, lock_held=True)
+                                              workspace, lock_held=True,
+                                              journal_context={'prior_xml_path': prior_xml_path})
                 except Exception:
                     if registered:
                         with self._registry_lock():
@@ -2276,6 +2296,12 @@ class ProjectManager:
         ).fetchall()]
         if obj_ids:
             placeholders = ','.join('?' * len(obj_ids))
+            module_ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM modules WHERE object_id IN ({placeholders})", obj_ids
+            ).fetchall()]
+            if module_ids:
+                module_placeholders = ','.join('?' * len(module_ids))
+                conn.execute(f"DELETE FROM module_text_fts WHERE rowid IN ({module_placeholders})", module_ids)
             conn.execute(f"DELETE FROM forms WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM attributes WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM subsystem_content WHERE subsystem_id IN ({placeholders})", obj_ids)
@@ -2284,6 +2310,9 @@ class ProjectManager:
             conn.execute(f"DELETE FROM object_queries WHERE object_id IN ({placeholders})", obj_ids)
             conn.execute(f"DELETE FROM object_query_refs WHERE object_id IN ({placeholders})", obj_ids)
         conn.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
+        # FTS5 не поддерживает FK; каскад мог удалить модули и оставить их
+        # rowid в полнотекстовом индексе.
+        conn.execute("DELETE FROM module_text_fts WHERE rowid NOT IN (SELECT id FROM modules)")
         db.mark_graph_dirty()
         conn.execute("INSERT INTO metadata_fts(metadata_fts) VALUES('rebuild')")
         conn.execute("INSERT INTO attributes_fts(attributes_fts) VALUES('rebuild')")

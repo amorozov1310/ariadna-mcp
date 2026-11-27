@@ -16,7 +16,7 @@ def _raise_walk_error(error):
 
 def _managed(path: str) -> bool:
     parts = Path(path).parts
-    return not any(part.startswith('Template.') or part.casefold() == 'logs' for part in parts)
+    return not any(part.casefold().startswith('template.') or part.casefold() == 'logs' for part in parts)
 
 
 def _is_reparse_point(path: Path) -> bool:

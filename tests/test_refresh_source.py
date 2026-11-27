@@ -132,6 +132,8 @@ def test_delta_without_configuration_xml_clears_old_metadata(web):
     conn = pm.get_db('p1').read_conn()
     assert conn.execute('SELECT COUNT(*) FROM metadata_objects').fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM modules WHERE source_id='main'").fetchone()[0] > 0
+    assert conn.execute('''SELECT COUNT(*) FROM module_text_fts
+                           WHERE rowid NOT IN (SELECT id FROM modules)''').fetchone()[0] == 0
 
 
 def test_delta_refresh_rejects_stale_manifest(web):
@@ -193,7 +195,18 @@ def test_delta_body_limit_is_checked_before_form_parse(web, monkeypatch):
     response = client.post('/api/projects/p1/sources/main/delta', data={
         'base_version': 'unused', 'target_manifest': '{}'},
         files={'delta_archive': ('delta.zip', b'archive contents', 'application/zip')})
-    assert response.status_code == 413
+    assert response.status_code == 413, response.text
+
+
+def test_delta_manifest_part_limit_is_enforced_during_form_parse(web, monkeypatch):
+    _, client, _ = web
+    import src.web.routes_update as routes_update
+    monkeypatch.setattr(routes_update, '_MAX_MANIFEST_TEXT', 32)
+    response = client.post('/api/projects/p1/sources/main/delta', data={
+        'base_version': 'unused', 'target_manifest': 'x' * 128,
+        'wait': '0', 'timeout': '1'},
+        files={'delta_archive': ('delta.zip', b'', 'application/zip')})
+    assert response.status_code == 413, response.text
 
 
 def test_manifest_recovers_pending_transaction_before_returning_version(web, monkeypatch):
@@ -264,6 +277,26 @@ def test_refresh_retries_already_running_until_launch_succeeds(web, monkeypatch)
     response = client.post('/api/projects/p1/sources/main/refresh', data={'timeout': '5'})
     assert response.status_code == 200, response.text
     assert response.json()['status'] == 'ready'
+    assert calls >= 2
+
+
+def test_refresh_wait_zero_retries_launch_race_without_waiting_for_completion(web, monkeypatch):
+    pm, client, _ = web
+    real_reindex = pm.reindex_async
+    calls = 0
+
+    def busy_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {'status': 'already_running'}
+        return real_reindex(*args, **kwargs)
+
+    monkeypatch.setattr(pm, 'reindex_async', busy_once)
+    response = client.post('/api/projects/p1/sources/main/refresh',
+                           data={'wait': '0', 'timeout': '5'})
+    assert response.status_code == 202, response.text
+    assert response.json()['status'] == 'started'
     assert calls >= 2
 
 

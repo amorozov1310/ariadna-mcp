@@ -56,7 +56,10 @@
   примерно как у самой выгрузки (у крупной типовой — около 9 ГБ).
 - **curl.exe** — есть в Windows 10 1803 и новее.
 
-Скопируйте `scripts/update_from_infobase.ps1` на машину робота.
+Скопируйте на машину робота оба файла — `scripts/update_from_infobase.ps1` и
+`scripts/build_delta.py` — в один каталог. Скрипт запускает Python-файл из
+соседнего каталога, поэтому сохраняйте структуру, например:
+`D:\Ariadna\update_from_infobase.ps1` и `D:\Ariadna\build_delta.py`.
 
 ## 3. Первый запуск — вручную
 

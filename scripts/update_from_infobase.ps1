@@ -223,7 +223,9 @@ function Invoke-DeltaRefresh($Item, [int]$Number, [int]$Attempt = 1, [long]$Dead
               '-F', "delta_archive=@$zip;type=application/zip")
     if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
     do {
-        $remaining = [Math]::Max(1, [int](($Deadline - $script:DeltaStopwatch.ElapsedMilliseconds) / 1000))
+        $leftMs = $Deadline - $script:DeltaStopwatch.ElapsedMilliseconds
+        if ($leftMs -le 0) { Fail 2 'Истёк общий тайм-аут обновления до отправки разницы' }
+        $remaining = [Math]::Max(1, [int][Math]::Ceiling($leftMs / 1000))
         $postArgs = $curl + @('-F', "timeout=$remaining", '--max-time', "$($remaining + 60)")
         $status = & curl.exe @postArgs "$base/delta"
         $body = if (Test-Path $resp) { Get-Content $resp -Raw -Encoding UTF8 } else { '' }

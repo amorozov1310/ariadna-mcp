@@ -60,7 +60,7 @@ async def _reindex_source(pm, project_id: str, source_id: str, wait: str,
         result = pm.reindex_async(project_id, source_id=source_id)
         if result['status'] != 'already_running':
             break
-        if no_wait or time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
                                  'detail': 'Переиндексация уже выполняется'}, status_code=409)
         await asyncio.sleep(min(_POLL_SEC, max(0, deadline - time.monotonic())))
@@ -147,8 +147,13 @@ async def refresh_source_delta(request: Request, project_id: str, source_id: str
     if length > max_body:
         raise HTTPException(413, 'Размер запроса превышает лимит')
     try:
-        form = await request.form(max_files=1, max_fields=5, max_part_size=max_body)
+        # Starlette применяет max_part_size к обычным текстовым multipart-
+        # частям; файловый ZIP продолжает ограничиваться max_body и ниже.
+        form = await request.form(max_files=1, max_fields=5, max_part_size=_MAX_MANIFEST_TEXT)
     except Exception as e:
+        detail = getattr(e, 'detail', '')
+        if 'maximum size' in (str(e) + str(detail)).lower() or 'max_part_size' in str(e).lower():
+            raise HTTPException(413, 'Целевой манифест превышает лимит размера') from e
         raise HTTPException(400, f'Некорректная форма разницы: {e}') from e
     archive = form.get('delta_archive')
     if archive is None or not hasattr(archive, 'file') or not hasattr(archive, 'filename'):
