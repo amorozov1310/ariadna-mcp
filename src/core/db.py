@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import zlib
+from collections import OrderedDict
 from datetime import datetime
 
 
@@ -475,6 +476,11 @@ class _ReaderConnection:
 class Database:
     """Per-project SQLite database wrapper."""
 
+    # Потоки Web UI/MCP могут обращаться к одному индексу. Держим максимум
+    # восемь лениво открываемых читателей на индекс; вытесненный поток при
+    # следующем запросе получит новое соединение.
+    MAX_READERS = 8
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.rebuild_marker_path = db_path + '.reindex-required'
@@ -489,7 +495,7 @@ class Database:
         # очистка временных каталогов падали с WinError 32. Поколение
         # растёт при каждом close(): поток, чьё соединение закрыли извне,
         # замечает это в read_conn и открывает новое.
-        self._readers: set[_ReaderConnection] = set()
+        self._readers: OrderedDict[_ReaderConnection, None] = OrderedDict()
         self._readers_lock = threading.Lock()
         self._generation = 0
         # Индекс удаляется (delete_project): читающие соединения больше не
@@ -563,7 +569,10 @@ class Database:
         Callers must never write through this connection."""
         conn = getattr(self._local, 'conn', None)
         if conn is not None and getattr(self._local, 'generation', None) == self._generation:
-            return conn
+            with self._readers_lock:
+                if not conn._closed and conn in self._readers:
+                    self._readers.move_to_end(conn)
+                    return conn
         if self._retired:
             raise IndexRemovedError(self.db_path)
         # Соединения нет или его закрыл close() из другого потока.
@@ -584,8 +593,11 @@ class Database:
         with self._readers_lock:
             if self._retired:
                 raise IndexRemovedError(self.db_path)
+            while len(self._readers) >= self.MAX_READERS:
+                oldest, _ = self._readers.popitem(last=False)
+                oldest.close()
             conn = _ReaderConnection(self._open_with_retry(), self._closed_reader_error)
-            self._readers.add(conn)
+            self._readers[conn] = None
             self._local.generation = self._generation
         self._local.conn = conn
         return conn
@@ -596,7 +608,7 @@ class Database:
         if conn is not None:
             conn.close()
             with self._readers_lock:
-                self._readers.discard(conn)
+                self._readers.pop(conn, None)
             self._local.conn = None
 
     def _closed_reader_error(self) -> sqlite3.Error:
@@ -720,6 +732,10 @@ class Database:
         if self.conn:
             self.conn.close()
             self.conn = None
+        self.close_readers()
+
+    def close_readers(self):
+        """Закрыть все читатели этого индекса и сбросить их поколение."""
         # Читающие соединения всех потоков: открыты с check_same_thread=False,
         # поэтому закрывать их отсюда можно. Их потоки при следующем
         # read_conn увидят новое поколение и откроют соединение заново.

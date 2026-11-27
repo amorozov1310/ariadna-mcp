@@ -13,12 +13,14 @@ import sqlite3
 import time
 import os
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import BinaryIO
+from weakref import WeakValueDictionary
 
 from . import parser_fingerprint
 from .archives import extract_archive
@@ -29,6 +31,12 @@ from .search import SearchEngine
 from . import source_delta
 
 logger = logging.getLogger('ariadna')
+
+# В памяти остаётся не больше восьми открытых объектов Database. Каждый из
+# них отдельно ограничивает читающие соединения (Database.MAX_READERS).
+DB_POOL_LIMIT = 8
+BASE_DIFF_CACHE_LIMIT = 64
+BROKEN_CALL_CACHE_LIMIT = 64
 
 # Блокировка переиндексации — на процесс и на (data_dir, project_id), а не
 # на экземпляр. main.py держит один ProjectManager на процесс (общий для Web
@@ -196,7 +204,7 @@ class ProjectManager:
         self.platform_help = PlatformHelpStore((self.index_dir or self.data_dir) / 'platform-help')
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
-        self._db_pool: dict[str, Database] = {}
+        self._db_pool: OrderedDict[str, Database] = OrderedDict()
         # Пул открывают несколько потоков (пул SDK, фоновая переиндексация):
         # без блокировки два потока создавали два Database на один проект, и
         # writer одного терялся.
@@ -207,14 +215,15 @@ class ProjectManager:
         self._registry_sig: tuple[int, int] | None = None
         # Последняя сводка отличий по паре (проект, с чем, источник): (ключ,
         # BaseDiff) — см. _diff_between. На крупной конфигурации — секунды.
-        self._base_diffs: dict[tuple, tuple] = {}
+        self._base_diffs: OrderedDict[tuple, tuple] = OrderedDict()
         self._base_diff_lock = threading.Lock()
         # Сравнение одной пары считается одним потоком (остальные ждут его
         # результат); фоновый прогрев — warm_diffs.
-        self._diff_pair_locks: dict[tuple, threading.Lock] = {}
+        # Слабые ссылки оставляют только блокировки активных вызовов.
+        self._diff_pair_locks = WeakValueDictionary()
         self._warming: dict[str, threading.Thread] = {}
         # project_id -> (ключ состояния индекса, результат find_broken_calls)
-        self._broken_calls: dict[str, tuple] = {}
+        self._broken_calls: OrderedDict[str, tuple] = OrderedDict()
         # Фоновые переиндексации (reindex_async) — close_all их дожидается.
         self._reindexing: set[threading.Thread] = set()
         # Восстановление схемы идёт через одного воркера: несколько больших
@@ -262,6 +271,28 @@ class ProjectManager:
             db = self._db_pool.pop(project_id, None)
         if db is not None:
             db.retire()
+
+    def _invalidate_analysis_caches(self, project_id: str) -> None:
+        """Освободить результаты, зависящие от индекса проекта."""
+        with self._base_diff_lock:
+            self._broken_calls.pop(project_id, None)
+            for key in [key for key in self._base_diffs if project_id in key[:2]]:
+                self._base_diffs.pop(key, None)
+            for key in list(self._diff_pair_locks):
+                if project_id in key[:2]:
+                    self._diff_pair_locks.pop(key, None)
+
+    def _forget_project_resources(self, project_id: str) -> None:
+        """Удалить кэши и завершённые задачи, привязанные к удалённому проекту."""
+        self._invalidate_analysis_caches(project_id)
+        with self._base_diff_lock:
+            self._warm_failed.pop(project_id, None)
+            self._checks_failed.pop(project_id, None)
+            for mapping in (self._warming, self._checks_warming):
+                thread = mapping.get(project_id)
+                if thread is None or not thread.is_alive():
+                    mapping.pop(project_id, None)
+        self._index_errors.pop(project_id, None)
 
     # ============================================
     # REGISTRY
@@ -616,6 +647,7 @@ class ProjectManager:
                 raise KeyError(f"Project '{project_id}' not found")
 
         self._retire_project_db(project_id)
+        self._forget_project_resources(project_id)
 
         for path in dict.fromkeys((project_dir, index_parent)):
             if not path.exists():
@@ -1064,10 +1096,12 @@ class ProjectManager:
             db = self._db_pool.get(project_id)
             if db is not None and db.conn:
                 if not db.file_replaced():
+                    self._db_pool.move_to_end(project_id)
                     return db
                 logger.warning("Файл индекса проекта %s удалён или заменён снаружи — "
                                "индекс открывается заново", project_id)
             if db is not None:
+                self._db_pool.pop(project_id, None)
                 db.close()
 
             # Открыть (и тем более создать) индекс — только для проекта из
@@ -1084,6 +1118,9 @@ class ProjectManager:
             db = Database(db_path)
             db.connect()
             db.init_schema()
+            while len(self._db_pool) >= DB_POOL_LIMIT:
+                _, evicted = self._db_pool.popitem(last=False)
+                evicted.close()
             self._db_pool[project_id] = db
             if db.stale_schema_recreated or db.rebuild_required:
                 # Обработать до снятия блокировки пула, чтобы другой запрос
@@ -1341,6 +1378,8 @@ class ProjectManager:
         pair = (project_id, base_id, *self._diff_sources(project_id, base_id, source_id))
         with self._base_diff_lock:
             cached = self._base_diffs.get(pair)
+            if cached is not None:
+                self._base_diffs.move_to_end(pair)
         return cached[1] if cached and cached[0] == key else None
 
     def _diff_between(self, project_id: str, base_id: str, source_id: str | None = None):
@@ -1366,6 +1405,9 @@ class ProjectManager:
                 diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, src, base_src)
                 with self._base_diff_lock:
                     self._base_diffs[pair] = (key, diff)
+                    self._base_diffs.move_to_end(pair)
+                    while len(self._base_diffs) > BASE_DIFF_CACHE_LIMIT:
+                        self._base_diffs.popitem(last=False)
         return diff
 
     def warm_diffs(self, project_id: str, release_id: str = '') -> bool:
@@ -1582,6 +1624,8 @@ class ProjectManager:
         key = self._diff_key(self.get_db(project_id))
         with self._base_diff_lock:
             cached = self._broken_calls.get(project_id)
+            if cached is not None:
+                self._broken_calls.move_to_end(project_id)
         return bool(cached and cached[0] == key)
 
     def warm_broken_calls(self, project_id: str) -> bool:
@@ -1634,6 +1678,9 @@ class ProjectManager:
             cached = (key, find_broken_calls(conn, read_module=db.read_module_text))
             with self._base_diff_lock:
                 self._broken_calls[project_id] = cached
+                self._broken_calls.move_to_end(project_id)
+                while len(self._broken_calls) > BROKEN_CALL_CACHE_LIMIT:
+                    self._broken_calls.popitem(last=False)
         result = cached[1]
         if not source_id and not module_name:
             return result
@@ -1736,6 +1783,11 @@ class ProjectManager:
         from .xml_walker import XMLWalker
 
         project, db = self._mark_indexing(project_id)
+        # Читатели держат свои SQLite handles дольше одного запроса. Их
+        # закрытие перед переиндексацией освобождает файловые дескрипторы;
+        # новые запросы при необходимости откроют их повторно.
+        db.close_readers()
+        self._invalidate_analysis_caches(project_id)
         if db.rebuild_required:
             # Маркер требует перестроить весь индекс, поэтому частичную
             # переиндексацию повышаем до полного прохода по источникам.

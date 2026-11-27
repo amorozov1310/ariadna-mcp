@@ -20,7 +20,8 @@ import hashlib
 import math
 import re
 import sqlite3
-from collections import defaultdict
+import threading
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -454,18 +455,29 @@ MIN_TERMS_KEPT = 2
 def _term_share(db, conn, term: str) -> float:
     """Доля фрагментов карточек с термом-префиксом (оценка сверху); кэш —
     на объекте Database, т. е. на время жизни открытого индекса."""
-    cache = db.__dict__.setdefault('_card_term_share', {})
-    if term in cache:
-        return cache[term]
+    cache = db.__dict__.setdefault('_card_term_share', OrderedDict())
+    lock = db.__dict__.setdefault('_card_term_share_lock', threading.Lock())
+    with lock:
+        if term in cache:
+            cache.move_to_end(term)
+            return cache[term]
     conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.card_vocab "
                  "USING fts5vocab(main, card_fts, 'row')")
-    total = cache.get('\0total')
+    with lock:
+        total = cache.get('\0total')
     if total is None:
-        total = cache['\0total'] = conn.execute('SELECT COUNT(*) FROM card_chunks').fetchone()[0] or 1
+        total = conn.execute('SELECT COUNT(*) FROM card_chunks').fetchone()[0] or 1
+        with lock:
+            cache['\0total'] = total
     upper = term[:-1] + chr(ord(term[-1]) + 1)
     docs = conn.execute('SELECT SUM(doc) FROM temp.card_vocab WHERE term >= ? AND term < ?',
                         (term, upper)).fetchone()[0] or 0
-    cache[term] = share = min(1.0, docs / total)
+    share = min(1.0, docs / total)
+    with lock:
+        cache[term] = share
+        cache.move_to_end(term)
+        while len(cache) > 256:
+            cache.popitem(last=False)
     return share
 
 
