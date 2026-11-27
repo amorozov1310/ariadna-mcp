@@ -311,6 +311,26 @@ def test_directory_case_rename_moves_excluded_logs_with_tree(tmp_path):
     assert (root / "old" / "logs" / "keep.txt").read_bytes() == b"keep"
 
 
+def test_nested_directory_case_renames_follow_parent_rename(tmp_path):
+    root = tmp_path / "xml"
+    tracked = root / "Old" / "Sub" / "item.xml"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_bytes(b"old")
+    logs = tracked.parent / "logs"
+    logs.mkdir()
+    (logs / "keep.txt").write_bytes(b"keep")
+    cache = tmp_path / "cache.json"
+    current = source_delta.manifest(root, cache)
+    wanted = {"old/sub/item.xml": b"new"}
+    target = _target(wanted)
+
+    source_delta.apply(root, _archive(wanted), target, current["version"], current)
+
+    assert source_delta.manifest(root, cache)["files"] == target["files"]
+    assert (root / "old" / "sub" / "item.xml").read_bytes() == b"new"
+    assert (root / "old" / "sub" / "logs" / "keep.txt").read_bytes() == b"keep"
+
+
 def test_empty_directory_and_new_root_are_restored_after_rollback(monkeypatch, tmp_path):
     root = tmp_path / "xml"
     root.mkdir()

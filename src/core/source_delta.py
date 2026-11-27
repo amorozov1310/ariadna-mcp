@@ -518,13 +518,24 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
                 desired_dirs.add(parent.as_posix())
                 parent = parent.parent
         dir_moves = []
-        claimed = set()
         for rel in sorted(desired_dirs, key=lambda p: p.count("/")):
             prior = initial_dirs.get(rel.casefold())
-            if prior and prior != rel and not any(prior.casefold().startswith(x.casefold() + "/") for x in claimed):
-                temp_rel = str(PurePosixPath(prior).with_name(f".delta-case-{os.getpid()}-{len(dir_moves)}"))
-                dir_moves.append([prior, rel, temp_rel])
-                claimed.add(prior)
+            if prior and prior != rel:
+                # Родитель к этому шагу уже переименован. Перенести его новое
+                # написание на исходный путь дочернего каталога, чтобы запланировать
+                # и вложенную смену регистра (Old/Sub -> old/sub).
+                source = prior
+                for old_parent, new_parent, _ in dir_moves:
+                    old_parts = PurePosixPath(old_parent).parts
+                    source_parts = PurePosixPath(source).parts
+                    if (len(source_parts) > len(old_parts)
+                            and tuple(p.casefold() for p in source_parts[:len(old_parts)])
+                            == tuple(p.casefold() for p in old_parts)):
+                        source = PurePosixPath(*PurePosixPath(new_parent).parts,
+                                               *source_parts[len(old_parts):]).as_posix()
+                if source != rel:
+                    temp_rel = str(PurePosixPath(source).with_name(f".delta-case-{os.getpid()}-{len(dir_moves)}"))
+                    dir_moves.append([source, rel, temp_rel])
         journal_data = {"backup": str(backup), "old": sorted(affected & set(old_files)),
                         "new": sorted(changed), "staging": str(staging),
                         "created_dirs": sorted(created_dirs), "removed_dirs": [],
