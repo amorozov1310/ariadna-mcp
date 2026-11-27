@@ -179,6 +179,8 @@ def test_ninth_parallel_status_reader_waits_and_reindex_does_not_close_lease(
 
 def test_evicted_search_engine_stays_retired_and_project_can_be_deleted(monkeypatch):
     import src.core.project_manager as project_manager
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = ProjectManager(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
         pm.create_project('p1', 'p1')
@@ -189,12 +191,14 @@ def test_evicted_search_engine_stays_retired_and_project_can_be_deleted(monkeypa
         old_db = engine.db
         pm.create_project('p2', 'p2')
         monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 1)
+        monkeypatch.setattr(app_module, '_pm', pm)
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
         try:
             pm.get_db('p2')
             assert old_db._retired and old_db.conn is None
             with pytest.raises(IndexRemovedError):
                 engine.search_procedures('Рассчитать')
-            pm.delete_project('p1')
+            assert client.delete('/api/projects/p1').status_code == 200
             assert not pm._index_path('p1').parent.exists()
         finally:
             pm.close_all()
