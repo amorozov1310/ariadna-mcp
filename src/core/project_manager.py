@@ -24,7 +24,7 @@ from weakref import WeakSet, WeakValueDictionary, ref
 
 from . import parser_fingerprint
 from .archives import extract_archive
-from .db import Database, IndexRemovedError
+from .db import Database, IndexRemovedError, READER_IDLE_SEC
 from .fsretry import replace_with_retry, rmtree_with_retry
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
@@ -220,6 +220,10 @@ class ProjectManager:
         self._db_opening: dict[str, threading.Event] = {}
         self._closing = False
         self._pool_generation = 0
+        self._reader_trim_lock = threading.Lock()
+        self._reader_trim_stop: threading.Event | None = None
+        self._reader_trim_thread: threading.Thread | None = None
+        self._reader_trim_closing = False
         self._registry: dict[str, ProjectInfo] | None = None
         # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
         # собственной записи; None — кэш не сверен с диском.
@@ -1123,6 +1127,7 @@ class ProjectManager:
         же, что при открытии (Database.file_replaced, один os.stat): если
         файл удалили или заменили снаружи, старые соединения закрываются и
         индекс открывается заново."""
+        self._ensure_reader_trim_thread()
         generation = self._pool_generation
         while True:
             evicted = []
@@ -1300,6 +1305,29 @@ class ProjectManager:
             self._db_pins_changed.notify_all()
         for db in retired:
             db.retire()
+
+    def _ensure_reader_trim_thread(self) -> None:
+        """Запустить один общий для менеджера лёгкий таймер очистки читателей."""
+        with self._reader_trim_lock:
+            if self._reader_trim_closing:
+                return
+            if self._reader_trim_thread is not None and self._reader_trim_thread.is_alive():
+                return
+            stop = threading.Event()
+            interval = min(1.0, max(0.05, max(0.0, READER_IDLE_SEC) / 4))
+
+            def trim_readers():
+                while not stop.wait(interval):
+                    with self._db_lock:
+                        databases = list(self._db_pool.values())
+                    for db in databases:
+                        db.trim_idle_readers()
+
+            thread = threading.Thread(target=trim_readers, daemon=True,
+                                      name='sqlite-reader-idle-trim')
+            self._reader_trim_stop = stop
+            self._reader_trim_thread = thread
+            thread.start()
 
     def _handle_stale_schema(self, project_id: str, db: Database) -> None:
         """Пометить удалённый устаревший индекс и поставить его в очередь."""
@@ -2730,6 +2758,14 @@ class ProjectManager:
     def close_all(self):
         """Close all open database connections."""
         from .platform_check import wait_report_jobs
+        with self._reader_trim_lock:
+            self._reader_trim_closing = True
+            trim_stop = self._reader_trim_stop
+            trim_thread = self._reader_trim_thread
+            if trim_stop is not None:
+                trim_stop.set()
+        if trim_thread is not None:
+            trim_thread.join(timeout=5)
         with self._base_diff_lock:
             self._closing_checks = True
         # Фоновые переиндексации и сравнения (warm_diffs) работают с индексами —
@@ -2785,3 +2821,7 @@ class ProjectManager:
             with self._db_pins_changed:
                 self._closing = False
                 self._db_pins_changed.notify_all()
+            with self._reader_trim_lock:
+                self._reader_trim_thread = None
+                self._reader_trim_stop = None
+                self._reader_trim_closing = False

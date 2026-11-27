@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime
 
+READER_IDLE_SEC = float(os.environ.get('ARIADNA_READER_IDLE_SEC', '60'))
+
 _SCHEMA_LOCKS_GUARD = threading.Lock()
 _SCHEMA_LOCKS: dict[str, threading.RLock] = {}
 
@@ -450,6 +452,7 @@ class _ReaderConnection:
         self._lock = threading.Lock()
         self._closed = False
         self._active = 0
+        self._idle_since = time.monotonic()
         self._shared = False
         self._idle = threading.Condition(self._lock)
         self._on_idle = on_idle
@@ -471,6 +474,8 @@ class _ReaderConnection:
                         cur.close()
                 finally:
                     self._active -= 1
+                    if not self._active:
+                        self._idle_since = time.monotonic()
                     self._idle.notify_all()
         finally:
             if self._on_idle is not None:
@@ -497,6 +502,8 @@ class _ReaderConnection:
         with self._idle:
             if self._active:
                 self._active -= 1
+                if not self._active:
+                    self._idle_since = time.monotonic()
                 self._lease_local.count = max(0, getattr(self._lease_local, 'count', 0) - 1)
                 self._idle.notify_all()
         if self._on_idle is not None:
@@ -525,6 +532,7 @@ class Database:
     # восемь лениво открываемых читателей на индекс; вытесненный поток при
     # следующем запросе получит новое соединение.
     MAX_READERS = 8
+    READER_IDLE_SEC = READER_IDLE_SEC
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -664,6 +672,7 @@ class Database:
         with self._readers_lock:
             if self._retired:
                 raise IndexRemovedError(self.db_path)
+            self._trim_idle_readers_locked()
             while len(self._readers) >= self.MAX_READERS:
                 oldest = next((candidate for candidate in self._readers
                                if candidate.active == 0), None)
@@ -707,6 +716,29 @@ class Database:
     def _notify_reader_available(self) -> None:
         with self._readers_lock:
             self._readers_lock.notify_all()
+
+    def trim_idle_readers(self, now: float | None = None) -> int:
+        """Закрыть просроченные свободные читатели, оставив один тёплый."""
+        with self._readers_lock:
+            return self._trim_idle_readers_locked(now)
+
+    def _trim_idle_readers_locked(self, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        cutoff = now - max(0.0, self.READER_IDLE_SEC)
+        idle = [reader for reader in self._readers
+                if reader.active == 0 and reader._idle_since <= cutoff and not reader._closed]
+        # Сохраняем самый недавно использованный открытый читатель как тёплый.
+        keep = max((reader for reader in self._readers
+                    if reader.active == 0 and not reader._closed),
+                   key=lambda reader: reader._idle_since, default=None)
+        closed = 0
+        for reader in idle:
+            if reader is keep:
+                continue
+            self._readers.pop(reader, None)
+            reader.close()
+            closed += 1
+        return closed
 
     def close_thread_reader(self) -> None:
         """Освободить читающее соединение завершающегося фонового потока."""
