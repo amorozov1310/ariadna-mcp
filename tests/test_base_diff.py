@@ -577,6 +577,45 @@ def test_no_diff_while_a_project_is_indexing(pm):
     assert pm.warm_diffs('custom') is True
 
 
+def test_diff_pair_lock_survives_cache_invalidation(pm, monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    pair = ('custom', 'typical', 'main', 'main')
+    pair_lock = threading.Lock()
+    started, resume = threading.Event(), threading.Event()
+    active = maximum = 0
+    guard = threading.Lock()
+    pm._diff_pair_locks[pair] = pair_lock
+
+    def compare():
+        nonlocal active, maximum
+        lock = pm._diff_pair_locks.setdefault(pair, threading.Lock())
+        with lock:
+            with guard:
+                active += 1
+                maximum = max(maximum, active)
+            started.set()
+            resume.wait(10)
+            with guard:
+                active -= 1
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(compare)
+            assert started.wait(10)
+            pm._invalidate_analysis_caches('custom')
+            assert pm._diff_pair_locks[pair] is pair_lock
+            second = pool.submit(compare)
+            time.sleep(.05)
+            resume.set()
+            first.result(timeout=10)
+            second.result(timeout=10)
+        assert maximum == 1
+    finally:
+        resume.set()
+
+
 def test_diff_pages_layout(release_pm):
     """Шаг 10 плана UI: строка сравнения вместо схемы, таблица объектов без
     бейджей, категории обновления по тяжести, две колонки на пересечении."""

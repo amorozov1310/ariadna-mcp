@@ -14,6 +14,7 @@ import logging
 import re
 import sqlite3
 from typing import NamedTuple
+from functools import wraps
 
 from .db import Database
 from .register_info import RECORDS, VALUE_TYPE, query_hints
@@ -1168,6 +1169,20 @@ class SearchEngine:
             query = query[:-1]
             variants.append(query)
         return variants
+
+
+def _lease_search_operation(method):
+    """Удерживать Database reader на время всей публичной операции поиска."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.db.read_lease():
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+for _method_name, _method in tuple(vars(SearchEngine).items()):
+    if not _method_name.startswith('_') and callable(_method):
+        setattr(SearchEngine, _method_name, _lease_search_operation(_method))
 
 
 # ============================================

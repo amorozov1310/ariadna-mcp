@@ -20,7 +20,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import BinaryIO
-from weakref import WeakValueDictionary
+from weakref import WeakSet, WeakValueDictionary
 
 from . import parser_fingerprint
 from .archives import extract_archive
@@ -207,10 +207,13 @@ class ProjectManager:
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
         self._db_pool: OrderedDict[str, Database] = OrderedDict()
+        self._db_instances = WeakSet()
         # Пул открывают несколько потоков (пул SDK, фоновая переиндексация):
         # без блокировки два потока создавали два Database на один проект, и
         # writer одного терялся.
         self._db_lock = threading.Lock()
+        self._db_pins: dict[str, int] = {}
+        self._db_pins_changed = threading.Condition(self._db_lock)
         self._registry: dict[str, ProjectInfo] | None = None
         # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
         # собственной записи; None — кэш не сверен с диском.
@@ -280,9 +283,8 @@ class ProjectManager:
             self._broken_calls.pop(project_id, None)
             for key in [key for key in self._base_diffs if project_id in key[:2]]:
                 self._base_diffs.pop(key, None)
-            for key in list(self._diff_pair_locks):
-                if project_id in key[:2]:
-                    self._diff_pair_locks.pop(key, None)
+            # Активные locks живут в WeakValueDictionary до завершения
+            # последнего потока. Удаляем только результат сравнения.
 
     def _forget_project_resources(self, project_id: str) -> None:
         """Удалить кэши и завершённые задачи, привязанные к удалённому проекту."""
@@ -1094,7 +1096,7 @@ class ProjectManager:
         же, что при открытии (Database.file_replaced, один os.stat): если
         файл удалили или заменили снаружи, старые соединения закрываются и
         индекс открывается заново."""
-        with self._db_lock:
+        with self._db_pins_changed:
             db = self._db_pool.get(project_id)
             if db is not None and db.conn:
                 if not db.file_replaced():
@@ -1104,7 +1106,7 @@ class ProjectManager:
                                "индекс открывается заново", project_id)
             if db is not None:
                 self._db_pool.pop(project_id, None)
-                db.close()
+                db.retire()
 
             # Открыть (и тем более создать) индекс — только для проекта из
             # реестра. Проверка — под той же блокировкой пула: delete_project
@@ -1118,17 +1120,38 @@ class ProjectManager:
 
             db_path = str(self._index_path(project_id))
             db = Database(db_path)
+            self._db_instances.add(db)
             db.connect()
             db.init_schema()
             while len(self._db_pool) >= DB_POOL_LIMIT:
-                _, evicted = self._db_pool.popitem(last=False)
-                evicted.close()
+                evict_id = next((pid for pid in self._db_pool
+                                 if not self._db_pins.get(pid)), None)
+                if evict_id is None:
+                    # Condition.wait освобождает общую блокировку пула,
+                    # чтобы работающий поток мог вернуть lease.
+                    self._db_pins_changed.wait()
+                    continue
+                evicted = self._db_pool.pop(evict_id)
+                evicted.retire()
             self._db_pool[project_id] = db
             if db.stale_schema_recreated or db.rebuild_required:
                 # Обработать до снятия блокировки пула, чтобы другой запрос
                 # не увидел новый пустой файл со статусом «готов».
                 self._handle_stale_schema(project_id, db)
             return db
+
+    def _pin_db(self, project_id: str) -> None:
+        with self._db_pins_changed:
+            self._db_pins[project_id] = self._db_pins.get(project_id, 0) + 1
+
+    def _unpin_db(self, project_id: str) -> None:
+        with self._db_pins_changed:
+            count = self._db_pins.get(project_id, 0) - 1
+            if count > 0:
+                self._db_pins[project_id] = count
+            else:
+                self._db_pins.pop(project_id, None)
+            self._db_pins_changed.notify_all()
 
     def _handle_stale_schema(self, project_id: str, db: Database) -> None:
         """Пометить удалённый устаревший индекс и поставить его в очередь."""
@@ -1787,9 +1810,11 @@ class ProjectManager:
         lock = self._reindex_lock(project_id)
         if not async_owned:
             lock.acquire()
+        self._pin_db(project_id)
         try:
             return self._reindex_locked(project_id, source_id=source_id)
         finally:
+            self._unpin_db(project_id)
             if not async_owned:
                 lock.release()
 
@@ -1811,10 +1836,9 @@ class ProjectManager:
         from .xml_walker import XMLWalker
 
         project, db = self._mark_indexing(project_id)
-        # Читатели держат свои SQLite handles дольше одного запроса. Их
-        # закрытие перед переиндексацией освобождает файловые дескрипторы;
-        # новые запросы при необходимости откроют их повторно.
-        db.close_readers()
+        # Читающие соединения остаются привязаны к текущему объекту Database:
+        # их не закрываем посреди запроса. WAL позволяет писателю обновлять
+        # индекс параллельно; close_all/retire закроют handles после работы.
         self._invalidate_analysis_caches(project_id)
         if db.rebuild_required:
             # Маркер требует перестроить весь индекс, поэтому частичную
@@ -2110,9 +2134,11 @@ class ProjectManager:
         # запись не удалась (проект удалили между вызовами), поток не
         # запускается.
         try:
+            self._pin_db(project_id)
             self._clear_index_error(project_id)
             self._mark_indexing(project_id)
         except Exception as e:
+            self._unpin_db(project_id)
             lock.release()
             logger.exception("Не удалось начать переиндексацию проекта %s", project_id)
             return {'status': 'error', 'project_id': project_id,
@@ -2132,6 +2158,7 @@ class ProjectManager:
                 except AttributeError:
                     pass
                 lock.release()
+                self._unpin_db(project_id)
                 with self._base_diff_lock:
                     self._reindexing.discard(threading.current_thread())
 
@@ -2472,7 +2499,8 @@ class ProjectManager:
                 # Задачи уже держат свой Database и не обращаются к пулу.
                 wait_report_jobs(pool)
                 self._db_pool.clear()
-            for db in pool:
+                databases = list(self._db_instances)
+            for db in databases:
                 db.retire()
         finally:
             with self._base_diff_lock:

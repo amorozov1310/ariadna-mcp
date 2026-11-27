@@ -72,7 +72,9 @@ def _fd_count() -> int:
 
 
 def _metrics(pm) -> dict:
-    databases = list(pm._db_pool.values())
+    # Учитываем Database, сохранённые поисковыми движками после вытеснения
+    # из менеджерского пула: именно они могли бы удерживать SQLite handle.
+    databases = list(pm._db_instances)
     sqlite_connections = sum(bool(db.conn) + len(db._readers) for db in databases)
     return {'rss_mb': round(_rss_mb(), 1), 'sqlite_connections': sqlite_connections,
             'fd_or_handles': _fd_count()}

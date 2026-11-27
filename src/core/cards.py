@@ -454,10 +454,16 @@ MIN_TERMS_KEPT = 2
 
 def _term_share(db, conn, term: str) -> float:
     """Доля фрагментов карточек с термом-префиксом (оценка сверху); кэш —
-    на объекте Database, т. е. на время жизни открытого индекса."""
+    на объекте Database и привязан к updated_at index_state: переиндексация
+    обновляет и частоты, и общее число фрагментов."""
     cache = db.__dict__.setdefault('_card_term_share', OrderedDict())
     lock = db.__dict__.setdefault('_card_term_share_lock', threading.Lock())
+    row = conn.execute('SELECT updated_at FROM index_state WHERE id=1').fetchone()
+    revision = row[0] if row else None
     with lock:
+        if db.__dict__.get('_card_term_share_revision') != revision:
+            cache.clear()
+            db.__dict__['_card_term_share_revision'] = revision
         if term in cache:
             cache.move_to_end(term)
             return cache[term]

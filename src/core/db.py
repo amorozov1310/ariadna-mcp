@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime
 
@@ -441,32 +442,72 @@ class _ReaderConnection:
     ProgrammingError «Cannot operate on a closed database», которая
     уходила агенту как непредвиденная ошибка."""
 
-    def __init__(self, conn: sqlite3.Connection, closed_error=None):
+    def __init__(self, conn: sqlite3.Connection, closed_error=None, on_idle=None):
         self._conn = conn
         self._lock = threading.Lock()
         self._closed = False
+        self._active = 0
+        self._idle = threading.Condition(self._lock)
+        self._on_idle = on_idle
+        self._lease_local = threading.local()
         self._closed_error = closed_error or (
             lambda: sqlite3.ProgrammingError("Cannot operate on a closed database."))
 
     def execute(self, sql: str, params=()) -> _Rows:
-        if self._closed:
-            raise self._closed_error()
+        try:
+            with self._idle:
+                if self._closed and not getattr(self._lease_local, 'count', 0):
+                    raise self._closed_error()
+                self._active += 1
+                try:
+                    cur = self._conn.execute(sql, params)
+                    try:
+                        rows = _Rows(cur.fetchall(), cur.description)
+                    finally:
+                        cur.close()
+                finally:
+                    self._active -= 1
+                    self._idle.notify_all()
+        finally:
+            if self._on_idle is not None:
+                self._on_idle()
+        return rows
+
+    def acquire(self) -> bool:
         with self._lock:
-            if self._closed:
-                raise self._closed_error()
-            cur = self._conn.execute(sql, params)
-            try:
-                return _Rows(cur.fetchall(), cur.description)
-            finally:
-                cur.close()
+            if self._closed and not getattr(self._lease_local, 'count', 0):
+                return False
+            self._active += 1
+            self._lease_local.count = getattr(self._lease_local, 'count', 0) + 1
+            return True
+
+    def leased_by_current_thread(self) -> bool:
+        return bool(getattr(self._lease_local, 'count', 0))
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+    def release(self) -> None:
+        with self._idle:
+            if self._active:
+                self._active -= 1
+                self._lease_local.count = max(0, getattr(self._lease_local, 'count', 0) - 1)
+                self._idle.notify_all()
+        if self._on_idle is not None:
+            self._on_idle()
 
     def refuse_new(self) -> None:
         """Новые запросы на этом соединении больше не начнутся."""
-        self._closed = True
+        with self._lock:
+            self._closed = True
 
     def close(self) -> None:
-        self.refuse_new()
-        with self._lock:                # дождаться текущего запроса
+        with self._idle:
+            self._closed = True
+            while self._active:
+                self._idle.wait()
             self._conn.close()          # повторный close() sqlite3 безвреден
 
     def __getattr__(self, name):
@@ -496,7 +537,7 @@ class Database:
         # растёт при каждом close(): поток, чьё соединение закрыли извне,
         # замечает это в read_conn и открывает новое.
         self._readers: OrderedDict[_ReaderConnection, None] = OrderedDict()
-        self._readers_lock = threading.Lock()
+        self._readers_lock = threading.Condition()
         self._generation = 0
         # Индекс удаляется (delete_project): читающие соединения больше не
         # открываются — ни к старому файлу, который сейчас удаляет rmtree
@@ -560,7 +601,7 @@ class Database:
             return False
         return current != self._file_id
 
-    def read_conn(self) -> '_ReaderConnection':
+    def read_conn(self, *, lease: bool = False) -> '_ReaderConnection':
         """Per-thread read connection (Этап 4/D7): search/call-graph/
         diagnostics reads no longer share the single writer connection
         object across threads — each thread gets its own, opened lazily
@@ -568,11 +609,16 @@ class Database:
         serialize concurrent reads through the same Connection object.
         Callers must never write through this connection."""
         conn = getattr(self._local, 'conn', None)
+        if conn is not None and conn.leased_by_current_thread():
+            if not lease or conn.acquire():
+                return conn
         if conn is not None and getattr(self._local, 'generation', None) == self._generation:
             with self._readers_lock:
                 if not conn._closed and conn in self._readers:
                     self._readers.move_to_end(conn)
-                    return conn
+                    if not lease or conn.acquire():
+                        return conn
+                    self._readers.pop(conn, None)
         if self._retired:
             raise IndexRemovedError(self.db_path)
         # Соединения нет или его закрыл close() из другого потока.
@@ -594,13 +640,36 @@ class Database:
             if self._retired:
                 raise IndexRemovedError(self.db_path)
             while len(self._readers) >= self.MAX_READERS:
-                oldest, _ = self._readers.popitem(last=False)
+                oldest = next((candidate for candidate in self._readers
+                               if candidate.active == 0), None)
+                if oldest is None:
+                    self._readers_lock.wait()
+                    if self._retired:
+                        raise IndexRemovedError(self.db_path)
+                    continue
+                self._readers.pop(oldest, None)
                 oldest.close()
-            conn = _ReaderConnection(self._open_with_retry(), self._closed_reader_error)
+            conn = _ReaderConnection(self._open_with_retry(), self._closed_reader_error,
+                                     self._notify_reader_available)
+            if lease:
+                conn.acquire()
             self._readers[conn] = None
             self._local.generation = self._generation
         self._local.conn = conn
         return conn
+
+    @contextmanager
+    def read_lease(self):
+        """Удерживать читателя на время нескольких запросов одной операции."""
+        conn = self.read_conn(lease=True)
+        try:
+            yield conn
+        finally:
+            conn.release()
+
+    def _notify_reader_available(self) -> None:
+        with self._readers_lock:
+            self._readers_lock.notify_all()
 
     def close_thread_reader(self) -> None:
         """Освободить читающее соединение завершающегося фонового потока."""
@@ -609,6 +678,7 @@ class Database:
             conn.close()
             with self._readers_lock:
                 self._readers.pop(conn, None)
+                self._readers_lock.notify_all()
             self._local.conn = None
 
     def _closed_reader_error(self) -> sqlite3.Error:
@@ -753,12 +823,17 @@ class Database:
             except sqlite3.Error:
                 pass
         self._local.conn = None
+        with self._readers_lock:
+            self._readers_lock.notify_all()
 
     def get_stats(self) -> dict:
         # Read-only — uses this thread's own connection (Этап 4/D7) so
         # polling status during a background reindex never contends with
         # the writer connection the indexer thread is using.
-        conn = self.read_conn()
+        with self.read_lease() as conn:
+            return self._get_stats(conn)
+
+    def _get_stats(self, conn: '_ReaderConnection') -> dict:
         stats = {}
         for table in ['metadata_objects', 'attributes', 'forms', 'modules',
                        'procedures', 'calls', 'sources']:

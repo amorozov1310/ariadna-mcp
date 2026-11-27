@@ -20,7 +20,10 @@ import io
 import os
 import sys
 import tempfile
+import threading
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import pytest
 
 from src.core.project_manager import ProjectManager
+from src.core.db import IndexRemovedError
 from src.mcp_server.tools import execute_tool
 from test_db_readers import _Worker, _closed
 
@@ -100,6 +104,126 @@ def test_delete_project_closes_connections_of_all_threads(readers_in_threads):
     assert not (pm.projects_dir / 'p1').exists()
     assert 'p1' not in pm._db_pool
     assert _closed(writer) and all(_closed(c) for c in readers)
+
+
+def test_async_reindex_database_is_pinned_during_pool_pressure(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
+        pm.create_project('p1', 'p1')
+        _add_source(pm)
+        pm.reindex('p1')
+        entered, resume = threading.Event(), threading.Event()
+        original = pm._reindex_locked
+
+        def paused(project_id, source_id=None):
+            entered.set()
+            assert resume.wait(10)
+            return original(project_id, source_id)
+
+        monkeypatch.setattr(pm, '_reindex_locked', paused)
+        try:
+            assert pm.reindex_async('p1')['status'] == 'started'
+            assert entered.wait(10)
+            for i in range(8):
+                project_id = f'other{i}'
+                pm.create_project(project_id, project_id)
+                pm.get_db(project_id)
+            assert pm.get_db('p1').get_stats()['status'] == 'indexing'
+            resume.set()
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                status = pm.get_db('p1').get_stats()['status']
+                if status in ('ready', 'error'):
+                    break
+                time.sleep(.02)
+            assert status in ('ready', 'error'), 'переиндексация застряла в indexing'
+        finally:
+            resume.set()
+            pm.close_all()
+
+
+def test_ninth_parallel_status_reader_waits_and_reindex_does_not_close_lease(
+        readers_in_threads, monkeypatch):
+    pm, _, _ = readers_in_threads
+    db = pm.get_db('p1')
+    barrier = threading.Barrier(9)
+
+    def status():
+        barrier.wait(timeout=10)
+        return db.get_stats()['status']
+
+    with ThreadPoolExecutor(max_workers=9) as pool:
+        futures = [pool.submit(status) for _ in range(9)]
+        assert [future.result(timeout=15) for future in futures] == ['ready'] * 9
+
+    original = db.read_conn
+    acquired, resume = threading.Event(), threading.Event()
+
+    def delayed_read_conn(*args, **kwargs):
+        conn = original(*args, **kwargs)
+        acquired.set()
+        assert resume.wait(10)
+        return conn
+
+    monkeypatch.setattr(db, 'read_conn', delayed_read_conn)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(db.get_stats)
+            assert acquired.wait(10)
+            pm.reindex('p1')
+            resume.set()
+            assert pending.result(timeout=10)['status'] == 'ready'
+    finally:
+        resume.set()
+
+
+def test_evicted_search_engine_stays_retired_and_project_can_be_deleted(monkeypatch):
+    import src.core.project_manager as project_manager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
+        pm.create_project('p1', 'p1')
+        _add_source(pm)
+        pm.reindex('p1')
+        engine = pm.get_search('p1')
+        engine.search_procedures('Рассчитать')
+        old_db = engine.db
+        pm.create_project('p2', 'p2')
+        monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 1)
+        try:
+            pm.get_db('p2')
+            assert old_db._retired and old_db.conn is None
+            with pytest.raises(IndexRemovedError):
+                engine.search_procedures('Рассчитать')
+            pm.delete_project('p1')
+            assert not pm._index_path('p1').parent.exists()
+        finally:
+            pm.close_all()
+
+
+def test_close_all_waits_for_existing_reader_lease():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = ProjectManager(os.path.join(tmpdir, 'data'))
+        pm.create_project('p1', 'p1')
+        db = pm.get_db('p1')
+        reader = db.read_conn(lease=True)
+        retiring = threading.Event()
+        original = reader.close
+
+        def marked_close():
+            retiring.set()
+            original()
+
+        reader.close = marked_close
+        closer = threading.Thread(target=pm.close_all)
+        closer.start()
+        try:
+            assert retiring.wait(10)
+            assert reader.execute('SELECT 1').fetchone()[0] == 1
+        finally:
+            reader.release()
+            closer.join(10)
+        assert not closer.is_alive()
+        assert db.conn is None and reader._closed
 
 
 # ============================================
