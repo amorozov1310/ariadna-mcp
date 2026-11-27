@@ -694,14 +694,14 @@ class Database:
         return conn
 
     @contextmanager
-    def read_lease(self):
+    def read_lease(self, *, trim_pool: bool = True):
         """Удерживать читателя на время нескольких запросов одной операции."""
         conn = self.read_conn(lease=True)
         try:
             yield conn
         finally:
             conn.release()
-            if self._pool_lease_released is not None:
+            if trim_pool and self._pool_lease_released is not None:
                 self._pool_lease_released()
 
     def _notify_reader_available(self) -> None:

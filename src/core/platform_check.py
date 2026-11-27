@@ -964,6 +964,20 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
         restore_lock = _RESTORE_LOCKS.setdefault(cache_id, Lock())
 
     def prepare(report):
+        # Рабочий поток отчёта живёт дольше HTTP/MCP-вызова, который его создал.
+        # Удерживаем Database и читателя до конца запросов; пропускаем сжатие
+        # пула, так как close_all() ждёт эти задачи под блокировкой пула.
+        try:
+            with db.read_lease(trim_pool=False):
+                prepare_with_reader(report)
+        finally:
+            try:
+                db.close_thread_reader()
+            finally:
+                with _REPORTS_LOCK:
+                    del _REPORT_JOBS[cache_id]
+
+    def prepare_with_reader(report):
         try:
             reader = db.read_conn()
 
@@ -987,12 +1001,6 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
             logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
             with _REPORTS_LOCK:
                 _REPORT_ERRORS.setdefault(db, {})[key] = str(exc) or type(exc).__name__
-        finally:
-            try:
-                db.close_thread_reader()
-            finally:
-                with _REPORTS_LOCK:
-                    del _REPORT_JOBS[cache_id]
 
     with restore_lock:
         with _REPORTS_LOCK:
