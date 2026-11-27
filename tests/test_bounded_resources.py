@@ -52,6 +52,46 @@ def test_reader_connections_are_bounded_under_concurrent_pool_access(tmp_path, m
     db.close()
 
 
+def test_reader_limit_reuses_live_connection_instead_of_closing_between_queries(
+        tmp_path, monkeypatch):
+    """A caller may retain read_conn() across several SQL statements."""
+    monkeypatch.setattr(Database, 'MAX_READERS', 2)
+    db = Database(str(tmp_path / 'index.db'))
+    db.connect()
+    db.init_schema()
+    first_query_done = threading.Event()
+    continue_query = threading.Event()
+
+    def multi_query():
+        conn = db.read_conn()
+        assert conn.execute('SELECT 1').fetchone()[0] == 1
+        first_query_done.set()
+        assert continue_query.wait(5)
+        # The connection remains valid even after other threads requested
+        # readers while this operation was between its SQL statements.
+        return conn.execute('SELECT 2').fetchone()[0]
+
+    def other_queries():
+        assert first_query_done.wait(5)
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            return list(pool.map(lambda _: db.read_conn().execute('SELECT 1').fetchone()[0],
+                                 range(40)))
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(multi_query)
+            assert first_query_done.wait(5)
+            others = pool.submit(other_queries)
+            assert others.result(timeout=8) == [1] * 40
+            continue_query.set()
+            assert first.result(timeout=5) == 2
+        assert len(db._readers) <= 2
+        assert all(not reader._closed for reader in db._readers)
+    finally:
+        continue_query.set()
+        db.close()
+
+
 def test_status_request_stays_pinned_while_eight_other_projects_open(tmp_path, monkeypatch):
     import src.core.project_manager as project_manager
     from fastapi.testclient import TestClient
@@ -493,6 +533,60 @@ def test_manifest_and_call_graph_http_leases_survive_concurrent_eviction(tmp_pat
         # На каждом из восьми Database остаются ленивые thread-local readers;
         # общий предел — не больше writer + MAX_READERS на объект пула.
         assert open_connections <= 8 * (1 + Database.MAX_READERS)
+    finally:
+        app_module.set_pm(previous)
+        pm.close_all()
+
+
+def test_check_warming_remains_project_scoped_under_pool_eviction(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    project_ids = [f'p{i}' for i in range(16)]
+    for project_id in project_ids:
+        pm.create_project(project_id, project_id)
+        pm.get_db(project_id)
+
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1'})
+
+        def request(index):
+            project_id = project_ids[index % len(project_ids)]
+            paths = (
+                f'/api/projects/{project_id}/checks/warming',
+                f'/api/projects/{project_id}/manifest',
+                f'/api/projects/{project_id}/status',
+                f'/projects/{project_id}/search',
+                f'/projects/{project_id}/calltree?procedure=Missing',
+                f'/api/projects/{project_id}/graph/calltree?procedure=Missing',
+                f'/projects/{project_id}/graph?procedure=Missing',
+            )
+            responses = [client.get(path) for path in paths]
+            from src.mcp_server.tools import execute_tool
+            mcp_results = (
+                execute_tool(pm, 'get_index_status', {'project_id': project_id}),
+                execute_tool(pm, 'get_call_tree', {
+                    'project_id': project_id, 'procedure_name': 'Missing'}),
+            )
+            return responses, mcp_results
+
+        with ThreadPoolExecutor(max_workers=24) as pool:
+            responses = list(pool.map(request, range(16 * 12)))
+        http_responses = [response for batch, _ in responses for response in batch]
+        mcp_results = [result for _, batch in responses for result in batch]
+        assert [response.status_code for response in http_responses] == [200] * len(http_responses)
+        warming = [response for batch, _ in responses for response in batch
+                   if str(response.url).endswith('/checks/warming')]
+        assert all(not response.json()['ready'] for response in warming)
+        assert all(not result.startswith('Error') for result in mcp_results)
+        assert not pm._db_pins
+        assert len(pm._db_pool) <= 8
+        assert not any(reader.active for db in pm._db_pool.values() for reader in db._readers)
     finally:
         app_module.set_pm(previous)
         pm.close_all()
