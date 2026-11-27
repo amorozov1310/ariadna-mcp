@@ -37,7 +37,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -53,6 +53,8 @@ TOKEN_PREFIX = 'ar_'
 _LAST_USED_PERSIST_SEC = 300
 # Защита от совпадения всех полей stat: читаем маленький файл не чаще раза в 100 мс.
 _TOKEN_HASH_CHECK_NS = 100_000_000
+_TOKEN_LOCK_TIMEOUT_SEC = 2.0
+_TOKEN_LOCK_POLL_SEC = 0.025
 
 
 @contextmanager
@@ -68,7 +70,17 @@ def _token_file_lock(path: Path):
                 stream.write(b'0')
                 stream.flush()
             stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
+            while True:
+                try:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f'не удалось заблокировать файл токенов за '
+                                            f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
+                    time.sleep(_TOKEN_LOCK_POLL_SEC)
             try:
                 yield
             finally:
@@ -76,7 +88,16 @@ def _token_file_lock(path: Path):
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
+            while True:
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f'не удалось заблокировать файл токенов за '
+                                            f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
+                    time.sleep(_TOKEN_LOCK_POLL_SEC)
             try:
                 yield
             finally:
@@ -114,6 +135,11 @@ class TokenStore:
         self._has_seen_file = False
         self._ever_enabled = False
         self.license = LicenseStore(data_dir)
+
+    def initialize(self) -> None:
+        """Проверить файл при старте процесса, до запуска серверов."""
+        with self._lock:
+            self._reload(force=True)
 
     # ------------------------------------------------------------ чтение
     def _reload(self, *, force: bool = False) -> None:
@@ -251,25 +277,38 @@ class TokenStore:
             ts = time.time()
             if ts - self._last_persist.get(info.id, 0) <= _LAST_USED_PERSIST_SEC:
                 return info
-            try:
-                with _token_file_lock(self.path):
+            token_id = info.id
+        try:
+            with _token_file_lock(self.path):
+                with self._lock:
                     self._reload(force=True)
                     info = self._by_hash.get(_hash(token.strip()))
                     if info is None:
                         return None
                     now = datetime.now()
-                    info.last_used = now.isoformat(timespec='seconds')
-                    self._save()
+                    candidate = {key: replace(value) for key, value in self._tokens.items()}
+                    updated = replace(candidate[token_id],
+                                      last_used=now.isoformat(timespec='seconds'))
+                    candidate[token_id] = updated
+                    self._save(candidate)
+                    self._publish(candidate)
                     self._last_persist[info.id] = now.timestamp()
-            except OSError as e:
-                # last_used — только статистика; ошибка записи не отменяет вход.
-                logger.warning('Токены: не удалось обновить last_used для %s (%s)', info.id, e)
+                    return updated
+        except TimeoutError as e:
+            # Статистика не должна задерживать проверку токена. Используем
+            # согласованное состояние, прочитанное до ожидания блокировки.
+            logger.debug('Токены: пропущено обновление last_used для %s (%s)', token_id, e)
+            return info
+        except OSError as e:
+            # last_used — только статистика; ошибка записи не отменяет вход.
+            logger.warning('Токены: не удалось обновить last_used для %s (%s)', token_id, e)
             return info
 
     # ------------------------------------------------------------ запись
-    def _save(self) -> None:
+    def _save(self, tokens: dict[str, TokenInfo] | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps([asdict(t) for t in self._tokens.values()],
+        tokens = self._tokens if tokens is None else tokens
+        content = json.dumps([asdict(t) for t in tokens.values()],
                              ensure_ascii=False, indent=2).encode('utf-8')
         fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + '.', suffix='.tmp',
                                         dir=self.path.parent)
@@ -292,7 +331,14 @@ class TokenStore:
         content_hash = hashlib.sha256(content).hexdigest()
         self._remember_file(signature, content_hash)
         self._has_seen_file = True
-        self._ever_enabled = self._ever_enabled or bool(self._tokens)
+        self._ever_enabled = self._ever_enabled or bool(tokens)
+
+    def _publish(self, tokens: dict[str, TokenInfo]) -> None:
+        """Опубликовать только после успешной атомарной записи файла."""
+        self._tokens = tokens
+        self._by_hash = {t.hash: t for t in tokens.values()}
+        self._last_persist = {token_id: ts for token_id, ts in self._last_persist.items()
+                              if token_id in tokens}
 
     def create(self, name: str, role: str = 'user') -> tuple[TokenInfo, str]:
         """Новый токен: (запись, сам токен — показать один раз)."""
@@ -302,8 +348,8 @@ class TokenStore:
         if role not in ROLES:
             raise ValueError(f'Роль — одна из: {", ".join(ROLES)}')
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
-        with self._lock:
-            with _token_file_lock(self.path):
+        with _token_file_lock(self.path):
+            with self._lock:
                 self._reload(force=True)
                 if self._broken:
                     raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
@@ -318,23 +364,25 @@ class TokenStore:
                         f'отзовите ненужный или расширьте лицензию.')
                 info = TokenInfo(id=secrets.token_hex(4), name=name, role=role, hash=_hash(token),
                                  created_at=datetime.now().isoformat(timespec='seconds'))
-                self._tokens[info.id] = info
-                self._by_hash[info.hash] = info
-                self._save()
+                candidate = {key: replace(value) for key, value in self._tokens.items()}
+                candidate[info.id] = info
+                self._save(candidate)
+                self._publish(candidate)
         return info, token
 
     def revoke(self, token_id: str) -> TokenInfo:
-        with self._lock:
-            with _token_file_lock(self.path):
+        with _token_file_lock(self.path):
+            with self._lock:
                 self._reload(force=True)
                 if self._broken:
                     raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
-                info = self._tokens.pop(token_id, None)
+                info = self._tokens.get(token_id)
                 if info is None:
                     raise KeyError(token_id)
-                self._by_hash.pop(info.hash, None)
-                self._last_persist.pop(token_id, None)
-                self._save()
+                candidate = {key: replace(value) for key, value in self._tokens.items()
+                             if key != token_id}
+                self._save(candidate)
+                self._publish(candidate)
         return info
 
 

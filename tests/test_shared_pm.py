@@ -102,6 +102,51 @@ def test_web_ui_and_mcp_use_the_same_project_manager(shared, monkeypatch):
     assert len(calls) == 2
 
 
+def test_web_and_mcp_share_startup_token_store_and_fail_closed_on_disappearance(tmp_path, monkeypatch):
+    import asyncio
+    from src import main as main_module
+    from src.auth import MCPAuthMiddleware, TokenStore
+    from src.web import app as app_module
+
+    _, token = TokenStore(tmp_path).create('Синтетический администратор', 'admin')
+    pm = main_module.build_shared_state(str(tmp_path))
+    previous_pm, previous_store = app_module._pm, app_module._token_store
+    app_module.set_pm(pm)
+    store = pm.token_store
+    assert store.verify(token) is not None
+    assert app_module._token_store is store
+    async def downstream(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 204, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b''})
+
+    mcp_auth = MCPAuthMiddleware(downstream, store)
+    async def call_mcp():
+        messages = []
+
+        async def receive():
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+        async def send(message):
+            messages.append(message)
+
+        await mcp_auth({'type': 'http', 'headers': [(b'authorization',
+                                                      f'Bearer {token}'.encode())]},
+                       receive, send)
+        return messages[0]['status']
+
+    try:
+        pm.data_dir.joinpath('tokens.json').unlink()
+
+        with _client() as client:
+            web_response = client.get('/api/projects')
+        assert web_response.status_code == 401
+        assert asyncio.run(call_mcp()) == 401
+        assert store.enabled() and store.verify(token) is None
+    finally:
+        pm.close_all()
+        app_module._pm, app_module._token_store = previous_pm, previous_store
+
+
 def test_get_pm_without_set_pm_creates_its_own(monkeypatch):
     """Режим разработки `uvicorn src.web.app:app --reload`: Web UI один в
     процессе, ProjectManager — свой, из DATA_DIR/INDEX_DIR."""

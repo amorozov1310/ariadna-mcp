@@ -56,6 +56,13 @@ def _first_verify_many(data_dir, token, start, results):
         results.put(('error', repr(exc)))
 
 
+def _hold_token_lock(path, entered, release):
+    from src.auth import _token_file_lock
+    with _token_file_lock(Path(path)):
+        entered.set()
+        release.wait(15)
+
+
 def test_token_store_create_verify_revoke(tmp_path):
     store = TokenStore(tmp_path)
     assert not store.enabled() and store.verify('ar_x') is None
@@ -72,6 +79,47 @@ def test_token_store_create_verify_revoke(tmp_path):
         store.create('Пётр', 'root')
     store.revoke(info.id)
     assert not store.enabled() and store.verify(token) is None
+
+
+@pytest.mark.parametrize('token_count', [1, 2])
+def test_failed_revoke_does_not_publish_candidate_state(tmp_path, monkeypatch, token_count):
+    import src.auth as auth
+    store = TokenStore(tmp_path)
+    store.limit = lambda: 2
+    records = [store.create(f'Синтетический {i}', 'admin') for i in range(token_count)]
+    target, token = records[0]
+    disk_before = store.path.read_bytes()
+
+    def fail_replace(*args, **kwargs):
+        raise PermissionError('synthetic replace denied')
+
+    monkeypatch.setattr(auth, 'replace_with_retry', fail_replace)
+    with pytest.raises(PermissionError):
+        store.revoke(target.id)
+
+    assert store.enabled()
+    assert store.verify(token) is not None
+    assert store.path.read_bytes() == disk_before
+    assert {item.id for item in store.list()} == {item.id for item, _ in records}
+
+
+def test_failed_create_does_not_publish_candidate_state(tmp_path, monkeypatch):
+    import src.auth as auth
+    store = TokenStore(tmp_path)
+    initial, token = store.create('Синтетический админ', 'admin')
+    store.limit = lambda: 2
+    disk_before = store.path.read_bytes()
+
+    def fail_replace(*args, **kwargs):
+        raise PermissionError('synthetic replace denied')
+
+    monkeypatch.setattr(auth, 'replace_with_retry', fail_replace)
+    with pytest.raises(PermissionError):
+        store.create('Новый синтетический пользователь')
+
+    assert store.enabled() and store.verify(token) is not None
+    assert store.path.read_bytes() == disk_before
+    assert [item.id for item in store.list()] == [initial.id]
 
 
 def test_revoked_token_marks_do_not_accumulate_and_tokens_stay_revoked(tmp_path):
@@ -255,6 +303,41 @@ def test_multiprocess_first_verify_uses_unique_temp_files(tmp_path):
     assert messages.count(('verified', True)) == 2
     assert not [message for message in messages if message[0] == 'error'], messages
     assert not list(tmp_path.glob('tokens.json.*.tmp'))
+
+
+def test_interprocess_lock_timeout_skips_last_used_but_rejects_writes(tmp_path):
+    from src.auth import _TOKEN_LOCK_TIMEOUT_SEC
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический владелец', 'admin')
+    store._last_persist[info.id] = 0
+    ctx = get_context('spawn')
+    entered, release = ctx.Event(), ctx.Event()
+    holder = ctx.Process(target=_hold_token_lock,
+                         args=(str(store.path), entered, release))
+    holder.start()
+    try:
+        assert entered.wait(10), 'процесс не захватил блокировку'
+        started = time.monotonic()
+        assert store.verify(token) is not None
+        assert time.monotonic() - started < _TOKEN_LOCK_TIMEOUT_SEC + 1
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            store.revoke(info.id)
+        assert time.monotonic() - started < _TOKEN_LOCK_TIMEOUT_SEC + 1
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            store.create('Новый синтетический владелец')
+        assert time.monotonic() - started < _TOKEN_LOCK_TIMEOUT_SEC + 1
+        assert store.verify(token) is not None
+    finally:
+        release.set()
+        holder.join(10)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join()
+    assert holder.exitcode == 0
 
 
 def test_cli_create_and_list(tmp_path, capsys):

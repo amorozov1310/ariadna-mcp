@@ -40,11 +40,19 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # `uvicorn src.web.app:app --reload`, Web UI один в процессе) get_pm создаёт
 # свой из DATA_DIR/INDEX_DIR.
 _pm: ProjectManager | None = None
+_token_store = None
 
 
 def set_pm(pm: ProjectManager) -> None:
-    global _pm
+    global _pm, _token_store
     _pm = pm
+    _token_store = getattr(pm, 'token_store', None)
+
+
+def set_token_store(store) -> None:
+    """Задать общее для процесса хранилище токенов, также используемое MCP."""
+    global _token_store
+    _token_store = store
 
 
 def get_pm() -> ProjectManager:

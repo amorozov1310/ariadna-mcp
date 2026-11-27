@@ -37,7 +37,7 @@ _ADMIN_POST = re.compile(r'^/api/(projects$|projects/[^/]+/(update|delete|compar
                          r'|projects/[^/]+/sources(/[^/]+/(update|delete))?$|admin/)')
 _ADMIN_GET = re.compile(r'^/(projects/new$|(?:api/)?admin(/|$))')
 
-_stores: dict[str, TokenStore] = {}
+_stores: dict[str, TokenStore] = {}  # резерв для запуска Web UI без main.py
 _DELTA_ROUTE = re.compile(r'^/api/projects/[^/]+/sources/[^/]+/delta$')
 
 
@@ -86,6 +86,9 @@ def tokens() -> TokenStore:
     from . import app as app_module
     pm = app_module._pm
     data_dir = str(pm.data_dir) if pm is not None else os.environ.get('DATA_DIR', '/data')
+    if (app_module._token_store is not None
+            and app_module._token_store.path.parent.resolve() == Path(data_dir).resolve()):
+        return app_module._token_store
     store = _stores.get(data_dir)
     if store is None:
         store = _stores[data_dir] = TokenStore(data_dir)
