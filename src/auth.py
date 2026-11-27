@@ -34,6 +34,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,8 @@ FILENAME = 'tokens.json'
 TOKEN_PREFIX = 'ar_'
 # last_used пишется на диск не чаще раза в столько секунд на токен.
 _LAST_USED_PERSIST_SEC = 300
+# Защита от совпадения всех полей stat: читаем маленький файл не чаще раза в 100 мс.
+_TOKEN_HASH_CHECK_NS = 100_000_000
 
 
 @dataclass
@@ -71,7 +74,9 @@ class TokenStore:
     def __init__(self, data_dir: str | Path):
         self.path = Path(data_dir) / FILENAME
         self._lock = threading.Lock()
-        self._mtime = None
+        self._file_signature = None
+        self._content_hash = None
+        self._last_hash_check_ns = 0
         self._tokens: dict[str, TokenInfo] = {}       # id -> info
         self._by_hash: dict[str, TokenInfo] = {}
         self._last_persist: dict[str, float] = {}
@@ -80,15 +85,36 @@ class TokenStore:
     # ------------------------------------------------------------ чтение
     def _reload(self) -> None:
         try:
-            mtime = self.path.stat().st_mtime_ns
+            stat = self.path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
+                         getattr(stat, 'st_ctime_ns', None))
         except FileNotFoundError:
-            mtime = None
-        if mtime == self._mtime:
-            return
-        tokens: dict[str, TokenInfo] = {}
-        if mtime is not None:
+            stat = None
+            signature = None
+        now_ns = time.monotonic_ns()
+        content = None
+        if signature == self._file_signature:
+            if signature is None:
+                return
+            if now_ns - self._last_hash_check_ns < _TOKEN_HASH_CHECK_NS:
+                return
             try:
-                raw = json.loads(self.path.read_text(encoding='utf-8') or '[]')
+                content = self.path.read_bytes()
+            except FileNotFoundError:
+                return self._reload()
+            content_hash = hashlib.sha256(content).hexdigest()
+            self._last_hash_check_ns = now_ns
+            if content_hash == self._content_hash:
+                return
+        else:
+            content_hash = None
+        tokens: dict[str, TokenInfo] = {}
+        if stat is not None:
+            try:
+                if content is None:
+                    content = self.path.read_bytes()
+                content_hash = hashlib.sha256(content).hexdigest()
+                raw = json.loads(content.decode('utf-8') or '[]')
                 for item in raw:
                     info = TokenInfo(**{k: item.get(k, '') for k in TokenInfo.__dataclass_fields__})
                     if info.role in ROLES and info.hash:
@@ -98,7 +124,8 @@ class TokenStore:
                 # не читаются — авторизация остаётся включённой, вход только
                 # после исправления файла.
                 logger.error('Токены: не прочитан %s (%s) — доступ закрыт', self.path, e)
-                self._tokens, self._by_hash, self._mtime = {}, {}, mtime
+                self._tokens, self._by_hash = {}, {}
+                self._remember_file(signature, content_hash)
                 self._last_persist.clear()
                 self._broken = True
                 return
@@ -107,7 +134,12 @@ class TokenStore:
         self._by_hash = {t.hash: t for t in tokens.values()}
         self._last_persist = {token_id: ts for token_id, ts in self._last_persist.items()
                               if token_id in tokens}
-        self._mtime = mtime
+        self._remember_file(signature, content_hash)
+
+    def _remember_file(self, signature, content_hash) -> None:
+        self._file_signature = signature
+        self._content_hash = content_hash
+        self._last_hash_check_ns = time.monotonic_ns()
 
     def enabled(self) -> bool:
         """Авторизация включена: есть хотя бы один токен (или файл токенов
@@ -167,9 +199,13 @@ class TokenStore:
                                   ensure_ascii=False, indent=2), encoding='utf-8')
         replace_with_retry(tmp, self.path)     # Windows: файл занят антивирусом
         try:
-            self._mtime = self.path.stat().st_mtime_ns
+            stat = self.path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
+                         getattr(stat, 'st_ctime_ns', None))
+            content_hash = hashlib.sha256(self.path.read_bytes()).hexdigest()
         except FileNotFoundError:
-            self._mtime = None
+            signature, content_hash = None, None
+        self._remember_file(signature, content_hash)
 
     def create(self, name: str, role: str = 'user') -> tuple[TokenInfo, str]:
         """Новый токен: (запись, сам токен — показать один раз)."""

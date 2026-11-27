@@ -3,8 +3,10 @@
 вход по токену, роль user не управляет проектами, источниками и токенами."""
 
 import json
+import os
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,74 @@ def test_revoked_token_marks_do_not_accumulate_and_tokens_stay_revoked(tmp_path)
 
     assert all(store.verify(token) is None for token in revoked)
     assert store._last_persist == {}
+
+
+def test_external_revoke_is_seen_when_mtime_is_restored(tmp_path):
+    first = TokenStore(tmp_path)
+    info, token = first.create('Синтетический токен', 'admin')
+    assert first.verify(token) is not None
+
+    second = TokenStore(tmp_path)
+    old_stat = first.path.stat()
+    second.revoke(info.id)
+    os.utime(first.path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+
+    # До исправления первый экземпляр оставался со старым кэшем.
+    assert first.verify(token) is None
+
+
+def test_external_revoke_is_seen_when_mtime_and_size_match(tmp_path):
+    first = TokenStore(tmp_path)
+    info, token = first.create('Синтетический токен', 'admin')
+    assert first.verify(token) is not None
+
+    second = TokenStore(tmp_path)
+    old_stat = first.path.stat()
+    second.revoke(info.id)
+    content = first.path.read_bytes()
+    first.path.write_bytes(content + b' ' * (old_stat.st_size - len(content)))
+    os.utime(first.path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    replaced_stat = first.path.stat()
+    assert replaced_stat.st_size == old_stat.st_size
+    assert replaced_stat.st_mtime_ns == old_stat.st_mtime_ns
+
+    assert first.verify(token) is None
+
+
+def test_token_store_does_not_reload_unchanged_file(tmp_path, monkeypatch):
+    store = TokenStore(tmp_path)
+    _, token = store.create('Синтетический токен', 'admin')
+    assert store.verify(token) is not None
+    reloads = 0
+    original = store.path.read_bytes
+
+    def counted_read(*args, **kwargs):
+        nonlocal reloads
+        reloads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), 'read_bytes', lambda self, *a, **kw:
+                        counted_read(*a, **kw) if self == store.path else original(*a, **kw))
+    for _ in range(10):
+        assert store.verify(token) is not None
+    assert reloads == 0
+
+
+def test_parallel_verify_and_revoke(tmp_path):
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический токен', 'admin')
+    assert store.verify(token) is not None
+
+    def verify_many():
+        return [store.verify(token) for _ in range(200)]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(verify_many)
+        store.revoke(info.id)
+        results = future.result()
+
+    assert any(result is not None for result in results)
+    assert store.verify(token) is None
 
 
 def test_broken_tokens_file_keeps_server_closed(tmp_path):
