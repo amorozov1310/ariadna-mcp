@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import shutil
 import struct
 import time
@@ -1806,7 +1807,98 @@ def test_repeated_help_uploads_keep_bounded_archives(project, monkeypatch):
     archives = _archives(pm)
     assert 0 < len(archives) <= platform_check._MAX_ARCHIVES
     assert _report_archive(pm) in archives
+
+
+def test_selected_report_archive_is_recent_for_lru_pruning(project):
+    pm, _ = project
     assert 'НесуществующийВызов()' in _ready_check(pm)
+    selected = _report_archive(pm)
+    old = time.time() - 3600
+    os.utime(selected, (old, old))
+
+    # Выбор того же отчёта из памяти обязан обновить использование архива.
+    assert 'НесуществующийВызов()' in execute_tool(pm, 'check_platform_calls', {})
+    assert selected.stat().st_mtime > old
+
+    directory = selected.parent
+    published = directory / ('platform-check-' + 'f' * 64 + '.zip')
+    published.write_bytes(b'new')
+    for number in range(3):
+        path = directory / f'platform-check-{number:064x}.zip'
+        path.write_bytes(b'old')
+        os.utime(path, (old + number, old + number))
+    platform_check._trim_archives(published)
+    assert selected.exists()
+
+
+def test_startup_removes_incomplete_report_archives(project):
+    pm, _ = project
+    temp = pm._index_path('demo').with_name('.platform-check-' + 'a' * 64 + '.zip.crash.tmp')
+    temp.write_bytes(b'incomplete')
+    restarted = ProjectManager(str(pm.data_dir))
+    assert not temp.exists()
+    restarted.close_all()
+
+
+def test_project_deletion_waits_for_report_archive_writer(project, monkeypatch):
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    cache = _report_archive(pm)
+    cache.unlink()
+    publishing, release = Event(), Event()
+    replace = platform_check.replace_with_retry
+
+    def delay_replace(temp, path):
+        publishing.set()
+        assert release.wait(timeout=10)
+        replace(temp, path)
+
+    monkeypatch.setattr(platform_check, 'replace_with_retry', delay_replace)
+    pm.warm_platform_checks(project_id='demo')
+    assert publishing.wait(timeout=5)
+    writer, = _report_workers(pm)
+    project_dir = pm.projects_dir / 'demo'
+    index_dir = pm._index_path('demo').parent
+    with ThreadPoolExecutor(1) as pool:
+        deleting = pool.submit(pm.delete_project, 'demo')
+        try:
+            time.sleep(0.05)
+            assert not deleting.done()
+        finally:
+            release.set()
+        deleting.result(timeout=5)
+    writer.join(timeout=5)
+    assert not writer.is_alive()
+    assert not project_dir.exists() and not index_dir.exists()
+
+
+def test_platform_warm_requests_coalesce_to_latest_project_version(project, monkeypatch):
+    pm, _ = project
+    newest = '8.3.28.1'
+    pm.update_project('demo', platform_version=VERSION)
+    pm.platform_help.build_from_bytes(newest, context_book(newest))
+    entered, release = Event(), Event()
+    warmed = []
+
+    def track(engine, index, mode, project_id, *args, **kwargs):
+        warmed.append(index.version)
+        if len(warmed) == 1:
+            entered.set()
+            assert release.wait(timeout=10)
+
+    monkeypatch.setattr(platform_check, 'warm_ready_report', track)
+    pm.warm_platform_checks(project_id='demo')
+    try:
+        assert entered.wait(timeout=5)
+        pm.update_project('demo', platform_version=newest)
+        for _ in range(8):
+            pm.warm_platform_checks(project_id='demo')
+        coordinators = [t for t in running_threads() if t.name.startswith('platform-check-warm-')]
+        assert len(coordinators) == 1
+    finally:
+        release.set()
+    _join_workers([t for t in running_threads() if t.name.startswith('platform-check-warm-')])
+    assert warmed == [VERSION, newest]
 
 
 def test_busy_archive_does_not_stop_pruning(project, monkeypatch):

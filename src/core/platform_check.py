@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 import zlib
 from array import array
 from bisect import bisect_left, bisect_right
@@ -21,7 +22,7 @@ from functools import cache, lru_cache
 from heapq import merge
 from itertools import groupby
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile
 from threading import Lock, Thread
 from weakref import WeakKeyDictionary, WeakSet, WeakValueDictionary
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
@@ -683,18 +684,54 @@ def _trim_archives(published):
             except OSError:
                 pass
     archives.sort(reverse=True)
+    cutoff = archives[_MAX_ARCHIVES - 2][0] if len(archives) >= _MAX_ARCHIVES - 1 else None
     for _, path in archives[_MAX_ARCHIVES - 1:]:
+        if cutoff is not None:
+            try:
+                # Выбор архива может произойти во время записи другого отчёта.
+                # Повторно проверить время непосредственно перед удалением.
+                if path.stat().st_mtime_ns >= cutoff:
+                    continue
+            except OSError:
+                continue
         _unlink_archive(path)
 
 
-def wait_report_jobs(databases):
+def cleanup_report_temps(directory):
+    """Удалить временные архивы, оставшиеся после аварийного завершения записи."""
+    directory = Path(directory)
+    try:
+        paths = directory.glob('.platform-check-*.zip.*.tmp')
+        for path in paths:
+            _unlink_archive(path)
+    except OSError:
+        logger.info('Не удалось очистить временные архивы проверки платформы в %s', directory,
+                    exc_info=True)
+
+
+def mark_archive_used(path):
+    """Сделать выбранный архив самым свежим для возрастной и LRU-очистки."""
+    path = Path(path)
+    try:
+        # Не ждать блокировку публикации: она удерживается до завершения
+        # атомарной замены, и чтение готового снимка не должно зависеть от неё.
+        os.utime(path, None)
+        return _stat_signature(path.stat())
+    except OSError:
+        return None
+
+
+def wait_report_jobs(databases, timeout=30):
     """Не запускать новых задач для закрываемых индексов и дождаться текущих."""
     databases = set(databases)
     with _REPORTS_LOCK:
         _CLOSING_DATABASES.update(databases)
         jobs = [job for (db, _), job in _REPORT_JOBS.items() if db in databases]
+    deadline = None if timeout is None else time.monotonic() + timeout
     for job in jobs:
-        job.join()
+        remaining = None if deadline is None else max(0, deadline - time.monotonic())
+        job.join(timeout=remaining)
+    return all(not job.is_alive() for job in jobs)
 
 
 class _Report:
@@ -814,10 +851,12 @@ class _Report:
 
     def save(self, path, key, before_replace):
         try:
-            # Соседний временный каталог: замена целого архива атомарна
-            # и при одновременной записи из разных процессов.
-            with TemporaryDirectory(dir=path.parent) as tmp_dir:
-                temp = Path(tmp_dir) / path.name
+            # Временный файл расположен рядом: replace атомарен, а его
+            # отдельный суффикс позволяет убрать недописанный файл при старте.
+            with NamedTemporaryFile(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp',
+                                   delete=False) as stream:
+                temp = Path(stream.name)
+            try:
                 with ZipFile(temp, 'w') as archive:
                     header = json.dumps([key, self.count, self.starts], ensure_ascii=False)
                     archive.writestr('report.json', header.encode(), compress_type=ZIP_DEFLATED, compresslevel=1)
@@ -831,6 +870,8 @@ class _Report:
                     replace_with_retry(temp, path)
                     self.archive_stamp = _stat_signature(path.stat())
                     _trim_archives(path)
+            finally:
+                temp.unlink(missing_ok=True)
         except OSError:
             logger.warning('Не удалось сохранить кэш диагностики %s', path, exc_info=True)
             return False
@@ -972,8 +1013,13 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
     with _REPORTS_LOCK:
         report = _known_report(cache_id, warm=warm)
         if not warm and report is not None and report is not invalid:
-            return key, report
-        restore_lock = _RESTORE_LOCKS.setdefault(cache_id, Lock())
+            restore_lock = None
+        else:
+            restore_lock = _RESTORE_LOCKS.setdefault(cache_id, Lock())
+    if restore_lock is None:
+        if path.is_file():
+            report.archive_stamp = mark_archive_used(path)
+        return key, report
 
     def prepare(report, pin):
         # Рабочий поток отчёта живёт дольше HTTP/MCP-вызова, который его создал.
@@ -1025,11 +1071,14 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
             report = _known_report(cache_id, warm=warm)
         if report is not None:
             if not warm or report.has_archive(path):
+                if report.has_archive(path):
+                    report.archive_stamp = mark_archive_used(path)
                 return key, report
         elif invalid is None and revision[1] == 'ready':
             restored = _Report()
             restored.restore(path, key, conn)
             if restored.archive_stamp is not None:
+                restored.archive_stamp = mark_archive_used(path)
                 with _REPORTS_LOCK:
                     _remember(cache_id, restored)
                 return key, restored

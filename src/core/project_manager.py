@@ -251,6 +251,8 @@ class ProjectManager:
         self._reindex_local = threading.local()
         self._platform_workers: set[threading.Thread] = set()
         self._closing_platform_workers = False
+        self._platform_warm_pending: OrderedDict[str, tuple[str, bool]] = OrderedDict()
+        self._platform_warm_coordinator: threading.Thread | None = None
         # Кэш причин ошибок индексации; постоянная копия хранится рядом с
         # проектом в index-error.txt.
         self._index_errors: OrderedDict[str, str] = OrderedDict()
@@ -268,6 +270,8 @@ class ProjectManager:
         self._registry_lock_key = str(self.data_dir.resolve() / 'projects.json')
         # Завершить атомарное восстановление выгрузок до запуска фоновых потоков.
         for project in self._load_registry().values():
+            from .platform_check import cleanup_report_temps
+            cleanup_report_temps(self._index_path(project.id).parent)
             for source in project.sources:
                 local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
                 root = self.get_source_xml_path(project.id, source.id) or local_root
@@ -308,6 +312,7 @@ class ProjectManager:
         """Удалить кэши и завершённые задачи, привязанные к удалённому проекту."""
         self._invalidate_analysis_caches(project_id)
         with self._base_diff_lock:
+            self._platform_warm_pending.pop(project_id, None)
             self._warm_failed.pop(project_id, None)
             self._checks_failed.pop(project_id, None)
             for mapping in (self._warming, self._checks_warming):
@@ -671,6 +676,13 @@ class ProjectManager:
         with self._db_pins_changed:
             self._db_pins_changed.notify_all()
 
+        # Не удалять каталог, пока поток отчёта ещё может атомарно опубликовать
+        # архив рядом с индексом. Новые задачи для Database блокируются здесь.
+        with self._db_lock:
+            db = self._db_pool.get(project_id)
+        if db is not None:
+            from .platform_check import wait_report_jobs
+            wait_report_jobs([db], timeout=None)
         self._retire_project_db(project_id)
         self._forget_project_resources(project_id)
 
@@ -1499,21 +1511,49 @@ class ProjectManager:
 
     def warm_platform_checks(self, version: str = '', *, project_id: str | None = None) -> None:
         """Прогреть отчёты после изменения справки или выбора версии в проекте."""
-        from .platform_check import warm_ready_report
-
-        def run():
-            newest = self.platform_help.newest()
-            projects = (self.get_project(project_id),) if project_id else self.list_projects()
-            target = (projects[0].platform_version if project_id else version) or newest
-            index = self.platform_help.get(target) if target else None
-            if index is None:
+        projects = (self.get_project(project_id),) if project_id else self.list_projects()
+        with self._base_diff_lock:
+            if self._closing_platform_workers:
                 return
             for project in projects:
-                if project.status != 'ready' or (not project_id and not version and project.platform_version):
-                    continue
-                if (project.platform_version or newest) != target:
-                    continue
+                self._platform_warm_pending[project.id] = (version, project_id is not None)
+                self._platform_warm_pending.move_to_end(project.id)
+            coordinator = self._platform_warm_coordinator
+            if coordinator is not None and coordinator.is_alive():
+                return
+
+            name = f'platform-check-warm-{project_id or version or "auto"}'
+            coordinator = threading.Thread(target=self._run_platform_warm_queue, daemon=True, name=name)
+            self._platform_warm_coordinator = coordinator
+            self._platform_workers.add(coordinator)
+            try:
+                coordinator.start()
+            except RuntimeError:
+                self._platform_workers.discard(coordinator)
+                self._platform_warm_coordinator = None
+                logger.exception('Не удалось запустить координатор прогрева проверок платформы')
+
+    def _run_platform_warm_queue(self) -> None:
+        from .platform_check import warm_ready_report
+        current = threading.current_thread()
+        try:
+            while True:
+                with self._base_diff_lock:
+                    if self._closing_platform_workers or not self._platform_warm_pending:
+                        return
+                    project_id, (version, specific) = self._platform_warm_pending.popitem(last=False)
+                current.name = f'platform-check-warm-{project_id if specific else version or "auto"}'
                 try:
+                    project = self.get_project(project_id)
+                    newest = self.platform_help.newest()
+                    target = (project.platform_version if specific else version) or newest
+                    if (project.status != 'ready'
+                            or (not specific and not version and project.platform_version)
+                            or (project.platform_version or newest) != target):
+                        continue
+                    index = self.platform_help.get(target) if target else None
+                    if index is None:
+                        continue
                     with self.project_pin(project.id):
                         engine = self.get_search(project.id)
                         try:
@@ -1521,10 +1561,30 @@ class ProjectManager:
                                               project_pin=self.project_pin)
                         finally:
                             engine.db.close_thread_reader()
+                except KeyError:
+                    logger.info('Проект %s удалён до прогрева проверки платформы', project_id)
                 except Exception:
-                    logger.exception('Проект %s: не удалось запустить проверку платформы', project.id)
-
-        self._start_platform_worker(run, f'platform-check-warm-{project_id or version or "auto"}')
+                    logger.exception('Проект %s: не удалось запустить проверку платформы', project_id)
+        finally:
+            with self._base_diff_lock:
+                self._platform_workers.discard(current)
+                if self._platform_warm_coordinator is current:
+                    self._platform_warm_coordinator = None
+                # Запрос мог попасть между последней проверкой очереди и
+                # очисткой ссылки на координатор. Передать его новому потоку.
+                if self._platform_warm_pending and not self._closing_platform_workers:
+                    project_id, (version, specific) = next(iter(self._platform_warm_pending.items()))
+                    name = f'platform-check-warm-{project_id if specific else version or "auto"}'
+                    coordinator = threading.Thread(target=self._run_platform_warm_queue,
+                                                   daemon=True, name=name)
+                    self._platform_warm_coordinator = coordinator
+                    self._platform_workers.add(coordinator)
+                    try:
+                        coordinator.start()
+                    except RuntimeError:
+                        self._platform_workers.discard(coordinator)
+                        self._platform_warm_coordinator = None
+                        logger.exception('Не удалось перезапустить координатор прогрева проверок платформы')
 
     def _start_platform_worker(self, target, name: str) -> None:
         def run():
@@ -2814,7 +2874,9 @@ class ProjectManager:
                 pool = list(self._db_pool.values())
             # Report workers release project pins through _db_lock, so never
             # join them while holding the pool lock.
-            wait_report_jobs(pool)
+            if not wait_report_jobs(pool, timeout=30):
+                logger.error('Фоновые записи отчётов платформы не завершились за 30 секунд')
+                raise TimeoutError('Фоновые записи отчётов платформы не завершились за 30 секунд')
             with self._db_lock:
                 self._db_pool.clear()
                 self._db_overflow.clear()
