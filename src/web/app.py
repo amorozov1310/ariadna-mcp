@@ -55,6 +55,12 @@ def get_pm() -> ProjectManager:
     return _pm
 
 
+def project_read_lease(project_id: str):
+    """Закрепить индекс на время HTTP-обработчика с несколькими чтениями."""
+    with get_pm().read_lease(project_id):
+        yield
+
+
 # ============================================
 # Template globals (Этап U0)
 # ============================================

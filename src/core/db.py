@@ -527,7 +527,7 @@ class Database:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        lock_key = os.path.normcase(os.path.abspath(db_path)) if db_path not in (':memory:', '') else db_path
+        lock_key = self._schema_lock_key(db_path)
         with _SCHEMA_LOCKS_GUARD:
             self._schema_lock = _SCHEMA_LOCKS.setdefault(lock_key, threading.RLock())
         self.rebuild_marker_path = db_path + '.reindex-required'
@@ -551,6 +551,18 @@ class Database:
         self._retired = False
         # (st_dev, st_ino) файла индекса при открытии — см. file_replaced().
         self._file_id: tuple[int, int] | None = None
+        self._pool_lease_released = None
+
+    @staticmethod
+    def _schema_lock_key(db_path: str) -> str:
+        return os.path.normcase(os.path.abspath(db_path)) if db_path not in (':memory:', '') else db_path
+
+    @classmethod
+    def forget_schema_lock(cls, db_path: str) -> None:
+        """Удалить блокировку пути после удаления проекта и его индекса."""
+        key = cls._schema_lock_key(db_path)
+        with _SCHEMA_LOCKS_GUARD:
+            _SCHEMA_LOCKS.pop(key, None)
 
     def _open_conn(self) -> sqlite3.Connection:
         """Open one connection with the PRAGMAs/functions every connection
@@ -558,27 +570,32 @@ class Database:
         (already on) is what lets several connections to the same file
         coexist — one writing, the rest reading — without blocking."""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.row_factory = sqlite3.Row
-        # D5: str.casefold does full Unicode case folding (unlike SQLite's
-        # built-in NOCASE, which is ASCII-only). *_cf columns are filled with
-        # str.casefold() at insert time; параметр для сравнения с ними
-        # приводится в Python до SQL (casefold(?) на каждой строке стоил
-        # втрое больше времени). Функция в SQL остаётся для колонок без _cf
-        # (casefold(a.type_desc)); deterministic=True позволяет SQLite
-        # вычислить casefold(?) от параметра один раз на запрос.
-        conn.create_function('casefold', 1, lambda s: s.casefold() if s is not None else None,
-                             deterministic=True)
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.row_factory = sqlite3.Row
+            # D5: str.casefold does full Unicode case folding (unlike SQLite's
+            # built-in NOCASE, which is ASCII-only). *_cf columns are filled with
+            # str.casefold() at insert time; параметр для сравнения с ними
+            # приводится в Python до SQL (casefold(?) на каждой строке стоил
+            # втрое больше времени). Функция в SQL остаётся для колонок без _cf
+            # (casefold(a.type_desc)); deterministic=True позволяет SQLite
+            # вычислить casefold(?) от параметра один раз на запрос.
+            conn.create_function('casefold', 1, lambda s: s.casefold() if s is not None else None,
+                                 deterministic=True)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     def connect(self) -> sqlite3.Connection:
-        self._recreate_if_stale_schema()
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        self.conn = self._open_conn()
-        self._file_id = self._current_file_id()
-        return self.conn
+        with self._schema_lock:
+            self._recreate_if_stale_schema()
+            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+            self.conn = self._open_with_retry()
+            self._file_id = self._current_file_id()
+            return self.conn
 
     def _current_file_id(self) -> tuple[int, int] | None:
         """(st_dev, st_ino) файла индекса; None — файла нет. На Windows
@@ -636,8 +653,9 @@ class Database:
                 raise IndexRemovedError(self.db_path)
             # Nothing to read yet — make sure the writer has created
             # the file/schema first rather than racing it here.
-            self.connect()
-            self.init_schema()
+            with self._schema_lock:
+                self.connect()
+                self.init_schema()
         # Открыть и зарегистрировать — под той же блокировкой, что retire() и
         # close(): иначе соединение, открытое между проверкой _retired и
         # регистрацией, пережило бы закрытие, и на Windows rmtree удаляемого
@@ -672,6 +690,8 @@ class Database:
             yield conn
         finally:
             conn.release()
+            if self._pool_lease_released is not None:
+                self._pool_lease_released()
 
     def _notify_reader_available(self) -> None:
         with self._readers_lock:

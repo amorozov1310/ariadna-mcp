@@ -404,6 +404,102 @@ def test_deleting_project_releases_database_and_cached_results(tmp_path, monkeyp
     pm.close_all()
 
 
+def test_database_lease_release_trims_soft_pool_overflow_and_schema_locks(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+    import src.core.db as db_module
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 2)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    project_ids = [f'p{i}' for i in range(12)]
+    for project_id in project_ids:
+        pm.create_project(project_id, project_id)
+
+    original_connect = Database.connect
+    all_open = threading.Barrier(len(project_ids))
+
+    def concurrent_connect(db):
+        all_open.wait(timeout=8)
+        return original_connect(db)
+
+    monkeypatch.setattr(Database, 'connect', concurrent_connect)
+    try:
+        with ThreadPoolExecutor(max_workers=len(project_ids)) as pool:
+            databases = list(pool.map(pm.get_db, project_ids))
+        assert len(pm._db_pool) > 2  # мягкий предел на время пересекающихся открытий
+
+        # Это аренда читателя Database без pin от ProjectManager. Её отпускание
+        # всё равно должно сократить переполнение от неприкреплённых get_db.
+        with databases[0].read_lease() as conn:
+            assert conn.execute('SELECT 1').fetchone()[0] == 1
+        assert len(pm._db_pool) <= 2
+
+        keys = {Database._schema_lock_key(str(pm._index_path(pid))) for pid in project_ids}
+        assert keys <= db_module._SCHEMA_LOCKS.keys()
+        for project_id in project_ids:
+            pm.delete_project(project_id)
+        assert not (keys & db_module._SCHEMA_LOCKS.keys())
+    finally:
+        all_open.abort()
+        pm.close_all()
+
+
+def test_manifest_and_call_graph_http_leases_survive_concurrent_eviction(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+    from fastapi.testclient import TestClient
+    from src.core.call_analyzer import CallAnalyzer
+    from src.web import app as app_module
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    project_ids = [f'p{i}' for i in range(16)]
+    for project_id in project_ids:
+        pm.create_project(project_id, project_id)
+        pm.get_db(project_id)
+
+    def manifest(project_id, source_id):
+        db = pm.get_db(project_id)
+        conn = db.read_conn()
+        conn.execute('SELECT 1').fetchone()
+        time.sleep(.005)
+        conn.execute('SELECT 1').fetchone()
+        return {'project_id': project_id, 'source_id': source_id}
+
+    def call_tree(_analyzer, *args, **kwargs):
+        conn = _analyzer.db.read_conn()
+        conn.execute('SELECT 1').fetchone()
+        time.sleep(.005)
+        conn.execute('SELECT 1').fetchone()
+        return None
+
+    monkeypatch.setattr(pm, 'source_file_manifest', manifest)
+    monkeypatch.setattr(CallAnalyzer, 'build_call_tree', call_tree)
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+
+        def request(index):
+            project_id = project_ids[index % len(project_ids)]
+            if index % 2:
+                return client.get(f'/api/projects/{project_id}/sources/main/manifest')
+            return client.get(f'/api/projects/{project_id}/graph/calltree',
+                              params={'procedure': 'Work'})
+
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            responses = list(pool.map(request, range(128)))
+        assert [response.status_code for response in responses] == [200] * 128
+        assert not pm._db_pins
+        assert len(pm._db_pool) <= 8
+        open_connections = sum(bool(db.conn) + sum(not reader._closed for reader in db._readers)
+                               for db in pm._db_instances)
+        # На каждом из восьми Database остаются ленивые thread-local readers;
+        # общий предел — не больше writer + MAX_READERS на объект пула.
+        assert open_connections <= 8 * (1 + Database.MAX_READERS)
+    finally:
+        app_module.set_pm(previous)
+        pm.close_all()
+
+
 def test_process_lock_maps_keep_only_active_locks(tmp_path):
     import gc
     from src.core import glossary

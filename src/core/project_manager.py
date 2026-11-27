@@ -20,7 +20,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import BinaryIO
-from weakref import WeakSet, WeakValueDictionary
+from weakref import WeakSet, WeakValueDictionary, ref
 
 from . import parser_fingerprint
 from .archives import extract_archive
@@ -689,6 +689,8 @@ class ProjectManager:
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)
                 raise ProjectFilesNotRemovedError(project_id, path, e) from e
 
+        Database.forget_schema_lock(str(self._index_path(project_id)))
+
     # ============================================
     # SOURCE MANAGEMENT
     # ============================================
@@ -1169,8 +1171,30 @@ class ProjectManager:
             try:
                 db = Database(str(self._index_path(project_id)))
                 self._db_instances.add(db)
-                db.connect()
-                db.init_schema()
+                # Первое открытие выполняется под блокировкой всего пути:
+                # конкурирующий статус/читатель не должен менять journal_mode
+                # до завершения схемы и публикации Database в пуле.
+                with db._schema_lock:
+                    db.connect()
+                    db.init_schema()
+                    with self._db_pins_changed:
+                        self._db_opening.pop(project_id, None)
+                        if self._closing or project_id not in self._load_registry():
+                            db.retire()
+                            event.set()
+                            self._db_pins_changed.notify_all()
+                            if self._closing:
+                                raise RuntimeError("ProjectManager is closing")
+                            raise ProjectNotFoundError(project_id)
+                        manager_ref = ref(self)
+                        def trim_after_lease(manager_ref=manager_ref):
+                            manager = manager_ref()
+                            if manager is not None:
+                                manager._trim_db_pool()
+                        db._pool_lease_released = trim_after_lease
+                        self._db_pool[project_id] = db
+                        event.set()
+                        self._db_pins_changed.notify_all()
             except BaseException:
                 if db is not None:
                     db.close()
@@ -1180,18 +1204,6 @@ class ProjectManager:
                     event.set()
                     self._db_pins_changed.notify_all()
                 raise
-            with self._db_pins_changed:
-                self._db_opening.pop(project_id, None)
-                if self._closing or project_id not in self._load_registry():
-                    db.retire()
-                    event.set()
-                    self._db_pins_changed.notify_all()
-                    if self._closing:
-                        raise RuntimeError("ProjectManager is closing")
-                    raise ProjectNotFoundError(project_id)
-                self._db_pool[project_id] = db
-                event.set()
-                self._db_pins_changed.notify_all()
             if db.stale_schema_recreated or db.rebuild_required:
                 self._handle_stale_schema(project_id, db)
             return db
@@ -1218,20 +1230,30 @@ class ProjectManager:
             self._db_pins[project_id] = self._db_pins.get(project_id, 0) + 1
 
     def _unpin_db(self, project_id: str) -> None:
-        retired = []
         with self._db_pins_changed:
             count = self._db_pins.get(project_id, 0) - 1
             if count > 0:
                 self._db_pins[project_id] = count
             else:
                 self._db_pins.pop(project_id, None)
+            self._db_pins_changed.notify_all()
+        self._trim_db_pool()
+
+    def _trim_db_pool(self) -> None:
+        """Сжать мягкое переполнение после освобождения любой аренды читателя."""
+        retired = []
+        with self._db_pins_changed:
             limit = max(1, DB_POOL_LIMIT)
             while len(self._db_pool) > limit:
+                def idle(pid):
+                    db = self._db_pool[pid]
+                    return (not self._db_pins.get(pid)
+                            and not any(reader.active for reader in db._readers))
+
                 evict_id = next((pid for pid in self._db_pool
-                                 if pid in self._db_overflow and not self._db_pins.get(pid)), None)
+                                 if pid in self._db_overflow and idle(pid)), None)
                 if evict_id is None:
-                    evict_id = next((pid for pid in self._db_pool
-                                     if not self._db_pins.get(pid)), None)
+                    evict_id = next((pid for pid in self._db_pool if idle(pid)), None)
                 if evict_id is None:
                     break
                 retired.append(self._db_pool.pop(evict_id))
@@ -1486,12 +1508,13 @@ class ProjectManager:
 
     def _cached_diff(self, project_id: str, base_id: str, source_id: str | None = None):
         """Посчитанный и не устаревший BaseDiff пары; None — нет."""
-        key = (self._diff_key(self.get_db(project_id)), self._diff_key(self.get_db(base_id)))
         pair = (project_id, base_id, *self._diff_sources(project_id, base_id, source_id))
-        with self._base_diff_lock:
-            cached = self._base_diffs.get(pair)
-            if cached is not None:
-                self._base_diffs.move_to_end(pair)
+        with self.read_lease(project_id) as db, self.read_lease(base_id) as base_db:
+            key = (self._diff_key(db), self._diff_key(base_db))
+            with self._base_diff_lock:
+                cached = self._base_diffs.get(pair)
+                if cached is not None:
+                    self._base_diffs.move_to_end(pair)
         return cached[1] if cached and cached[0] == key else None
 
     def _diff_between(self, project_id: str, base_id: str, source_id: str | None = None):
@@ -1504,19 +1527,23 @@ class ProjectManager:
             raise ValueError(f"Проект «{project_id}» сейчас индексируется — сравнение после окончания")
         src, base_src = self._diff_sources(project_id, base_id, source_id)
         pair = (project_id, base_id, src, base_src)
-        diff = self._cached_diff(project_id, base_id, source_id)
-        if diff is not None:
-            return diff
         with self._base_diff_lock:
             lock = self._diff_pair_locks.setdefault(pair, threading.Lock())
-        with lock:
-            diff = self._cached_diff(project_id, base_id, source_id)
-            if diff is None:
-                # Оба индекса закреплены на всё время чтения: под давлением
-                # пула временно допускается переполнение вместо вытеснения аренды.
-                with self.read_lease(project_id) as db, self.read_lease(base_id) as base_db:
-                    key = (self._diff_key(db), self._diff_key(base_db))
-                    diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, src, base_src)
+        # Порядок во всех путях один: сначала аренды обоих читателей, затем
+        # блокировка пары. Ожидая читателя, нельзя удерживать пару: иначе
+        # экспорт отчёта может занять её и ждать читателя у восьми diff-запросов.
+        with self.read_lease(project_id) as db, self.read_lease(base_id) as base_db:
+            key = (self._diff_key(db), self._diff_key(base_db))
+            with lock:
+                with self._base_diff_lock:
+                    cached = self._base_diffs.get(pair)
+                    if cached is not None:
+                        self._base_diffs.move_to_end(pair)
+                if cached is not None and cached[0] == key:
+                    return cached[1]
+                # compute_base_diff делает несколько последовательных SQL;
+                # обе аренды остаются активны до окончания расчёта.
+                diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, src, base_src)
                 with self._base_diff_lock:
                     self._base_diffs[pair] = (key, diff)
                     self._base_diffs.move_to_end(pair)
@@ -1627,6 +1654,13 @@ class ProjectManager:
                 pass
 
     def get_update_conflicts(self, project_id: str, release_id: str = '', source_id: str | None = None):
+        # После расчёта сравнений ещё читаются перехваты исходного проекта.
+        # Удержать его аренду до конца всего ответа (включая MCP-форматирование).
+        with self.read_lease(project_id):
+            return self._get_update_conflicts(project_id, release_id, source_id)
+
+    def _get_update_conflicts(self, project_id: str, release_id: str = '',
+                              source_id: str | None = None):
         """Конфликты обновления (base_diff.compute_update_conflicts): доработки
         проекта против его базы × изменения релиза release_id (новая типовая)
         против той же базы; release_id пуст — новый релиз из настроек проекта.
@@ -1657,6 +1691,11 @@ class ProjectManager:
 
     def intercepts(self, project_id: str, source_id: str | None = None, module_name: str = '',
                    procedure_name: str = '') -> list:
+        with self.read_lease(project_id):
+            return self._intercepts(project_id, source_id, module_name, procedure_name)
+
+    def _intercepts(self, project_id: str, source_id: str | None = None, module_name: str = '',
+                    procedure_name: str = '') -> list:
         """Перехваты процедур источника source_id в остальных источниках проекта
         (расширениях): рёбра override графа вызовов (&Вместо/&После/… в коде) и
         перехваты событий заимствованных форм (callType в Form.xml расширения,
@@ -1857,6 +1896,15 @@ class ProjectManager:
 
     def get_procedure_diff(self, project_id: str, module_name: str, procedure_name: str,
                            source_id: str | None = None, base_id: str | None = None) -> dict:
+        base_id = base_id or self._base_of(project_id)
+        # Внутри чтутся outline и текст каждого проекта; держим оба индекса
+        # закреплёнными между этими последовательными запросами.
+        with self.read_lease(project_id), self.read_lease(base_id):
+            return self._get_procedure_diff(project_id, module_name, procedure_name,
+                                            source_id, base_id)
+
+    def _get_procedure_diff(self, project_id: str, module_name: str, procedure_name: str,
+                            source_id: str | None = None, base_id: str | None = None) -> dict:
         """Текст процедуры в базе и в проекте и их diff. status: changed |
         same | added | removed | missing (нет ни там, ни там) | unreadable
         (процедура в индексе есть, а текста нет — base_unreadable /
@@ -2219,8 +2267,17 @@ class ProjectManager:
         db = db or Database(str(self._index_path(project_id)))
         if owns_db:
             self._db_instances.add(db)
-            db.connect()
-            db.init_schema()
+            # Статус переиндексации и открытие читателем могут прийтись на
+            # первый запуск индекса; не выпускать путь между PRAGMA WAL,
+            # схемой и первой записью состояния.
+            db._schema_lock.acquire()
+            try:
+                db.connect()
+                db.init_schema()
+            except BaseException:
+                db._schema_lock.release()
+                db.close()
+                raise
         try:
             project.status = 'indexing'
             self._save_project_to_disk(project_id, project)
@@ -2229,7 +2286,10 @@ class ProjectManager:
             return project, db
         finally:
             if owns_db:
-                db.close()
+                try:
+                    db.close()
+                finally:
+                    db._schema_lock.release()
 
     def reindex_async(self, project_id: str, source_id: str | None = None) -> dict:
         """

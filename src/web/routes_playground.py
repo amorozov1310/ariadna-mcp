@@ -21,13 +21,13 @@ import logging
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..core.project_manager import PROJECT_GONE
 from ..mcp_server.tools import execute_tool, is_error_text
-from .app import templates, get_pm
+from .app import templates, get_pm, project_read_lease
 
 logger = logging.getLogger('ariadna')
 
@@ -166,7 +166,8 @@ def build_args(schema: dict, params: dict, project_id: str) -> tuple[dict, str |
     return args, None
 
 
-@router.get("/projects/{project_id}/playground", response_class=HTMLResponse)
+@router.get("/projects/{project_id}/playground", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 async def playground_page(request: Request, project_id: str):
     pm = get_pm()
     try:

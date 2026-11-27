@@ -2,11 +2,11 @@
 
 import logging
 
-from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from .app import templates, get_pm
+from .app import templates, get_pm, project_read_lease
 from ..core.project_manager import (PROJECT_GONE, ProjectFilesNotRemovedError,
                                      ReindexInProgressError)
 from ..core.source_delta import DeltaBusy
@@ -53,7 +53,8 @@ async def project_create(
     return RedirectResponse(f"/projects/{project_id}", status_code=303)
 
 
-@router.get("/projects/{project_id}", response_class=HTMLResponse)
+@router.get("/projects/{project_id}", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 def project_dashboard(request: Request, project_id: str):
     pm = get_pm()
     try:
