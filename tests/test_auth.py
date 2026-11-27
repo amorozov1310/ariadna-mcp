@@ -6,8 +6,11 @@ import json
 import os
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
+from queue import Empty
 from pathlib import Path
+from multiprocessing import Event, Process, Queue, get_context
 
 import pytest
 
@@ -19,6 +22,38 @@ from tests.license_helper import install_team_license
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 HOST = {'Host': '127.0.0.1:19878'}
+
+
+def _verify_during_revoke(data_dir, token, start, done, results):
+    store = TokenStore(data_dir)
+    try:
+        start.wait()
+        while not done.is_set():
+            results.put(('verify', store.verify(token) is not None))
+        time.sleep(0.13)  # дольше окна проверки кэша в 100 мс
+        results.put(('final', store.verify(token) is None))
+    except Exception as exc:  # передаём исключения родительскому тесту
+        results.put(('error', repr(exc)))
+
+
+def _revoke_at_start(data_dir, token_id, start, done, results):
+    try:
+        start.wait()
+        TokenStore(data_dir).revoke(token_id)
+        results.put(('revoked', True))
+    except Exception as exc:
+        results.put(('error', repr(exc)))
+    finally:
+        done.set()
+
+
+def _first_verify_many(data_dir, token, start, results):
+    try:
+        store = TokenStore(data_dir)
+        start.wait()
+        results.put(('verified', all(store.verify(token) is not None for _ in range(20))))
+    except Exception as exc:
+        results.put(('error', repr(exc)))
 
 
 def test_token_store_create_verify_revoke(tmp_path):
@@ -127,6 +162,99 @@ def test_broken_tokens_file_keeps_server_closed(tmp_path):
     (tmp_path / 'tokens.json').write_text('{не json', encoding='utf-8')
     store = TokenStore(tmp_path)
     assert store.enabled() and store.verify('ar_любой') is None
+
+
+@pytest.mark.parametrize('contents', [b'', b'{broken', b'{}', b'[null]', b'[{}]'])
+def test_invalid_token_file_fails_closed(tmp_path, contents):
+    (tmp_path / 'tokens.json').write_bytes(contents)
+    store = TokenStore(tmp_path)
+    assert store.enabled()
+    assert store.verify('ar_synthetic') is None
+
+
+def test_disappeared_token_file_stays_fail_closed_until_restart(tmp_path):
+    store = TokenStore(tmp_path)
+    _, token = store.create('Синтетический владелец', 'admin')
+    assert store.verify(token) is not None
+    store.path.unlink()
+    assert store.enabled() and store.verify(token) is None
+
+
+def test_permission_error_during_token_check_fails_closed_without_raising(tmp_path, monkeypatch):
+    store = TokenStore(tmp_path)
+    _, token = store.create('Синтетический владелец', 'admin')
+    original = Path.stat
+
+    def denied(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError('synthetic denied')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'stat', denied)
+    assert store.enabled() and store.verify(token) is None
+
+
+def test_multiprocess_revoke_and_last_used_persistence_are_serialized(tmp_path):
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический владелец', 'admin')
+    ctx = get_context('spawn')
+    start, done, results = ctx.Event(), ctx.Event(), ctx.Queue()
+    verifier = ctx.Process(target=_verify_during_revoke,
+                           args=(str(tmp_path), token, start, done, results))
+    revoker = ctx.Process(target=_revoke_at_start,
+                          args=(str(tmp_path), info.id, start, done, results))
+    verifier.start()
+    revoker.start()
+    start.set()
+    verifier.join(15)
+    revoker.join(15)
+    if verifier.is_alive():
+        verifier.terminate()
+        verifier.join()
+        pytest.fail('процесс verify завис')
+    if revoker.is_alive():
+        revoker.terminate()
+        revoker.join()
+        pytest.fail('процесс revoke завис')
+    messages = []
+    while True:
+        try:
+            messages.append(results.get(timeout=0.1))
+        except Empty:
+            break
+    assert verifier.exitcode == revoker.exitcode == 0
+    assert not [m for m in messages if m[0] == 'error'], messages
+    assert ('revoked', True) in messages
+    assert ('final', True) in messages
+    assert TokenStore(tmp_path).verify(token) is None
+    assert not list(tmp_path.glob('tokens.json.*.tmp'))
+
+
+def test_multiprocess_first_verify_uses_unique_temp_files(tmp_path):
+    _, token = TokenStore(tmp_path).create('Синтетический владелец', 'admin')
+    ctx = get_context('spawn')
+    start, results = ctx.Event(), ctx.Queue()
+    workers = [ctx.Process(target=_first_verify_many,
+                           args=(str(tmp_path), token, start, results)) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    start.set()
+    for worker in workers:
+        worker.join(15)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join()
+            pytest.fail('процесс verify завис')
+    messages = []
+    while True:
+        try:
+            messages.append(results.get(timeout=0.1))
+        except Empty:
+            break
+    assert all(worker.exitcode == 0 for worker in workers)
+    assert messages.count(('verified', True)) == 2
+    assert not [message for message in messages if message[0] == 'error'], messages
+    assert not list(tmp_path.glob('tokens.json.*.tmp'))
 
 
 def test_cli_create_and_list(tmp_path, capsys):

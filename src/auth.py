@@ -33,8 +33,10 @@ import logging
 import os
 import secrets
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +53,34 @@ TOKEN_PREFIX = 'ar_'
 _LAST_USED_PERSIST_SEC = 300
 # Защита от совпадения всех полей stat: читаем маленький файл не чаще раза в 100 мс.
 _TOKEN_HASH_CHECK_NS = 100_000_000
+
+
+@contextmanager
+def _token_file_lock(path: Path):
+    """Межпроцессная блокировка рядом с tokens.json (Windows и POSIX)."""
+    lock_path = path.with_name(path.name + '.lock')
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('a+b') as stream:
+        if os.name == 'nt':
+            import msvcrt
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b'0')
+                stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass
@@ -80,60 +110,95 @@ class TokenStore:
         self._tokens: dict[str, TokenInfo] = {}       # id -> info
         self._by_hash: dict[str, TokenInfo] = {}
         self._last_persist: dict[str, float] = {}
+        self._broken = False
+        self._has_seen_file = False
+        self._ever_enabled = False
         self.license = LicenseStore(data_dir)
 
     # ------------------------------------------------------------ чтение
-    def _reload(self) -> None:
+    def _reload(self, *, force: bool = False) -> None:
         try:
             stat = self.path.stat()
             signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
                          getattr(stat, 'st_ctime_ns', None))
         except FileNotFoundError:
-            stat = None
-            signature = None
+            if self._has_seen_file or self._ever_enabled:
+                self._fail_closed('файл токенов исчез после запуска')
+            else:
+                self._tokens, self._by_hash = {}, {}
+                self._broken = False
+                self._remember_file(None, None)
+            return
+        except OSError as e:
+            self._fail_closed(f'не удалось проверить файл токенов: {e}')
+            return
+
         now_ns = time.monotonic_ns()
-        content = None
-        if signature == self._file_signature:
-            if signature is None:
-                return
-            if now_ns - self._last_hash_check_ns < _TOKEN_HASH_CHECK_NS:
-                return
+        if (not force and signature == self._file_signature
+                and now_ns - self._last_hash_check_ns < _TOKEN_HASH_CHECK_NS):
+            return
+
+        # Сверяем подпись до и после чтения: если файл сменился посреди чтения,
+        # повторяем попытку, чтобы хэш и кэш относились к одному содержимому.
+        for _ in range(3):
             try:
                 content = self.path.read_bytes()
-            except FileNotFoundError:
-                return self._reload()
-            content_hash = hashlib.sha256(content).hexdigest()
-            self._last_hash_check_ns = now_ns
-            if content_hash == self._content_hash:
+                after = self.path.stat()
+            except OSError as e:
+                self._fail_closed(f'не удалось прочитать файл токенов: {e}')
                 return
+            after_signature = (after.st_mtime_ns, after.st_size, after.st_ino,
+                               getattr(after, 'st_ctime_ns', None))
+            if after_signature == signature:
+                break
+            signature = after_signature
         else:
-            content_hash = None
-        tokens: dict[str, TokenInfo] = {}
-        if stat is not None:
-            try:
-                if content is None:
-                    content = self.path.read_bytes()
-                content_hash = hashlib.sha256(content).hexdigest()
-                raw = json.loads(content.decode('utf-8') or '[]')
-                for item in raw:
-                    info = TokenInfo(**{k: item.get(k, '') for k in TokenInfo.__dataclass_fields__})
-                    if info.role in ROLES and info.hash:
-                        tokens[info.id] = info
-            except (OSError, ValueError, TypeError) as e:
-                # Повреждённый файл не должен открыть сервер: токены есть, но
-                # не читаются — авторизация остаётся включённой, вход только
-                # после исправления файла.
-                logger.error('Токены: не прочитан %s (%s) — доступ закрыт', self.path, e)
-                self._tokens, self._by_hash = {}, {}
-                self._remember_file(signature, content_hash)
-                self._last_persist.clear()
-                self._broken = True
-                return
+            self._fail_closed('файл токенов постоянно меняется при чтении')
+            return
+
+        content_hash = hashlib.sha256(content).hexdigest()
+        self._last_hash_check_ns = now_ns
+        if signature == self._file_signature and content_hash == self._content_hash:
+            return
+        try:
+            if not content:
+                raise ValueError('пустой файл')
+            raw = json.loads(content.decode('utf-8'))
+            if not isinstance(raw, list):
+                raise ValueError('ожидался список токенов')
+            tokens: dict[str, TokenInfo] = {}
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise ValueError('запись токена должна быть объектом')
+                values = {k: item.get(k, '') for k in TokenInfo.__dataclass_fields__}
+                if (not all(isinstance(v, str) for v in values.values())
+                        or not values['id'] or values['role'] not in ROLES
+                        or len(values['hash']) != 64
+                        or any(c not in '0123456789abcdef' for c in values['hash'])):
+                    raise ValueError('некорректная запись токена')
+                info = TokenInfo(**values)
+                if info.id in tokens or info.hash in {t.hash for t in tokens.values()}:
+                    raise ValueError('повторяется id или хэш токена')
+                tokens[info.id] = info
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as e:
+            self._fail_closed(f'повреждён файл токенов: {e}', signature, content_hash)
+            return
+
+        self._has_seen_file = True
+        self._ever_enabled = self._ever_enabled or bool(tokens)
         self._broken = False
         self._tokens = tokens
         self._by_hash = {t.hash: t for t in tokens.values()}
         self._last_persist = {token_id: ts for token_id, ts in self._last_persist.items()
                               if token_id in tokens}
+        self._remember_file(signature, content_hash)
+
+    def _fail_closed(self, reason: str, signature=None, content_hash=None) -> None:
+        logger.warning('Токены: %s (%s) — доступ закрыт', self.path, reason)
+        self._tokens, self._by_hash = {}, {}
+        self._last_persist.clear()
+        self._broken = True
+        self._has_seen_file = True
         self._remember_file(signature, content_hash)
 
     def _remember_file(self, signature, content_hash) -> None:
@@ -183,29 +248,51 @@ class TokenStore:
             info = self._by_hash.get(_hash(token.strip()))
             if info is None:
                 return None
-            now = datetime.now()
-            info.last_used = now.isoformat(timespec='seconds')
-            ts = now.timestamp()
-            if ts - self._last_persist.get(info.id, 0) > _LAST_USED_PERSIST_SEC:
-                self._last_persist[info.id] = ts
-                self._save()
+            ts = time.time()
+            if ts - self._last_persist.get(info.id, 0) <= _LAST_USED_PERSIST_SEC:
+                return info
+            try:
+                with _token_file_lock(self.path):
+                    self._reload(force=True)
+                    info = self._by_hash.get(_hash(token.strip()))
+                    if info is None:
+                        return None
+                    now = datetime.now()
+                    info.last_used = now.isoformat(timespec='seconds')
+                    self._save()
+                    self._last_persist[info.id] = now.timestamp()
+            except OSError as e:
+                # last_used — только статистика; ошибка записи не отменяет вход.
+                logger.warning('Токены: не удалось обновить last_used для %s (%s)', info.id, e)
             return info
 
     # ------------------------------------------------------------ запись
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix('.json.tmp')
-        tmp.write_text(json.dumps([asdict(t) for t in self._tokens.values()],
-                                  ensure_ascii=False, indent=2), encoding='utf-8')
-        replace_with_retry(tmp, self.path)     # Windows: файл занят антивирусом
+        content = json.dumps([asdict(t) for t in self._tokens.values()],
+                             ensure_ascii=False, indent=2).encode('utf-8')
+        fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + '.', suffix='.tmp',
+                                        dir=self.path.parent)
         try:
-            stat = self.path.stat()
-            signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
-                         getattr(stat, 'st_ctime_ns', None))
-            content_hash = hashlib.sha256(self.path.read_bytes()).hexdigest()
-        except FileNotFoundError:
-            signature, content_hash = None, None
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(content)
+                stream.flush()
+            replace_with_retry(tmp_name, self.path)  # повтор при краткой блокировке Windows
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+        stat = self.path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
+                     getattr(stat, 'st_ctime_ns', None))
+        # Хэш соответствует именно сериализованным в памяти токенам. Если
+        # внешний писатель успел заменить файл, следующая сверка обнаружит
+        # несовпадение его содержимого с этим хэшем.
+        content_hash = hashlib.sha256(content).hexdigest()
         self._remember_file(signature, content_hash)
+        self._has_seen_file = True
+        self._ever_enabled = self._ever_enabled or bool(self._tokens)
 
     def create(self, name: str, role: str = 'user') -> tuple[TokenInfo, str]:
         """Новый токен: (запись, сам токен — показать один раз)."""
@@ -216,34 +303,38 @@ class TokenStore:
             raise ValueError(f'Роль — одна из: {", ".join(ROLES)}')
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
         with self._lock:
-            self._reload()
-            if getattr(self, '_broken', False):
-                raise ValueError(f'Файл токенов {self.path} повреждён — исправьте или удалите его')
-            limit = self.limit()
-            if len(self._tokens) >= limit:
-                state = self.license.state()
-                raise ValueError(
-                    'Без лицензии командного режима — один токен (закрыть свой сервер). '
-                    'Чтобы выдать токены команде, установите ключ на странице «Лицензия».'
-                    if not state.valid else
-                    f'Лицензия «{state.info.owner}» — на {limit} токенов, все заняты: '
-                    f'отзовите ненужный или расширьте лицензию.')
-            info = TokenInfo(id=secrets.token_hex(4), name=name, role=role, hash=_hash(token),
-                             created_at=datetime.now().isoformat(timespec='seconds'))
-            self._tokens[info.id] = info
-            self._by_hash[info.hash] = info
-            self._save()
+            with _token_file_lock(self.path):
+                self._reload(force=True)
+                if self._broken:
+                    raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
+                limit = self.limit()
+                if len(self._tokens) >= limit:
+                    state = self.license.state()
+                    raise ValueError(
+                        'Без лицензии командного режима — один токен (закрыть свой сервер). '
+                        'Чтобы выдать токены команде, установите ключ на странице «Лицензия».'
+                        if not state.valid else
+                        f'Лицензия «{state.info.owner}» — на {limit} токенов, все заняты: '
+                        f'отзовите ненужный или расширьте лицензию.')
+                info = TokenInfo(id=secrets.token_hex(4), name=name, role=role, hash=_hash(token),
+                                 created_at=datetime.now().isoformat(timespec='seconds'))
+                self._tokens[info.id] = info
+                self._by_hash[info.hash] = info
+                self._save()
         return info, token
 
     def revoke(self, token_id: str) -> TokenInfo:
         with self._lock:
-            self._reload()
-            info = self._tokens.pop(token_id, None)
-            if info is None:
-                raise KeyError(token_id)
-            self._by_hash.pop(info.hash, None)
-            self._last_persist.pop(token_id, None)
-            self._save()
+            with _token_file_lock(self.path):
+                self._reload(force=True)
+                if self._broken:
+                    raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
+                info = self._tokens.pop(token_id, None)
+                if info is None:
+                    raise KeyError(token_id)
+                self._by_hash.pop(info.hash, None)
+                self._last_persist.pop(token_id, None)
+                self._save()
         return info
 
 
