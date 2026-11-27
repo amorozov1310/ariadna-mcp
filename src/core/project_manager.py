@@ -620,7 +620,11 @@ class ProjectManager:
                 if hasattr(project, key) and key not in ('id', 'created_at', 'sources', 'index_stats'):
                     setattr(project, key, value)
             self._save_registry()
-            return project
+            selected_help_version = self.platform_help_version(project_id) if 'platform_version' in kwargs else None
+        if selected_help_version is not None:
+            from .platform_check import select_report_version
+            select_report_version(self._index_path(project_id), selected_help_version)
+        return project
 
     @contextmanager
     def _no_reindex(self, project_id: str):

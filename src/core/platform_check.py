@@ -630,6 +630,9 @@ _REPORT_ERRORS = WeakKeyDictionary()
 _CLOSING_DATABASES = WeakSet()
 _RESTORE_LOCKS = WeakValueDictionary()
 _PUBLISH_LOCKS = WeakValueDictionary()
+_SELECTED_ARCHIVES = {}
+_SELECTED_VERSIONS = {}
+_VERSION_ARCHIVES = {}
 _MAX_REPORTS = 3
 _MAX_ARCHIVES = 3
 _MAX_REPORT_ERRORS = 16
@@ -642,6 +645,26 @@ class ReportUnavailable(ValueError):
 
 def _archive_path(db_path, key):
     return Path(db_path).with_name(f'platform-check-{key}.zip')
+
+
+def select_report_version(db_path, version):
+    """Запомнить выбранную проектом версию и защитить её опубликованный отчёт."""
+    directory = Path(db_path).parent.resolve()
+    with _REPORTS_LOCK:
+        _SELECTED_VERSIONS[directory] = version
+        selected = _VERSION_ARCHIVES.get(directory, {}).get(version)
+        if selected:
+            _SELECTED_ARCHIVES[directory] = selected
+        else:
+            _SELECTED_ARCHIVES.pop(directory, None)
+
+
+def _record_report_archive(path, version):
+    directory = path.parent.resolve()
+    with _REPORTS_LOCK:
+        _VERSION_ARCHIVES.setdefault(directory, {})[version] = path.name
+        if _SELECTED_VERSIONS.get(directory) == version:
+            _SELECTED_ARCHIVES[directory] = path.name
 
 
 def _publish_lock(directory):
@@ -664,28 +687,40 @@ def prune_report_archives(db_path, keep=()):
     directory = Path(db_path).parent
     keep = {_archive_path(db_path, key).name for key in keep}
     with _publish_lock(directory):
+        with _REPORTS_LOCK:
+            selected = _SELECTED_ARCHIVES.get(directory.resolve())
+        if selected:
+            keep.add(selected)
         for path in directory.glob('platform-check*.zip'):
             if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
                 _unlink_archive(path)
 
 
 def _trim_archives(published):
-    """После публикации оставить только _MAX_ARCHIVES самых свежих архивов индекса.
+    """После публикации оставить выбранную версию и самые свежие архивы в пределах лимита.
 
     Каждая смена справки (в том числе повторная загрузка той же версии) даёт
     новый ключ и новый архив; без этого их число росло бы до следующего reindex.
     Свежие по времени записи сохраняются, чтобы откат на предыдущую справку не
     требовал полной сборки. Вызывается под блокировкой публикации."""
     archives = []
+    directory = published.parent
+    with _REPORTS_LOCK:
+        selected = _SELECTED_ARCHIVES.get(directory.resolve())
     for path in published.parent.glob('platform-check*.zip'):
-        if path != published and _CACHE_ARCHIVE.fullmatch(path.name):
+        if path != published and path.name != selected and _CACHE_ARCHIVE.fullmatch(path.name):
             try:
                 archives.append((path.stat().st_mtime_ns, path))
             except OSError:
                 pass
     archives.sort(reverse=True)
-    cutoff = archives[_MAX_ARCHIVES - 2][0] if len(archives) >= _MAX_ARCHIVES - 1 else None
-    for _, path in archives[_MAX_ARCHIVES - 1:]:
+    selected_count = int(bool(selected) and selected != published.name
+                         and (published.parent / selected).is_file())
+    excess = len(archives) + selected_count + 1 - _MAX_ARCHIVES
+    cutoff = archives[excess - 1][0] if excess > 0 else None
+    for _, path in archives[excess - 1:] if excess > 0 else ():
+        if excess <= 0:
+            break
         if cutoff is not None:
             try:
                 # Выбор архива может произойти во время записи другого отчёта.
@@ -695,6 +730,8 @@ def _trim_archives(published):
             except OSError:
                 continue
         _unlink_archive(path)
+        if not path.exists():
+            excess -= 1
 
 
 def cleanup_report_temps(directory):
@@ -830,18 +867,19 @@ class _Report:
 
     def restore(self, path, key, conn):
         try:
-            with path.open('rb') as stream, ZipFile(stream) as archive:
-                saved_key, count, starts = json.loads(archive.read('report.json'))
-                if saved_key != key:
-                    return
-                self._load_modules(conn)
-                if len(starts) != len(self.modules):
-                    return
-                positions = {level: array('I', archive.read(level)) for level in LEVELS}
-                if sum(map(len, positions.values())) != count:
-                    return
-                blocks = [archive.read(f'blocks/{i}') for i in range((count + _BLOCK_SIZE - 1) // _BLOCK_SIZE)]
-                stamp = _stat_signature(os.fstat(stream.fileno()))
+            with _publish_lock(path.parent):
+                with path.open('rb') as stream, ZipFile(stream) as archive:
+                    saved_key, count, starts = json.loads(archive.read('report.json'))
+                    if saved_key != key:
+                        return
+                    self._load_modules(conn)
+                    if len(starts) != len(self.modules):
+                        return
+                    positions = {level: array('I', archive.read(level)) for level in LEVELS}
+                    if sum(map(len, positions.values())) != count:
+                        return
+                    blocks = [archive.read(f'blocks/{i}') for i in range((count + _BLOCK_SIZE - 1) // _BLOCK_SIZE)]
+                    stamp = _stat_signature(os.fstat(stream.fileno()))
             self.count, self.starts, self.positions, self.blocks = count, starts, positions, blocks
             self.archive_stamp = stamp
         except FileNotFoundError:
@@ -849,7 +887,7 @@ class _Report:
         except (OSError, BadZipFile, KeyError, ValueError, TypeError, RuntimeError, zlib.error):
             logger.warning('Не удалось прочитать кэш диагностики %s', path, exc_info=True)
 
-    def save(self, path, key, before_replace):
+    def save(self, path, key, before_replace, version=None):
         try:
             # Временный файл расположен рядом: replace атомарен, а его
             # отдельный суффикс позволяет убрать недописанный файл при старте.
@@ -869,6 +907,8 @@ class _Report:
                     before_replace()
                     replace_with_retry(temp, path)
                     self.archive_stamp = _stat_signature(path.stat())
+                    if version is not None:
+                        _record_report_archive(path, version)
                     _trim_archives(path)
             finally:
                 temp.unlink(missing_ok=True)
@@ -1011,6 +1051,14 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
     cache_id = db, key
     path = _archive_path(db.db_path, key)
     with _REPORTS_LOCK:
+        directory = path.parent.resolve()
+        if not warm:
+            _SELECTED_VERSIONS[directory] = index.version
+        if path.is_file():
+            _VERSION_ARCHIVES.setdefault(directory, {})[index.version] = path.name
+            if _SELECTED_VERSIONS.get(directory) == index.version:
+                _SELECTED_ARCHIVES[directory] = path.name
+    with _REPORTS_LOCK:
         report = _known_report(cache_id, warm=warm)
         if not warm and report is not None and report is not invalid:
             restore_lock = None
@@ -1051,7 +1099,7 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
                 report = _Report()
                 report._build(engine, reader, index, mode)
             if revision[1] == 'ready':
-                report.save(path, key, before_replace=verify)
+                report.save(path, key, before_replace=verify, version=index.version)
             verify()
             with _REPORTS_LOCK:
                 _remember(cache_id, report)
@@ -1118,7 +1166,8 @@ def warm_report(engine, index, mode, ready_at, warmed_key=None):
                 or key != _cache_key(engine, index, mode, (ready_at, 'ready'))):
             raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
-    if report.save(_archive_path(engine.db.db_path, key), key, before_replace=verify):
+    if report.save(_archive_path(engine.db.db_path, key), key, before_replace=verify,
+                   version=index.version):
         return key
 
 

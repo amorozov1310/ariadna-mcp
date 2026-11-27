@@ -1831,6 +1831,51 @@ def test_selected_report_archive_is_recent_for_lru_pruning(project):
     assert selected.exists()
 
 
+def test_late_help_reports_keep_archive_for_selected_version(project, monkeypatch):
+    pm, _ = project
+    versions = ('8.3.23.1', '8.3.24.1', '8.3.25.1', '8.3.26.1')
+    for version in versions:
+        pm.platform_help.build_from_bytes(version, context_book(version))
+
+    pm.update_project('demo', platform_version=versions[0])
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    selected_archive = _report_archive(pm)
+
+    entered = Barrier(4)
+    release = Event()
+    original_build = platform_check._Report._build
+
+    def delayed_build(report, engine, conn, index, mode):
+        if index.version in versions[1:]:
+            entered.wait(timeout=5)
+            assert release.wait(timeout=5)
+        return original_build(report, engine, conn, index, mode)
+
+    monkeypatch.setattr(platform_check._Report, '_build', delayed_build)
+    try:
+        engine = pm.get_search('demo')
+        revision = platform_check._index_revision(engine.db.read_conn())
+        for version in versions[1:]:
+            pm.update_project('demo', platform_version=version)
+            index = pm.platform_help.get(version)
+            with pytest.raises(platform_check.ReportUnavailable, match='готовится'):
+                platform_check._request_report(engine, index, pm.platform_mode('demo'),
+                                               revision, 'demo', warm=True)
+
+        entered.wait(timeout=5)
+        pm.update_project('demo', platform_version=versions[0])
+        result = execute_tool(pm, 'check_platform_calls', {})
+        assert 'НесуществующийВызов()' in result
+        assert selected_archive.exists()
+    finally:
+        release.set()
+
+    _join_workers(_report_workers(pm))
+    assert selected_archive.exists()
+    platform_check._REPORTS.clear()
+    assert 'НесуществующийВызов()' in execute_tool(pm, 'check_platform_calls', {})
+
+
 def test_startup_removes_incomplete_report_archives(project):
     pm, _ = project
     temp = pm._index_path('demo').with_name('.platform-check-' + 'a' * 64 + '.zip.crash.tmp')
