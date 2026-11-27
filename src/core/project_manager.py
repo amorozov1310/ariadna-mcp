@@ -312,7 +312,12 @@ class ProjectManager:
             cleanup_report_temps(report_directory(self._index_path(project.id)))
             # Удалить незавершённые архивы старой раскладки и старого
             # открытого каталога reports/<id>, оставшихся после обновления.
-            cleanup_report_temps(self._legacy_report_directory(project.id))
+            legacy_report_dir = self._legacy_report_directory(project.id)
+            cleanup_report_temps(legacy_report_dir)
+            try:
+                legacy_report_dir.rmdir()
+            except OSError:
+                pass
             old_index_parent = self._index_path(project.id).parent
             if old_index_parent != self.platform_help.root and old_index_parent != (
                     (self.index_dir or self.data_dir) / 'reports'):
@@ -328,6 +333,13 @@ class ProjectManager:
                 # в каталоге XML. Восстановление касается только журнала проекта
                 # и выполняется, лишь если удалось взять его блокировку.
                 self._recover_source_delta(project.id, source.id, root, workspace)
+        old_reports_root = (self.index_dir or self.data_dir) / 'reports'
+        if not any(project.id.casefold() == 'reports'
+                   for project in self._load_registry().values()):
+            try:
+                old_reports_root.rmdir()
+            except OSError:
+                pass
 
     def _retire_project_db(self, project_id: str) -> None:
         """Закрыть Database проекта и убрать его из пула — перед удалением

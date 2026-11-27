@@ -1915,6 +1915,8 @@ def test_legacy_report_tmp_is_removed_on_startup_and_project_deletion(tmp_path):
         pm.close_all()
         restarted = ProjectManager(str(data_dir), index_dir=str(index_dir))
         assert not temp.exists()
+        assert not old_reports.exists()
+        old_reports.mkdir(parents=True)
         temp.write_text('synthetic source line', encoding='utf-8')
         restarted.delete_project('legacy')
         assert not list(data_dir.rglob('*legacy*'))
