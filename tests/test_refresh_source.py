@@ -431,7 +431,11 @@ def test_robot_scripts_retry_busy_statuses():
     powershell = (Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.ps1').read_text(encoding='utf-8')
     assert '[ "$get_status" = 409 ] && [ "$SECONDS" -lt "$deadline" ]' in bash
     assert '[ "$post_status" = 409 ] && [ "$SECONDS" -lt "$deadline" ]' in bash
-    assert "$status -ne '409' -or [Environment]::TickCount64 -ge $Deadline" in powershell
+    assert 'local get_timeout=$((deadline - SECONDS))' in bash
+    assert '[System.Diagnostics.Stopwatch]::StartNew()' in powershell
+    assert '[Environment]::TickCount64' not in powershell
+    assert '$Deadline - $script:DeltaStopwatch.ElapsedMilliseconds' in powershell
+    assert "--max-time', \"$getTimeout\"" in powershell
 
 
 def test_bash_robot_requires_successful_post_not_only_manifest(tmp_path):

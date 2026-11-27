@@ -191,17 +191,23 @@ function Invoke-Refresh($Item, [string]$ZipPath) {
 }
 
 function Invoke-DeltaRefresh($Item, [int]$Number, [int]$Attempt = 1, [long]$Deadline = 0) {
-    if ($Deadline -eq 0) { $Deadline = [Environment]::TickCount64 + ($TimeoutMinutes * 60000) }
+    if ($Deadline -eq 0) {
+        $script:DeltaStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $Deadline = $TimeoutMinutes * 60000
+    }
     $base = "$AriadnaUrl/api/projects/$([uri]::EscapeDataString($Project))/sources/$([uri]::EscapeDataString($Item.Source))"
     $manifest = Join-Path $LogDir "manifest_$Number.json"
     $target = Join-Path $LogDir "target_$Number.json"
     $zip = Join-Path $DumpDir "delta_$Number.zip"
     $resp = Join-Path $LogDir 'ariadna_response.json'
-    $getArgs = @('-sS', '--max-time', '60', '-o', $manifest, '-w', '%{http_code}')
+    $getArgs = @('-sS', '-o', $manifest, '-w', '%{http_code}')
     if ($Token) { $getArgs += @('-H', "Authorization: Bearer $Token") }
     do {
-        $status = & curl.exe @getArgs "$base/manifest"
-        if ($status -ne '409' -or [Environment]::TickCount64 -ge $Deadline) { break }
+        $getRemaining = [Math]::Max(1, [int][Math]::Ceiling(($Deadline - $script:DeltaStopwatch.ElapsedMilliseconds) / 1000))
+        $getTimeout = [Math]::Min(60, $getRemaining)
+        $getArgsWithTimeout = $getArgs + @('--max-time', "$getTimeout")
+        $status = & curl.exe @getArgsWithTimeout "$base/manifest"
+        if ($status -ne '409' -or $script:DeltaStopwatch.ElapsedMilliseconds -ge $Deadline) { break }
         Write-Log 'Источник занят; повтор запроса манифеста через 5 секунд'
         Start-Sleep -Seconds 5
     } while ($true)
@@ -217,7 +223,7 @@ function Invoke-DeltaRefresh($Item, [int]$Number, [int]$Attempt = 1, [long]$Dead
               '-F', "delta_archive=@$zip;type=application/zip")
     if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
     do {
-        $remaining = [Math]::Max(1, [int](($Deadline - [Environment]::TickCount64) / 1000))
+        $remaining = [Math]::Max(1, [int](($Deadline - $script:DeltaStopwatch.ElapsedMilliseconds) / 1000))
         $postArgs = $curl + @('-F', "timeout=$remaining", '--max-time', "$($remaining + 60)")
         $status = & curl.exe @postArgs "$base/delta"
         $body = if (Test-Path $resp) { Get-Content $resp -Raw -Encoding UTF8 } else { '' }
@@ -225,7 +231,7 @@ function Invoke-DeltaRefresh($Item, [int]$Number, [int]$Attempt = 1, [long]$Dead
             Write-Log 'Манифест изменился во время передачи; пересобираю разницу'
             return (Invoke-DeltaRefresh $Item $Number 2 $Deadline)
         }
-        if ($status -ne '409' -or [Environment]::TickCount64 -ge $Deadline) { break }
+        if ($status -ne '409' -or $script:DeltaStopwatch.ElapsedMilliseconds -ge $Deadline) { break }
         Write-Log 'Источник занят; повтор запроса через 5 секунд'
         Start-Sleep -Seconds 5
     } while ($true)
