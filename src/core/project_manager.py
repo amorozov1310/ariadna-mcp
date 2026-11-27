@@ -952,16 +952,30 @@ class ProjectManager:
                 source_delta.recover(root, workspace, lock_held=True)
                 cache = self._source_manifest_cache_path(project_id, source_id)
                 current = source_delta.manifest(root, cache)
+                if current['version'] != base_version:
+                    raise source_delta.DeltaConflict("Манифест источника изменился; запросите его заново")
                 # Регистрируем путь до публикации, чтобы сбой после commit не
                 # оставил файлы невидимыми для индексатора.
+                registered = False
                 if not source.xml_path:
                     with self._registry_lock():
                         source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
                         if source is not None:
                             source.xml_path = f'sources/{source_id}/xml'
                             self._save_registry()
-                return source_delta.apply(root, archive, target_manifest, base_version, current,
-                                          workspace, lock_held=True)
+                            registered = True
+                try:
+                    return source_delta.apply(root, archive, target_manifest, base_version, current,
+                                              workspace, lock_held=True)
+                except Exception:
+                    if registered:
+                        with self._registry_lock():
+                            source = next((s for s in self.get_project(project_id).sources
+                                           if s.id == source_id), None)
+                            if source is not None and source.xml_path == f'sources/{source_id}/xml':
+                                source.xml_path = ''
+                                self._save_registry()
+                    raise
 
 
 

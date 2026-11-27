@@ -360,6 +360,25 @@ def test_first_delta_registers_xml_path_before_committed_checkpoint(web, monkeyp
     source_delta.recover(root, pm._source_delta_workspace('p1', 'fresh'))
 
 
+def test_first_delta_does_not_leave_source_registered_when_rejected(web):
+    pm, _, _ = web
+    pm.add_source('p1', 'rejected', 'rejected')
+    baseline = pm.source_file_manifest('p1', 'rejected')
+    target = {'version': _manifest_version({}), 'files': {}}
+    root = pm.projects_dir / 'p1' / 'sources' / 'rejected' / 'xml'
+
+    with pytest.raises(source_delta.DeltaConflict):
+        pm.apply_source_delta('p1', 'rejected', io.BytesIO(b''), 'stale', target)
+    assert pm.get_project('p1').sources[-1].xml_path == ''
+    assert pm.get_source_xml_path('p1', 'rejected') is None
+
+    with pytest.raises(source_delta.DeltaError):
+        pm.apply_source_delta('p1', 'rejected', io.BytesIO(b'not a zip'), baseline['version'], target)
+    assert pm.get_project('p1').sources[-1].xml_path == ''
+    assert pm.get_source_xml_path('p1', 'rejected') is None
+    assert not root.exists()
+
+
 def test_refresh_registers_existing_files_before_returning_ready(web):
     pm, client, _ = web
     source = pm.add_source('p1', 'unregistered', 'unregistered')
