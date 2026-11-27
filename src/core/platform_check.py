@@ -647,12 +647,12 @@ class ReportUnavailable(ValueError):
 
 def _archive_path(db_path, key):
     db_path = Path(db_path)
-    return db_path.parent.parent / 'reports' / db_path.parent.name / f'platform-check-{key}.zip'
+    return db_path.parent.parent / '.ariadna-service' / 'reports' / db_path.parent.name / f'platform-check-{key}.zip'
 
 
 def _report_directory(db_path):
     db_path = Path(db_path)
-    return db_path.parent.parent / 'reports' / db_path.parent.name
+    return db_path.parent.parent / '.ariadna-service' / 'reports' / db_path.parent.name
 
 
 def report_directory(db_path):

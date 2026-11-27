@@ -39,6 +39,32 @@ BASE_DIFF_CACHE_LIMIT = 64
 BROKEN_CALL_CACHE_LIMIT = 64
 PROJECT_ERROR_CACHE_LIMIT = 128
 BACKGROUND_ERROR_CACHE_LIMIT = 64
+PROJECT_ID_MAX_LENGTH = 64
+_RESERVED_PROJECT_IDS = frozenset({'reports', 'platform-help'})
+
+
+def _validate_project_id(project_id: str, *, allow_reserved: bool = False) -> None:
+    if (not isinstance(project_id, str) or not project_id or
+            len(project_id) > PROJECT_ID_MAX_LENGTH or
+            not all(c.isalnum() or c in '-_' for c in project_id)):
+        raise ValueError(
+            f"Invalid project_id: '{project_id}'. Use up to {PROJECT_ID_MAX_LENGTH} "
+            "letters, digits, hyphens or underscores.")
+    if not allow_reserved and project_id.casefold() in _RESERVED_PROJECT_IDS:
+        raise ValueError(f"Project ID '{project_id}' is reserved for Ariadna service data.")
+
+
+def _resolved_path(path: Path) -> str:
+    """Сравнение путей с учётом правил текущей файловой системы."""
+    return os.path.normcase(str(path.resolve()))
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return path.resolve() != root.resolve()
+    except ValueError:
+        return False
 
 # Блокировка переиндексации — на процесс и на (data_dir, project_id), а не
 # на экземпляр. main.py держит один ProjectManager на процесс (общий для Web
@@ -203,7 +229,15 @@ class ProjectManager:
     def __init__(self, data_dir: str = '/data', index_dir: str | None = None):
         self.data_dir = Path(data_dir)
         self.index_dir = Path(index_dir) if index_dir else None
-        self.platform_help = PlatformHelpStore((self.index_dir or self.data_dir) / 'platform-help')
+        service_root = self.index_dir or self.data_dir
+        legacy_help_root = service_root / 'platform-help'
+        help_root = service_root / '.ariadna-service' / 'platform-help'
+        if legacy_help_root.exists() and not help_root.exists():
+            # Переносить копированием: в старой раскладке каталог мог также
+            # содержать индекс проекта с ID platform-help. Старые файлы
+            # остаются доступными для безопасной очистки/ручного восстановления.
+            shutil.copytree(legacy_help_root, help_root)
+        self.platform_help = PlatformHelpStore(help_root)
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
         self._db_pool: OrderedDict[str, Database] = OrderedDict()
@@ -225,6 +259,10 @@ class ProjectManager:
         self._reader_trim_thread: threading.Thread | None = None
         self._reader_trim_closing = False
         self._registry: dict[str, ProjectInfo] | None = None
+        # Дополнительные записи старого реестра с casefold-конфликтами:
+        # сохраняются на диске, но не доступны как проекты до ручного
+        # разрешения конфликта.
+        self._registry_quarantined: dict[str, ProjectInfo] = {}
         # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
         # собственной записи; None — кэш не сверен с диском.
         self._registry_sig: tuple[int, int] | None = None
@@ -272,6 +310,16 @@ class ProjectManager:
         for project in self._load_registry().values():
             from .platform_check import cleanup_report_temps, report_directory
             cleanup_report_temps(report_directory(self._index_path(project.id)))
+            # Удалить незавершённые архивы старой раскладки и старого
+            # открытого каталога reports/<id>, оставшихся после обновления.
+            cleanup_report_temps(self._legacy_report_directory(project.id))
+            old_index_parent = self._index_path(project.id).parent
+            if old_index_parent != self.platform_help.root and old_index_parent != (
+                    (self.index_dir or self.data_dir) / 'reports'):
+                cleanup_report_temps(old_index_parent)
+            legacy_index_parent = self._index_path(project.id, legacy=True).parent
+            if legacy_index_parent != old_index_parent:
+                cleanup_report_temps(legacy_index_parent)
             for source in project.sources:
                 local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
                 root = self.get_source_xml_path(project.id, source.id) or local_root
@@ -398,11 +446,27 @@ class ProjectManager:
         migrated = False
         if read is not None:
             sig, text = read
+            quarantined = {}
             try:
                 data = json.loads(text)
                 projects = {}
+                project_ids_by_key = {}
                 for pid, pdata in data.get('projects', {}).items():
                     project, dropped = self._project_from_dict(pdata)
+                    key = pid.casefold()
+                    previous = project_ids_by_key.get(key)
+                    if previous is not None:
+                        # Старый реестр с Capital/capital остаётся читаемым:
+                        # первый ID сохраняет доступ, последующие конфликтующие
+                        # записи карантинируются в памяти и не получают путь,
+                        # который на Windows совпадал бы с путём первого.
+                        logger.error("Конфликт ID проектов '%s' и '%s' (casefold=%s); "
+                                     "оставлен доступным '%s', '%s' пропущен. "
+                                     "Исправьте projects.json вручную.",
+                                     previous, pid, key, previous, pid)
+                        quarantined[pid] = project
+                        continue
+                    project_ids_by_key[key] = pid
                     projects[pid] = project
                     migrated = migrated or dropped
             except (json.JSONDecodeError, TypeError, OSError):
@@ -414,6 +478,7 @@ class ProjectManager:
                 projects = {}
                 sig = None
             self._registry = projects
+            self._registry_quarantined = quarantined
             self._registry_sig = sig
         else:
             self._registry = {}
@@ -503,7 +568,10 @@ class ProjectManager:
         # изменил в нём проект, а перечитывание (если файл успел поменять
         # другой процесс) выбросило бы эти изменения.
         registry = self._registry if self._registry is not None else self._load_registry()
-        data = {'projects': {pid: self._project_to_dict(proj) for pid, proj in registry.items()}}
+        all_projects = dict(registry)
+        all_projects.update(self._registry_quarantined)
+        data = {'projects': {pid: self._project_to_dict(proj)
+                             for pid, proj in all_projects.items()}}
         self._write_registry_file(data)
         self._registry_sig = self._registry_signature()
 
@@ -581,12 +649,11 @@ class ProjectManager:
     def _create_project(self, project_id: str, name: str, description: str) -> ProjectInfo:
         registry = self._load_registry()
 
-        if project_id in registry:
-            raise ValueError(f"Project '{project_id}' already exists")
+        _validate_project_id(project_id)
 
-        # Validate id: alphanumeric + underscores/hyphens
-        if not project_id or not all(c.isalnum() or c in '-_' for c in project_id):
-            raise ValueError(f"Invalid project_id: '{project_id}'. Use alphanumeric, hyphens, underscores.")
+        existing_id = next((pid for pid in registry if pid.casefold() == project_id.casefold()), None)
+        if existing_id is not None:
+            raise ValueError(f"Project '{existing_id}' already exists (IDs are case-insensitive).")
 
         project = ProjectInfo(
             id=project_id,
@@ -664,18 +731,33 @@ class ProjectManager:
         реестре уже нет, а исключение называет путь. Повторный вызов для
         проекта, которого нет в реестре, но чьи каталоги остались, дочищает
         их; KeyError — только если нет ни записи, ни каталогов."""
+        _validate_project_id(project_id, allow_reserved=True)
         project_dir = self.projects_dir / project_id
         index_parent = self._index_path(project_id).parent
-        # До выделения пространства reports/{id} отчёты лежали рядом с
-        # индексом. Для совпавшего с platform-help ID нельзя удалять общий
-        # каталог справки, только прежние ZIP-отчёты проекта.
-        shared_dir = index_parent == self.platform_help.root
-        index_files = index_parent / 'index.db' if shared_dir else index_parent
+        current_index_root = self.index_dir or self.projects_dir
+        legacy_report_dir = self._legacy_report_directory(project_id)
+        service_root = self.index_dir or self.data_dir
+        service_reports_root = service_root / 'reports'
+        project_index_path = _resolved_path(index_parent)
         with self._registry_lock():
             registry = self._load_registry()
+            quarantined = next((pid for pid in self._registry_quarantined
+                                if pid.casefold() == project_id.casefold()), None)
+            if quarantined is not None:
+                raise ValueError(f"Нельзя удалить проект '{project_id}', пока в projects.json "
+                                 f"есть конфликтующая запись '{quarantined}'. Исправьте конфликт вручную.")
+            # Даже на регистрозависимой ОС ID остаются уникальными по
+            # casefold. Если старый реестр содержит конфликт, не удаляем
+            # каталог, который может принадлежать другой записи.
+            conflicting = next((pid for pid in registry
+                                if pid != project_id and
+                                _resolved_path(self._index_path(pid).parent) == project_index_path), None)
+            if conflicting is not None:
+                raise ValueError(f"Нельзя удалить проект '{project_id}': его каталог совпадает "
+                                 f"с каталогом проекта '{conflicting}'. Исправьте projects.json.")
             if registry.pop(project_id, None) is not None:
                 self._save_registry()
-            elif not project_dir.exists() and not index_files.exists():
+            elif not project_dir.exists() and not index_parent.exists() and not legacy_report_dir.exists():
                 raise KeyError(f"Project '{project_id}' not found")
 
         with self._db_pins_changed:
@@ -691,30 +773,75 @@ class ProjectManager:
         self._retire_project_db(project_id)
         self._forget_project_resources(project_id)
 
-        from .platform_check import forget_report_project, report_directory
+        from .platform_check import cleanup_report_temps, forget_report_project, report_directory
         report_dir = report_directory(self._index_path(project_id))
         forget_report_project(self._index_path(project_id))
+        # Старая раскладка хранила архивы в reports/<id> (а ещё раньше —
+        # рядом с index.db). Удаляем незаконченные файлы и готовые архивы в
+        # обеих раскладках, не обходя родительский каталог reports целиком.
+        cleanup_dirs = [legacy_report_dir]
+        if index_parent not in (self.platform_help.root, service_reports_root):
+            cleanup_dirs.append(index_parent)
+        old_index_parent = self._index_path(project_id, legacy=True).parent
+        if old_index_parent not in (index_parent, self.platform_help.root, service_reports_root):
+            cleanup_dirs.append(old_index_parent)
+        for directory in cleanup_dirs:
+            cleanup_report_temps(directory)
 
-        for path in dict.fromkeys((project_dir, index_parent, report_dir)):
+        # Каталоги проекта удаляются рекурсивно только если они строго внутри
+        # корня и не являются предком служебного каталога или другого проекта.
+        candidates = (project_dir, index_parent, legacy_report_dir, report_dir)
+        service_paths = (self.platform_help.root, service_reports_root,
+                         service_root / '.ariadna-service')
+        other_project_paths = [self.projects_dir / pid for pid in registry]
+        other_project_paths += [current_index_root / pid for pid in registry]
+        roots = {project_dir: self.projects_dir,
+                 index_parent: current_index_root,
+                 legacy_report_dir: service_reports_root,
+                 report_dir: report_dir.parent}
+        for path in dict.fromkeys(candidates):
             if not path.exists():
                 continue
             try:
-                # Повторы при PermissionError: файл индекса освобождается, как
-                # только закончится запрос, начатый до закрытия (Database.close
-                # ждёт его), а ещё его может ненадолго открыть антивирус.
-                if path == self.platform_help.root:
-                    for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'):
-                        (path / name).unlink(missing_ok=True)
-                    from .platform_check import _CACHE_ARCHIVE, _unlink_archive
-                    for archive in path.glob('platform-check*.zip'):
-                        if _CACHE_ARCHIVE.fullmatch(archive.name):
-                            _unlink_archive(archive)
+                root = roots[path]
+                resolved = path.resolve()
+                protected = any(
+                    resolved == service.resolve() or
+                    _is_within(service, path)
+                    for service in service_paths if service.exists()
+                )
+                protected = protected or any(
+                    _resolved_path(other) == _resolved_path(path) or
+                    _is_within(other, path)
+                    for other in other_project_paths if other.exists()
+                )
+                if not _is_within(path, root) or protected:
+                    # Для ID, совпадающих со старым общим каталогом справки
+                    # или отчётов, удаляем только явно принадлежащие проекту
+                    # файлы; содержимое родителя остаётся нетронутым.
+                    if path == self.platform_help.root or path == index_parent:
+                        for pattern in ('index.db', 'index.db-wal', 'index.db-shm',
+                                        'index.db-journal', 'platform-check*.zip',
+                                        '.platform-check-*.zip.*.tmp'):
+                            for owned in path.glob(pattern):
+                                if owned.is_file():
+                                    owned.unlink(missing_ok=True)
+                    elif path == legacy_report_dir or path == report_dir:
+                        rmtree_with_retry(path)
+                    else:
+                        raise ValueError(f"Безопасно удалить каталог проекта '{project_id}' нельзя: {path}")
                 else:
                     rmtree_with_retry(path)
             except OSError as e:
                 logger.error("Проект %s убран из реестра, но каталог %s удалить не удалось: %s. "
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)
                 raise ProjectFilesNotRemovedError(project_id, path, e) from e
+
+        # Удалить пустую старую общую папку после очистки последнего проекта.
+        try:
+            service_reports_root.rmdir()
+        except OSError:
+            pass
 
         Database.forget_schema_lock(str(self._index_path(project_id)))
 
@@ -1096,8 +1223,21 @@ class ProjectManager:
     def _index_path(self, project_id: str, legacy: bool = False) -> Path:
         """Единственное место, где строится путь к индексу проекта.
         legacy=True — прежнее место в data_dir (источник переноса)."""
+        registry = self._registry
+        if registry is not None:
+            conflicting = next((pid for pid in registry
+                                if pid != project_id and
+                                pid.casefold() == project_id.casefold()), None)
+            if conflicting is not None:
+                raise ValueError(f"ID проекта '{project_id}' конфликтует с '{conflicting}' "
+                                 "без учёта регистра; исправьте projects.json.")
         base = self.projects_dir if legacy or self.index_dir is None else self.index_dir
         return base / project_id / 'index.db'
+
+    def _legacy_report_directory(self, project_id: str) -> Path:
+        """Путь отчётов до перехода в скрытое служебное пространство."""
+        base = self.index_dir or self.data_dir
+        return base / 'reports' / project_id
 
     def migrate_index_dir(self) -> list[str]:
         """Однократный перенос индексов из data_dir/projects в index_dir.

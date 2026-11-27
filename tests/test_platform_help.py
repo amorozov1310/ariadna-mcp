@@ -229,7 +229,7 @@ def test_web_and_mcp_share_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(web, '_pm', pm)
     client = TestClient(web.app, headers={'Host': '127.0.0.1'})
     store = pm.platform_help
-    assert store.root == tmp_path / 'index' / 'platform-help'
+    assert store.root == tmp_path / 'index' / '.ariadna-service' / 'platform-help'
     url = '/api/admin/platform-help'
 
     def ask(**args):
@@ -276,12 +276,25 @@ def test_web_and_mcp_share_versions(tmp_path, monkeypatch):
     assert 'слишком короткий' in failed.text and store.get(NEW)
     client.post(settings, data={'name': 'Демо', 'platform_version': ''})
     assert NEW in ask(project_id='demo')
-    # Допустимый идентификатор проекта совпадает с именем каталога справки на томе.
-    pm.create_project('platform-help', 'Пример')
-    pm.get_db('platform-help')
-    pm.delete_project('platform-help')
+    # Имена служебных каталогов зарезервированы без учёта регистра.
+    with pytest.raises(ValueError, match='reserved'):
+        pm.create_project('PLATFORM-HELP', 'Пример')
     assert store.get(NEW) and store.get(OLD)
     pm.close_all()
+
+
+def test_legacy_platform_help_is_copied_into_reserved_namespace(tmp_path):
+    old = tmp_path / 'index' / 'platform-help' / '8.3.27.1' / 'help.db'
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b'synthetic help index')
+    pm = ProjectManager(str(tmp_path / 'data'), str(tmp_path / 'index'))
+    try:
+        new = pm.platform_help.path('8.3.27.1')
+        assert new.read_bytes() == b'synthetic help index'
+        assert old.read_bytes() == b'synthetic help index'
+        assert '.ariadna-service' in new.parts
+    finally:
+        pm.close_all()
 
 
 def test_help_download_link_and_unknown_version(help_client):
@@ -560,7 +573,7 @@ def test_corrupt_counts_do_not_hide_working_version(help_client):
 def test_unreadable_version_directory_has_friendly_error(help_client, monkeypatch):
     client, pm = help_client
     root = pm.platform_help.root
-    root.mkdir()
+    root.mkdir(parents=True)
     iterdir = Path.iterdir
 
     def denied(path):

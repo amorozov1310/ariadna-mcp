@@ -1839,11 +1839,11 @@ def test_project_report_namespace_does_not_collide_with_service_directories(tmp_
     data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
     pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
     pm.platform_help.build_from_bytes(VERSION, context_book())
-    # Parentheses keep Path joining explicit while representing a pre-migration archive.
-    old_collision = index_dir / 'platform-help' / ('platform-check-' + 'a' * 64 + '.zip')
-    old_collision.write_bytes(b'legacy report')
     try:
-        for project_id in ('platform-help', 'reports', 'ordinary'):
+        for project_id in ('PLATFORM-HELP', 'Reports'):
+            with pytest.raises(ValueError, match='reserved'):
+                pm.create_project(project_id, project_id)
+        for project_id in ('ordinary',):
             pm.create_project(project_id, project_id)
             report_dir = platform_check.report_directory(pm._index_path(project_id))
             report_dir.mkdir(parents=True, exist_ok=True)
@@ -1851,8 +1851,75 @@ def test_project_report_namespace_does_not_collide_with_service_directories(tmp_
             pm.delete_project(project_id)
             assert not list(report_dir.glob('platform-check*.zip'))
             assert not report_dir.exists()
-        assert not old_collision.exists()
         assert pm.platform_help.path(VERSION).is_file()
+    finally:
+        pm.close_all()
+
+
+def test_reports_id_cannot_delete_other_projects_reports(tmp_path):
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    try:
+        for project_id in ('alpha', 'beta'):
+            pm.create_project(project_id, project_id)
+            report_dir = platform_check.report_directory(pm._index_path(project_id))
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / ('platform-check-' + 'a' * 64 + '.zip')).write_bytes(b'archive')
+        legacy = index_dir / 'reports' / 'alpha'
+        legacy.mkdir(parents=True)
+        (legacy / ('.platform-check-' + 'b' * 64 + '.zip.crash.tmp')).write_bytes(b'incomplete')
+        # Simulate a pre-upgrade registry entry for the formerly colliding ID.
+        projects = json.loads(pm.registry_path.read_text(encoding='utf-8'))
+        projects['projects']['reports'] = {
+            'id': 'reports', 'name': 'reports', 'description': '',
+            'created_at': '2026-01-01T00:00:00', 'status': 'empty',
+            'sources': [], 'index_stats': {}, 'base_project': None,
+            'release_project': None, 'platform_version': None,
+        }
+        pm.registry_path.write_text(json.dumps(projects), encoding='utf-8')
+        pm._registry = None
+        pm._load_registry()
+
+        restarted = ProjectManager(str(data_dir), index_dir=str(index_dir))
+        assert not list(legacy.glob('*.tmp'))
+        restarted.close_all()
+        pm.delete_project('reports')
+        for project_id in ('alpha', 'beta'):
+            assert next(platform_check.report_directory(pm._index_path(project_id)).glob('*.zip')).exists()
+    finally:
+        pm.close_all()
+
+
+def test_long_project_id_returns_http_400(tmp_path, monkeypatch):
+    pm = ProjectManager(str(tmp_path))
+    monkeypatch.setattr(web, '_pm', pm)
+    try:
+        with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+            response = client.post('/api/projects', data={'project_id': 'x' * 256,
+                                                           'name': 'long'})
+        assert response.status_code == 400
+        assert 'up to 64' in response.text
+    finally:
+        pm.close_all()
+
+
+def test_legacy_report_tmp_is_removed_on_startup_and_project_deletion(tmp_path):
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    pm.create_project('legacy', 'legacy')
+    old_reports = index_dir / 'reports' / 'legacy'
+    old_reports.mkdir(parents=True)
+    temp = old_reports / ('.platform-check-' + 'c' * 64 + '.zip.crash.tmp')
+    temp.write_text('synthetic source line', encoding='utf-8')
+    try:
+        pm.close_all()
+        restarted = ProjectManager(str(data_dir), index_dir=str(index_dir))
+        assert not temp.exists()
+        temp.write_text('synthetic source line', encoding='utf-8')
+        restarted.delete_project('legacy')
+        assert not list(data_dir.rglob('*legacy*'))
+        assert not old_reports.exists()
+        restarted.close_all()
     finally:
         pm.close_all()
 

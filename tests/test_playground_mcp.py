@@ -235,7 +235,7 @@ def test_mcp_and_web_use_only_index_after_export_moves(web, tmp_path, monkeypatc
 
     # Переносим только index.db каждого проекта, без WAL и кэша проверки платформы.
     index_dir = tmp_path / 'index'
-    shutil.copytree(pm.data_dir / 'platform-help', index_dir / 'platform-help')
+    shutil.copytree(pm.platform_help.root, index_dir / '.ariadna-service' / 'platform-help')
     for pid in ('p1', 'base', 'release'):
         xml = pm.get_source_xml_path(pid, 'main')
         xml.parent.rename(tmp_path / f'{pid}-export')

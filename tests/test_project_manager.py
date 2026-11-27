@@ -2,6 +2,7 @@
 
 import sys, os, shutil
 from pathlib import Path
+import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.project_manager import ProjectManager
@@ -131,6 +132,45 @@ def test_invalid_project_id():
     except ValueError:
         pass
     pm.close_all()
+
+
+def test_project_ids_are_casefold_unique_and_bounded(tmp_path):
+    pm = ProjectManager(str(tmp_path))
+    try:
+        pm.create_project('Capital', 'Capital')
+        with pytest.raises(ValueError, match='case-insensitive'):
+            pm.create_project('capital', 'capital')
+        with pytest.raises(ValueError, match='up to 64'):
+            pm.create_project('x' * 256, 'Too long')
+        for reserved in ('reports', 'REPORTS', 'platform-help', 'PLATFORM-HELP'):
+            with pytest.raises(ValueError, match='reserved'):
+                pm.create_project(reserved, reserved)
+    finally:
+        pm.close_all()
+
+
+def test_casefold_conflicts_in_legacy_registry_are_logged_and_quarantined(tmp_path, caplog):
+    import json
+
+    pm = ProjectManager(str(tmp_path))
+    try:
+        first = pm.create_project('Capital', 'Capital')
+        data = {'projects': {
+            'Capital': pm._project_to_dict(first),
+            'capital': {**pm._project_to_dict(first), 'id': 'capital', 'name': 'capital'},
+        }}
+        pm.registry_path.write_text(json.dumps(data), encoding='utf-8')
+        pm._registry = None
+        projects = pm.list_projects()
+        assert [project.id for project in projects] == ['Capital']
+        assert 'Capital' in caplog.text and 'capital' in caplog.text
+        assert 'capital' in json.loads(pm.registry_path.read_text(encoding='utf-8'))['projects']
+        with pytest.raises(ValueError, match='исправьте projects.json'):
+            pm._index_path('capital')
+        with pytest.raises(ValueError, match='conflict|конфликт'):
+            pm.delete_project('Capital')
+    finally:
+        pm.close_all()
 
 
 def test_get_nonexistent():
