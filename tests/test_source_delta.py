@@ -411,6 +411,38 @@ def test_manifest_cache_detects_replaced_file_with_same_size_and_mtime(tmp_path)
     assert second["files"]["item.xml"]["sha256"] == hashlib.sha256(b"new").hexdigest()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="проверяет поведение кэша на Windows")
+def test_manifest_rehashes_fresh_file_even_with_reused_windows_identity(monkeypatch, tmp_path):
+    root = tmp_path / "xml"
+    root.mkdir()
+    path = root / "item.xml"
+    path.write_bytes(b"old")
+    cache = tmp_path / "manifest.json"
+    first = source_delta.manifest(root, cache)
+    old_stat = path.stat()
+    path.write_bytes(b"new")
+
+    # Windows может сохранить размер, время записи и file ID при быстрой
+    # перезаписи. Смоделировать именно такой stat, оставив новые байты файла.
+    real_stat = Path.stat
+    def reused_identity(self, *args, **kwargs):
+        actual = real_stat(self, *args, **kwargs)
+        if self == path:
+            return type("Stat", (), {
+                "st_size": old_stat.st_size,
+                "st_mtime_ns": old_stat.st_mtime_ns,
+                "st_ctime_ns": old_stat.st_ctime_ns,
+                "st_ino": old_stat.st_ino,
+            })()
+        return actual
+
+    monkeypatch.setattr(Path, "stat", reused_identity)
+    monkeypatch.setattr(source_delta.time, "time_ns", lambda: old_stat.st_mtime_ns + 1_000_000_000)
+    second = source_delta.manifest(root, cache)
+    assert second["version"] != first["version"]
+    assert second["files"]["item.xml"]["sha256"] == hashlib.sha256(b"new").hexdigest()
+
+
 def test_duplicate_json_keys_are_rejected():
     with pytest.raises(source_delta.DeltaError, match="Повтор ключа"):
         source_delta.parse_manifest_json('{"files":{"a":1,"a":2}}')
