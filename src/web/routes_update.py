@@ -24,6 +24,7 @@ from .app import get_pm
 router = APIRouter()
 
 _POLL_SEC = 2.0
+_MAX_MANIFEST_TEXT = int(os.environ.get('ARIADNA_DELTA_MAX_MANIFEST', str(16 * 1024**2)))
 
 
 def _status(pm, project_id: str) -> str:
@@ -149,6 +150,9 @@ async def refresh_source_delta(request: Request, project_id: str, source_id: str
     archive = form.get('delta_archive')
     if archive is None or not hasattr(archive, 'file') or not hasattr(archive, 'filename'):
         raise HTTPException(400, 'Не передан delta_archive')
+    manifest_text = form.get('target_manifest', '')
+    if not isinstance(manifest_text, str) or len(manifest_text.encode('utf-8')) > _MAX_MANIFEST_TEXT:
+        raise HTTPException(413, 'Целевой манифест превышает лимит размера')
     try:
         timeout = int(form.get('timeout', 3600))
     except (ValueError, TypeError):
@@ -166,7 +170,7 @@ async def refresh_source_delta(request: Request, project_id: str, source_id: str
         return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
                              'detail': 'Проект всё ещё индексируется — разница не применена'}, status_code=409)
     try:
-        target = parse_manifest_json(str(form.get('target_manifest', '')))
+        target = parse_manifest_json(str(manifest_text))
         archive.file.seek(0, 2)
         if archive.file.tell() > max_body:
             raise DeltaError('Размер архива превышает лимит')
