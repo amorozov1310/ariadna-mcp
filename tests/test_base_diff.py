@@ -5,7 +5,9 @@
 diff_from_base.
 """
 
+import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -253,6 +255,57 @@ def test_broken_calls_cache_replaces_previous_revision_after_source_removal(pm):
     assert pm._broken_calls['custom'][0] != previous_key
     assert pm.broken_calls_ready('custom')
     assert current == {'missing': [], 'not_export': [], 'external': [], 'dynamic': 0}
+
+
+def test_index_caches_invalidated_when_index_file_is_replaced(pm, monkeypatch):
+    from src.core import base_diff, broken_calls
+
+    revisions = []
+    diff_revisions = []
+
+    def calculate(conn, **_):
+        revision = conn.execute('PRAGMA user_version').fetchone()[0]
+        revisions.append(revision)
+        return {'missing': [str(revision)], 'not_export': []}
+
+    monkeypatch.setattr(broken_calls, 'find_broken_calls', calculate)
+
+    def calculate_diff(conn, *_):
+        revision = conn.execute('PRAGMA user_version').fetchone()[0]
+        diff_revisions.append(revision)
+        return revision
+
+    monkeypatch.setattr(base_diff, 'compute_base_diff', calculate_diff)
+    pm.reindex('custom')
+    assert pm.broken_calls('custom')['missing'] == ['0']
+    assert pm.broken_calls('custom')['missing'] == ['0']
+    assert revisions == [0]
+    assert pm.get_base_diff('custom') == 0
+    assert pm.get_base_diff('custom') == 0
+    assert diff_revisions == [0]
+
+    index_path = Path(pm.get_db('custom').db_path)
+    state = pm.get_db('custom').read_conn().execute(
+        'SELECT updated_at, status FROM index_state WHERE id=1').fetchone()
+    state_revision = tuple(state) if state else None
+    replacement = index_path.with_name('replacement.db')
+    pm.close_all()
+    shutil.copy2(index_path, replacement)
+    conn = sqlite3.connect(replacement)
+    try:
+        conn.execute('PRAGMA user_version=1')
+        conn.commit()
+    finally:
+        conn.close()
+    os.replace(replacement, index_path)
+
+    assert pm.broken_calls('custom')['missing'] == ['1']
+    assert revisions == [0, 1]
+    state = pm.get_db('custom').read_conn().execute(
+        'SELECT updated_at, status FROM index_state WHERE id=1').fetchone()
+    assert (tuple(state) if state else None) == state_revision
+    assert pm.get_base_diff('custom') == 1
+    assert diff_revisions == [0, 1]
 
 
 def test_web_diff_pages(pm):
