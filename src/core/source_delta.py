@@ -380,6 +380,16 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
                 directory.rmdir()
             except OSError:
                 pass
+    # Case-only renames can leave an empty directory under the target spelling
+    # on case-sensitive filesystems. Remove only empty directories; excluded
+    # files and any other user data keep the directory in place.
+    for move in reversed(data.get("dir_moves", [])):
+        directory = root.joinpath(*PurePosixPath(move[1]).parts)
+        if directory.is_dir():
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
     shutil.rmtree(backup, ignore_errors=True)
     if staging is not None:
         shutil.rmtree(staging, ignore_errors=True)

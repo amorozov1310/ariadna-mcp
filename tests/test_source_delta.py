@@ -322,6 +322,8 @@ def test_nested_case_rename_rollback_restores_each_original_spelling(monkeypatch
     old = root / "Old" / "Sub" / "item.xml"
     old.parent.mkdir(parents=True)
     old.write_bytes(b"before")
+    excluded = old.parent / "Template.kept.xml"
+    excluded.write_bytes(b"user data")
     current = source_delta.manifest(root, tmp_path / "cache.json")
     wanted = {"old/sub/item.xml": b"after"}
 
@@ -334,9 +336,12 @@ def test_nested_case_rename_rollback_restores_each_original_spelling(monkeypatch
         source_delta.apply(root, _archive(wanted), _target(wanted), current["version"],
                            current, tmp_path / "state")
     assert (root / "Old" / "Sub" / "item.xml").read_bytes() == b"before"
+    assert excluded.read_bytes() == b"user data"
     assert "Old" in {entry.name for entry in os.scandir(root)}
     assert "old" not in {entry.name for entry in os.scandir(root)}
     assert not source_delta._journal_path(tmp_path / "state").exists()
+    assert not list((tmp_path / "state").glob("staging-*"))
+    assert not list((tmp_path / "state").glob("rollback-*"))
 
 
 def test_directory_case_rename_moves_excluded_logs_with_tree(tmp_path):
