@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -425,6 +426,25 @@ def test_delta_rejects_duplicate_target_json_keys_and_corrupt_zip(web):
         'target_manifest': json.dumps({'version': empty_version, 'files': {}}),
         'wait': '1', 'timeout': '1'}, files={'delta_archive': ('bad.zip', b'not zip', 'application/zip')})
     assert corrupt.status_code == 400
+
+
+def test_delta_zip_deflate_error_is_bad_request(web, monkeypatch):
+    _, client, _ = web
+    manifest = client.get('/api/projects/p1/sources/main/manifest').json()
+    payload = b'new'
+    files = {'new.xml': {'sha256': hashlib.sha256(payload).hexdigest(), 'size': len(payload)}}
+    target = {'version': _manifest_version(files), 'files': files}
+
+    def broken_read(self, *_args, **_kwargs):
+        raise zlib.error('invalid distance too far back')
+
+    monkeypatch.setattr(zipfile.ZipExtFile, 'read', broken_read)
+    response = client.post('/api/projects/p1/sources/main/delta', data={
+        'base_version': manifest['version'], 'target_manifest': json.dumps(target),
+        'wait': '1', 'timeout': '1'},
+        files={'delta_archive': ('broken.zip', _zip_from_files({'new.xml': payload}), 'application/zip')})
+    assert response.status_code == 400
+    assert 'Повреждённый ZIP' in response.json()['detail']
 
 
 def test_delta_wait_zero_does_not_wait_before_applying(web, monkeypatch):

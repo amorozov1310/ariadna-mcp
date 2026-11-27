@@ -11,6 +11,7 @@ import tempfile
 import time
 import zipfile
 import contextlib
+import zlib
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -607,7 +608,7 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
         shutil.rmtree(backup, ignore_errors=True)
         _checkpoint('g')
         journal.unlink(missing_ok=True)
-    except zipfile.BadZipFile as exc:
+    except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
         recover(root, workspace, lock_held=True)
         raise DeltaError("Повреждённый ZIP-архив разницы") from exc
     except Exception:
