@@ -58,7 +58,7 @@ _TOKEN_LOCK_POLL_SEC = 0.025
 
 
 @contextmanager
-def _token_file_lock(path: Path):
+def _token_file_lock(path: Path, *, wait: bool = True):
     """Межпроцессная блокировка рядом с tokens.json (Windows и POSIX)."""
     lock_path = path.with_name(path.name + '.lock')
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,7 @@ def _token_file_lock(path: Path):
                     msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
                     break
                 except OSError:
-                    if time.monotonic() >= deadline:
+                    if not wait or time.monotonic() >= deadline:
                         raise TimeoutError(f'не удалось заблокировать файл токенов за '
                                             f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
                     time.sleep(_TOKEN_LOCK_POLL_SEC)
@@ -94,7 +94,7 @@ def _token_file_lock(path: Path):
                     fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if time.monotonic() >= deadline:
+                    if not wait or time.monotonic() >= deadline:
                         raise TimeoutError(f'не удалось заблокировать файл токенов за '
                                             f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
                     time.sleep(_TOKEN_LOCK_POLL_SEC)
@@ -279,7 +279,9 @@ class TokenStore:
                 return info
             token_id = info.id
         try:
-            with _token_file_lock(self.path):
+            # Обновление last_used — best effort. Не задерживаем запрос, если
+            # другой процесс сейчас меняет токены.
+            with _token_file_lock(self.path, wait=False):
                 with self._lock:
                     self._reload(force=True)
                     info = self._by_hash.get(_hash(token.strip()))
@@ -287,22 +289,23 @@ class TokenStore:
                         return None
                     now = datetime.now()
                     candidate = {key: replace(value) for key, value in self._tokens.items()}
-                    updated = replace(candidate[token_id],
+                    updated = replace(candidate[info.id],
                                       last_used=now.isoformat(timespec='seconds'))
-                    candidate[token_id] = updated
+                    candidate[info.id] = updated
                     self._save(candidate)
                     self._publish(candidate)
                     self._last_persist[info.id] = now.timestamp()
                     return updated
         except TimeoutError as e:
-            # Статистика не должна задерживать проверку токена. Используем
-            # согласованное состояние, прочитанное до ожидания блокировки.
+            # Даже если запись пропущена из-за занятой блокировки, решение
+            # принимается по повторно сверенной версии файла.
             logger.debug('Токены: пропущено обновление last_used для %s (%s)', token_id, e)
-            return info
         except OSError as e:
             # last_used — только статистика; ошибка записи не отменяет вход.
             logger.warning('Токены: не удалось обновить last_used для %s (%s)', token_id, e)
-            return info
+        with self._lock:
+            self._reload(force=True)
+            return self._by_hash.get(_hash(token.strip()))
 
     # ------------------------------------------------------------ запись
     def _save(self, tokens: dict[str, TokenInfo] | None = None) -> None:

@@ -305,7 +305,7 @@ def test_multiprocess_first_verify_uses_unique_temp_files(tmp_path):
     assert not list(tmp_path.glob('tokens.json.*.tmp'))
 
 
-def test_interprocess_lock_timeout_skips_last_used_but_rejects_writes(tmp_path):
+def test_interprocess_lock_skips_last_used_without_waiting_but_rejects_writes(tmp_path):
     from src.auth import _TOKEN_LOCK_TIMEOUT_SEC
     store = TokenStore(tmp_path)
     info, token = store.create('Синтетический владелец', 'admin')
@@ -318,8 +318,9 @@ def test_interprocess_lock_timeout_skips_last_used_but_rejects_writes(tmp_path):
     try:
         assert entered.wait(10), 'процесс не захватил блокировку'
         started = time.monotonic()
-        assert store.verify(token) is not None
-        assert time.monotonic() - started < _TOKEN_LOCK_TIMEOUT_SEC + 1
+        verified = store.verify(token)
+        assert verified is not None and verified.id == info.id
+        assert time.monotonic() - started < 0.1
 
         started = time.monotonic()
         with pytest.raises(TimeoutError):
@@ -338,6 +339,29 @@ def test_interprocess_lock_timeout_skips_last_used_but_rejects_writes(tmp_path):
             holder.terminate()
             holder.join()
     assert holder.exitcode == 0
+
+    # Проверяющий процесс мог закэшировать токен до отзыва. После завершённого
+    # отзыва проверка обязана перечитать файл и отказать.
+    ctx = get_context('spawn')
+    start, done, results = ctx.Event(), ctx.Event(), ctx.Queue()
+    revoker = ctx.Process(target=_revoke_at_start,
+                          args=(str(tmp_path), info.id, start, done, results))
+    revoker.start()
+    start.set()
+    revoker.join(10)
+    if revoker.is_alive():
+        revoker.terminate()
+        revoker.join()
+        pytest.fail('процесс отзыва завис')
+    messages = []
+    while True:
+        try:
+            messages.append(results.get(timeout=0.1))
+        except Empty:
+            break
+    assert revoker.exitcode == 0
+    assert ('revoked', True) in messages
+    assert store.verify(token) is None
 
 
 def test_cli_create_and_list(tmp_path, capsys):
