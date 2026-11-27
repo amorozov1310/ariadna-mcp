@@ -171,6 +171,8 @@ def remove_help(version: str):
     store = pm.platform_help
     try:
         if store.remove(version):
+            from ..core.platform_check import forget_report_version
+            forget_report_version(version)
             pm.warm_platform_checks()
     except (ValueError, OSError) as e:
         return _back(error=str(e))

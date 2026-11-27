@@ -633,6 +633,8 @@ _PUBLISH_LOCKS = WeakValueDictionary()
 _SELECTED_ARCHIVES = {}
 _SELECTED_VERSIONS = {}
 _VERSION_ARCHIVES = {}
+_ARCHIVE_RECENCY = {}
+_ARCHIVE_SEQUENCE = 0
 _MAX_REPORTS = 3
 _MAX_ARCHIVES = 3
 _MAX_REPORT_ERRORS = 16
@@ -644,12 +646,63 @@ class ReportUnavailable(ValueError):
 
 
 def _archive_path(db_path, key):
-    return Path(db_path).with_name(f'platform-check-{key}.zip')
+    db_path = Path(db_path)
+    return db_path.parent.parent / 'reports' / db_path.parent.name / f'platform-check-{key}.zip'
+
+
+def _report_directory(db_path):
+    db_path = Path(db_path)
+    return db_path.parent.parent / 'reports' / db_path.parent.name
+
+
+def report_directory(db_path):
+    """Каталог отчётов проекта в отдельном пространстве имён."""
+    return _report_directory(db_path)
+
+
+def _touch_archive(path):
+    global _ARCHIVE_SEQUENCE
+    with _REPORTS_LOCK:
+        _ARCHIVE_SEQUENCE += 1
+        _ARCHIVE_RECENCY[Path(path).resolve()] = _ARCHIVE_SEQUENCE
+
+
+def forget_report_version(version):
+    """Сбросить ссылки на удалённую версию справки во всех отчётах."""
+    obsolete = []
+    with _REPORTS_LOCK:
+        for directory, versions in list(_VERSION_ARCHIVES.items()):
+            filename = versions.pop(version, None)
+            if filename:
+                obsolete.append(directory / filename)
+                _ARCHIVE_RECENCY.pop((directory / filename).resolve(), None)
+            if filename and _SELECTED_ARCHIVES.get(directory) == filename:
+                _SELECTED_ARCHIVES.pop(directory, None)
+            if not versions:
+                _VERSION_ARCHIVES.pop(directory, None)
+        for directory, selected_version in list(_SELECTED_VERSIONS.items()):
+            if selected_version == version:
+                _SELECTED_VERSIONS.pop(directory, None)
+                _SELECTED_ARCHIVES.pop(directory, None)
+    for path in obsolete:
+        _unlink_archive(path)
+
+
+def forget_report_project(db_path):
+    """Сбросить состояние отчётов удаляемого проекта."""
+    directory = _report_directory(db_path).resolve()
+    with _REPORTS_LOCK:
+        _SELECTED_ARCHIVES.pop(directory, None)
+        _SELECTED_VERSIONS.pop(directory, None)
+        _VERSION_ARCHIVES.pop(directory, None)
+        for path in list(_ARCHIVE_RECENCY):
+            if path.parent == directory:
+                _ARCHIVE_RECENCY.pop(path, None)
 
 
 def select_report_version(db_path, version):
     """Запомнить выбранную проектом версию и защитить её опубликованный отчёт."""
-    directory = Path(db_path).parent.resolve()
+    directory = _report_directory(db_path).resolve()
     with _REPORTS_LOCK:
         _SELECTED_VERSIONS[directory] = version
         selected = _VERSION_ARCHIVES.get(directory, {}).get(version)
@@ -665,6 +718,7 @@ def _record_report_archive(path, version):
         _VERSION_ARCHIVES.setdefault(directory, {})[version] = path.name
         if _SELECTED_VERSIONS.get(directory) == version:
             _SELECTED_ARCHIVES[directory] = path.name
+    _touch_archive(path)
 
 
 def _publish_lock(directory):
@@ -684,7 +738,7 @@ def _unlink_archive(path):
 
 def prune_report_archives(db_path, keep=()):
     """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
-    directory = Path(db_path).parent
+    directory = _report_directory(db_path)
     keep = {_archive_path(db_path, key).name for key in keep}
     with _publish_lock(directory):
         with _REPORTS_LOCK:
@@ -694,6 +748,27 @@ def prune_report_archives(db_path, keep=()):
         for path in directory.glob('platform-check*.zip'):
             if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
                 _unlink_archive(path)
+        _sync_archive_registry(directory)
+
+
+def _sync_archive_registry(directory):
+    """Убрать из кэша версии, архивы которых уже отсутствуют на диске."""
+    directory = Path(directory).resolve()
+    existing = {path.name for path in directory.glob('platform-check*.zip')
+                if _CACHE_ARCHIVE.fullmatch(path.name)}
+    with _REPORTS_LOCK:
+        versions = _VERSION_ARCHIVES.get(directory, {})
+        for version, filename in list(versions.items()):
+            if filename not in existing:
+                versions.pop(version, None)
+        if not versions:
+            _VERSION_ARCHIVES.pop(directory, None)
+        selected = _SELECTED_ARCHIVES.get(directory)
+        if selected not in existing:
+            _SELECTED_ARCHIVES.pop(directory, None)
+        for path in list(_ARCHIVE_RECENCY):
+            if path.parent == directory and path.name not in existing:
+                _ARCHIVE_RECENCY.pop(path, None)
 
 
 def _trim_archives(published):
@@ -707,31 +782,34 @@ def _trim_archives(published):
     directory = published.parent
     with _REPORTS_LOCK:
         selected = _SELECTED_ARCHIVES.get(directory.resolve())
-    for path in published.parent.glob('platform-check*.zip'):
-        if path != published and path.name != selected and _CACHE_ARCHIVE.fullmatch(path.name):
+    for path in directory.glob('platform-check*.zip'):
+        if path != published and _CACHE_ARCHIVE.fullmatch(path.name):
             try:
-                archives.append((path.stat().st_mtime_ns, path))
+                stat = path.stat()
+                with _REPORTS_LOCK:
+                    recency = _ARCHIVE_RECENCY.get(path.resolve(), 0)
+                archives.append((stat.st_mtime_ns, recency, path.name, path))
             except OSError:
                 pass
-    archives.sort(reverse=True)
-    selected_count = int(bool(selected) and selected != published.name
-                         and (published.parent / selected).is_file())
-    excess = len(archives) + selected_count + 1 - _MAX_ARCHIVES
-    cutoff = archives[excess - 1][0] if excess > 0 else None
-    for _, path in archives[excess - 1:] if excess > 0 else ():
-        if excess <= 0:
-            break
-        if cutoff is not None:
-            try:
-                # Выбор архива может произойти во время записи другого отчёта.
-                # Повторно проверить время непосредственно перед удалением.
-                if path.stat().st_mtime_ns >= cutoff:
-                    continue
-            except OSError:
-                continue
+    # Более новые mtime, затем отметка использования/публикации, затем имя.
+    archives.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    # Публикуемый и выбранный архив защищены и входят в лимит. Выбранный
+    # может смениться параллельно; перепроверяем непосредственно перед unlink.
+    selected_is_live = bool(selected and selected != published.name and (directory / selected).is_file())
+    keep_count = max(0, _MAX_ARCHIVES - 1 - int(selected_is_live))
+    available = [item for item in archives if item[3].name != selected]
+    keep = {item[3].name for item in available[:keep_count]}
+    if selected:
+        keep.add(selected)
+    for _, _, _, path in archives:
+        if path.name in keep:
+            continue
+        with _REPORTS_LOCK:
+            current_selected = _SELECTED_ARCHIVES.get(directory.resolve())
+        if path.name == current_selected:
+            continue
         _unlink_archive(path)
-        if not path.exists():
-            excess -= 1
+    _sync_archive_registry(directory)
 
 
 def cleanup_report_temps(directory):
@@ -753,6 +831,7 @@ def mark_archive_used(path):
         # Не ждать блокировку публикации: она удерживается до завершения
         # атомарной замены, и чтение готового снимка не должно зависеть от неё.
         os.utime(path, None)
+        _touch_archive(path)
         return _stat_signature(path.stat())
     except OSError:
         return None
@@ -889,6 +968,7 @@ class _Report:
 
     def save(self, path, key, before_replace, version=None):
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             # Временный файл расположен рядом: replace атомарен, а его
             # отдельный суффикс позволяет убрать недописанный файл при старте.
             with NamedTemporaryFile(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp',

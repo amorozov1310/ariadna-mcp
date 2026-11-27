@@ -270,8 +270,8 @@ class ProjectManager:
         self._registry_lock_key = str(self.data_dir.resolve() / 'projects.json')
         # Завершить атомарное восстановление выгрузок до запуска фоновых потоков.
         for project in self._load_registry().values():
-            from .platform_check import cleanup_report_temps
-            cleanup_report_temps(self._index_path(project.id).parent)
+            from .platform_check import cleanup_report_temps, report_directory
+            cleanup_report_temps(report_directory(self._index_path(project.id)))
             for source in project.sources:
                 local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
                 root = self.get_source_xml_path(project.id, source.id) or local_root
@@ -666,8 +666,9 @@ class ProjectManager:
         их; KeyError — только если нет ни записи, ни каталогов."""
         project_dir = self.projects_dir / project_id
         index_parent = self._index_path(project_id).parent
-        # На томе INDEX_DIR проект с id «platform-help» делит каталог
-        # с версиями справки. Ему принадлежат только файлы index.db.
+        # До выделения пространства reports/{id} отчёты лежали рядом с
+        # индексом. Для совпавшего с platform-help ID нельзя удалять общий
+        # каталог справки, только прежние ZIP-отчёты проекта.
         shared_dir = index_parent == self.platform_help.root
         index_files = index_parent / 'index.db' if shared_dir else index_parent
         with self._registry_lock():
@@ -690,7 +691,11 @@ class ProjectManager:
         self._retire_project_db(project_id)
         self._forget_project_resources(project_id)
 
-        for path in dict.fromkeys((project_dir, index_parent)):
+        from .platform_check import forget_report_project, report_directory
+        report_dir = report_directory(self._index_path(project_id))
+        forget_report_project(self._index_path(project_id))
+
+        for path in dict.fromkeys((project_dir, index_parent, report_dir)):
             if not path.exists():
                 continue
             try:
@@ -698,10 +703,12 @@ class ProjectManager:
                 # только закончится запрос, начатый до закрытия (Database.close
                 # ждёт его), а ещё его может ненадолго открыть антивирус.
                 if path == self.platform_help.root:
-                    from .platform_check import prune_report_archives
-                    prune_report_archives(index_files)
                     for name in ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'):
                         (path / name).unlink(missing_ok=True)
+                    from .platform_check import _CACHE_ARCHIVE, _unlink_archive
+                    for archive in path.glob('platform-check*.zip'):
+                        if _CACHE_ARCHIVE.fullmatch(archive.name):
+                            _unlink_archive(archive)
                 else:
                     rmtree_with_retry(path)
             except OSError as e:
