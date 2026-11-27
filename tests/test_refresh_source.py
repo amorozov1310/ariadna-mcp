@@ -445,6 +445,22 @@ def test_delta_wait_zero_does_not_wait_before_applying(web, monkeypatch):
     assert response.json()['status'] == 'started'
 
 
+def test_refresh_wait_zero_without_archive_waits_for_project_idle(web, monkeypatch):
+    import src.web.routes_update as routes_update
+    _, client, _ = web
+    calls = []
+
+    async def busy(*args):
+        calls.append(args)
+        return False
+
+    monkeypatch.setattr(routes_update, '_wait_idle', busy)
+    response = client.post('/api/projects/p1/sources/main/refresh', data={'wait': '0', 'timeout': '1'})
+    assert calls
+    assert response.status_code == 409
+    assert response.json()['status'] == 'busy'
+
+
 def test_robot_scripts_retry_busy_statuses():
     bash = (Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.sh').read_text(encoding='utf-8')
     powershell = (Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.ps1').read_text(encoding='utf-8')

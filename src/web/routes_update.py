@@ -117,6 +117,9 @@ async def refresh_source(
             raise HTTPException(409, f'Выгрузка не заменена: {e}') from e
         except (ValueError, KeyError) as e:
             raise HTTPException(400, f'Выгрузка не заменена: {e}') from e
+    elif wait in ('0', 'false', 'no', '') and not await _wait_idle(pm, project_id, deadline):
+        return JSONResponse({'status': 'busy', 'project_id': project_id, 'source_id': source_id,
+                             'detail': 'Проект всё ещё индексируется'}, status_code=409)
     return await _reindex_source(pm, project_id, source_id, wait, timeout, started, deadline)
 
 
