@@ -474,16 +474,20 @@ def _term_share(db, conn, term: str) -> float:
     if total is None:
         total = conn.execute('SELECT COUNT(*) FROM card_chunks').fetchone()[0] or 1
         with lock:
-            cache['\0total'] = total
+            if db.__dict__.get('_card_term_share_revision') == revision:
+                cache['\0total'] = total
     upper = term[:-1] + chr(ord(term[-1]) + 1)
     docs = conn.execute('SELECT SUM(doc) FROM temp.card_vocab WHERE term >= ? AND term < ?',
                         (term, upper)).fetchone()[0] or 0
     share = min(1.0, docs / total)
     with lock:
-        cache[term] = share
-        cache.move_to_end(term)
-        while len(cache) > 256:
-            cache.popitem(last=False)
+        # Медленный расчёт старой ревизии может завершиться после того, как
+        # другой поток уже очистил и наполнил кэш для нового индекса.
+        if db.__dict__.get('_card_term_share_revision') == revision:
+            cache[term] = share
+            cache.move_to_end(term)
+            while len(cache) > 256:
+                cache.popitem(last=False)
     return share
 
 

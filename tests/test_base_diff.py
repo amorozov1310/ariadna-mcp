@@ -130,6 +130,58 @@ def test_diff_from_base_tool(pm):
     assert execute_tool(pm, 'diff_from_base', {'project_id': 'typical'}).startswith('Error:')
 
 
+def test_eight_parallel_diffs_with_shared_base_do_not_wait_for_pool_slots(pm, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import src.core.project_manager as project_manager
+    import src.core.base_diff as base_diff
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    for i in range(8):
+        project_id = f'parallel_{i}'
+        _project(pm, project_id, FIXTURES / 'xml_ru', base='typical')
+        pm.reindex(project_id)
+    for thread in list(pm._warming.values()):
+        thread.join(15)
+    for i in range(8):
+        pm._invalidate_analysis_caches(f'parallel_{i}')
+    with pm._base_diff_lock:
+        pm._base_diffs.clear()
+    calls = 0
+    calls_lock = threading.Lock()
+    rendezvous = threading.Barrier(8)
+
+    class Result:
+        def totals(self):
+            return {'completed': 1}
+
+    def compute(*_args):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        rendezvous.wait(timeout=10)
+        return Result()
+
+    monkeypatch.setattr(base_diff, 'compute_base_diff', compute)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(pm.get_base_diff, f'parallel_{i}') for i in range(8)]
+        assert [future.result(timeout=15).totals() for future in futures] == [
+            {'completed': 1} for _ in range(8)]
+    assert calls == 8
+
+
+def test_broken_calls_cache_replaces_previous_revision_after_source_removal(pm):
+    pm.broken_calls('custom')
+    previous_key = pm._broken_calls['custom'][0]
+    pm.remove_source('custom', 'main')
+
+    current = pm.broken_calls('custom')
+
+    assert pm._broken_calls['custom'][0] != previous_key
+    assert pm.broken_calls_ready('custom')
+    assert current == {'missing': [], 'not_export': [], 'external': [], 'dynamic': 0}
+
+
 def test_web_diff_pages(pm):
     from fastapi.testclient import TestClient
     from src.web import app as app_module

@@ -97,6 +97,42 @@ def test_term_frequency_cache_tracks_index_revision(pm):
         1, conn.execute('SELECT COUNT(*) FROM card_chunks').fetchone()[0])
 
 
+def test_old_term_frequency_calculation_cannot_publish_into_new_revision(pm):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    db = pm.get_db('p1')
+    conn = db.read_conn()
+    conn.execute("UPDATE index_state SET updated_at='old-revision' WHERE id=1")
+    entered, release = threading.Event(), threading.Event()
+    original_execute = conn.execute
+
+    class DelayedConnection:
+        def execute(self, sql, *args):
+            if sql == 'SELECT COUNT(*) FROM card_chunks':
+                entered.set()
+                assert release.wait(5)
+                return type('Row', (), {'fetchone': lambda _self: (999999,)})()
+            return original_execute(sql, *args)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            old = pool.submit(_term_share, db, DelayedConnection(), 'rareoldterm')
+            assert entered.wait(3)
+            conn.execute("UPDATE index_state SET updated_at='new-revision' WHERE id=1")
+            current = _term_share(db, conn, 'rarecurrentterm')
+            current_total = db.__dict__['_card_term_share']['\0total']
+            release.set()
+            old.result(timeout=5)
+        cache = db.__dict__['_card_term_share']
+        assert db.__dict__['_card_term_share_revision'] == 'new-revision'
+        assert cache['\0total'] == current_total
+        assert cache['rarecurrentterm'] == current
+        assert 'rareoldterm' not in cache
+    finally:
+        release.set()
+
+
 def test_module_filter(pm):
     cards = _cards(pm, module_name='общиймодуль.ценысервер.модуль')
     assert list(cards) == [('ОбщийМодуль.ЦеныСервер.Модуль', 'РассчитатьЦену')]

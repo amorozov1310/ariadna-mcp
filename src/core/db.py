@@ -13,6 +13,9 @@ from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime
 
+_SCHEMA_LOCKS_GUARD = threading.Lock()
+_SCHEMA_LOCKS: dict[str, threading.RLock] = {}
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -524,6 +527,9 @@ class Database:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        lock_key = os.path.normcase(os.path.abspath(db_path)) if db_path not in (':memory:', '') else db_path
+        with _SCHEMA_LOCKS_GUARD:
+            self._schema_lock = _SCHEMA_LOCKS.setdefault(lock_key, threading.RLock())
         self.rebuild_marker_path = db_path + '.reindex-required'
         # True, если connect() удалил индекс со старой схемой. ProjectManager
         # пересобирает его из XML, чтобы не показывать пустую БД.
@@ -720,6 +726,12 @@ class Database:
         return zlib.decompress(row[0]).decode('utf-8') if row is not None else None
 
     def _recreate_if_stale_schema(self):
+        # Не проверять существующую схему одновременно с её первичной
+        # публикацией другим Database для того же пути.
+        with self._schema_lock:
+            self._recreate_if_stale_schema_locked()
+
+    def _recreate_if_stale_schema_locked(self):
         """
         No migrations (per IMPROVEMENT_PLAN): the index is fully rebuilt
         from source on reindex, so a DB created under an older schema is
@@ -766,10 +778,13 @@ class Database:
             pass
 
     def init_schema(self):
-        if not self.conn:
-            self.connect()
-        self.conn.executescript(SCHEMA_SQL)
-        self.conn.commit()
+        with self._schema_lock:
+            if self._retired:
+                raise IndexRemovedError(self.db_path)
+            if not self.conn:
+                self.connect()
+            self.conn.executescript(SCHEMA_SQL)
+            self.conn.commit()
 
     def reset(self):
         """Clear all data, keep schema."""
@@ -955,6 +970,8 @@ class Database:
 
     def update_state(self, *, updated_at=None, **kwargs):
         now = updated_at or datetime.now().isoformat()
+        if self._retired:
+            raise IndexRemovedError(self.db_path)
         if not self.conn:
             self.connect()
         existing = self.conn.execute("SELECT id FROM index_state WHERE id=1").fetchone()

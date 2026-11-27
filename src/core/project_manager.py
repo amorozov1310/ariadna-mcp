@@ -207,6 +207,7 @@ class ProjectManager:
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
         self._db_pool: OrderedDict[str, Database] = OrderedDict()
+        self._db_overflow: set[str] = set()
         self._db_instances = WeakSet()
         # Пул открывают несколько потоков (пул SDK, фоновая переиндексация):
         # без блокировки два потока создавали два Database на один проект, и
@@ -280,6 +281,7 @@ class ProjectManager:
         Database (SearchEngine), не должны открыть файл заново."""
         with self._db_pins_changed:
             db = self._db_pool.pop(project_id, None)
+            self._db_overflow.discard(project_id)
             opening = self._db_opening.get(project_id)
             self._db_pins_changed.notify_all()
         if db is not None:
@@ -1135,6 +1137,7 @@ class ProjectManager:
                     return db
                 if db is not None:
                     self._db_pool.pop(project_id, None)
+                    self._db_overflow.discard(project_id)
                     evicted.append(db)
                 opening = self._db_opening.get(project_id)
                 if opening is not None:
@@ -1146,11 +1149,12 @@ class ProjectManager:
                                          if not self._db_pins.get(pid)), None)
                         if evict_id is not None:
                             other = self._db_pool.pop(evict_id)
+                            self._db_overflow.discard(evict_id)
                             evicted.append(other)
+                        # Мягкий предел: если все соединения заняты, открываем
+                        # ещё одно. Операция не должна ждать освобождения пула.
                         else:
-                            # Ожидание освобождения места не держит mutex.
-                            self._db_pins_changed.wait()
-                            continue
+                            self._db_overflow.add(project_id)
                     event = threading.Event()
                     self._db_opening[project_id] = event
                     is_opener = True
@@ -1172,6 +1176,7 @@ class ProjectManager:
                     db.close()
                 with self._db_pins_changed:
                     self._db_opening.pop(project_id, None)
+                    self._db_overflow.discard(project_id)
                     event.set()
                     self._db_pins_changed.notify_all()
                 raise
@@ -1213,13 +1218,27 @@ class ProjectManager:
             self._db_pins[project_id] = self._db_pins.get(project_id, 0) + 1
 
     def _unpin_db(self, project_id: str) -> None:
+        retired = []
         with self._db_pins_changed:
             count = self._db_pins.get(project_id, 0) - 1
             if count > 0:
                 self._db_pins[project_id] = count
             else:
                 self._db_pins.pop(project_id, None)
+            limit = max(1, DB_POOL_LIMIT)
+            while len(self._db_pool) > limit:
+                evict_id = next((pid for pid in self._db_pool
+                                 if pid in self._db_overflow and not self._db_pins.get(pid)), None)
+                if evict_id is None:
+                    evict_id = next((pid for pid in self._db_pool
+                                     if not self._db_pins.get(pid)), None)
+                if evict_id is None:
+                    break
+                retired.append(self._db_pool.pop(evict_id))
+                self._db_overflow.discard(evict_id)
             self._db_pins_changed.notify_all()
+        for db in retired:
+            db.retire()
 
     def _handle_stale_schema(self, project_id: str, db: Database) -> None:
         """Пометить удалённый устаревший индекс и поставить его в очередь."""
@@ -1493,9 +1512,11 @@ class ProjectManager:
         with lock:
             diff = self._cached_diff(project_id, base_id, source_id)
             if diff is None:
-                db, base_db = self.get_db(project_id), self.get_db(base_id)
-                key = (self._diff_key(db), self._diff_key(base_db))
-                diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, src, base_src)
+                # Оба индекса закреплены на всё время чтения: под давлением
+                # пула временно допускается переполнение вместо вытеснения аренды.
+                with self.read_lease(project_id) as db, self.read_lease(base_id) as base_db:
+                    key = (self._diff_key(db), self._diff_key(base_db))
+                    diff = compute_base_diff(db.read_conn(), base_db.read_conn(), base_id, src, base_src)
                 with self._base_diff_lock:
                     self._base_diffs[pair] = (key, diff)
                     self._base_diffs.move_to_end(pair)
@@ -1810,7 +1831,7 @@ class ProjectManager:
                 candidate = (key, value)
                 with self._base_diff_lock:
                     current = self._broken_calls.get(project_id)
-                    if current is None or current[0] == key:
+                    if current is None or current[0] != key:
                         self._broken_calls[project_id] = candidate
                         self._broken_calls.move_to_end(project_id)
                         while len(self._broken_calls) > BROKEN_CALL_CACHE_LIMIT:
@@ -2602,7 +2623,7 @@ class ProjectManager:
             for thread in platform_workers:
                 thread.join()
             # Теперь фоновые операции завершены. Разбудить все get_db,
-            # ожидающие место или открытие; их generation устареет, поэтому
+            # ожидающие открытие; их generation устареет, поэтому
             # они завершатся ошибкой даже после сброса флага shutdown.
             with self._db_pins_changed:
                 self._closing = True
@@ -2616,6 +2637,7 @@ class ProjectManager:
                 # Задачи уже держат свой Database и не обращаются к пулу.
                 wait_report_jobs(pool)
                 self._db_pool.clear()
+                self._db_overflow.clear()
                 databases = list(self._db_instances)
             for db in databases:
                 db.retire()

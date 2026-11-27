@@ -263,7 +263,8 @@ async def project_status(project_id: str):
 
     progress = {}
     try:
-        progress = pm.get_db(project_id).get_index_progress()
+        with pm.read_lease(project_id) as db:
+            progress = db.get_index_progress()
     except PROJECT_GONE:
         raise          # проект удалён во время запроса — 404 (app.py)
     except Exception:

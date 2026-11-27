@@ -52,6 +52,95 @@ def test_reader_connections_are_bounded_under_concurrent_pool_access(tmp_path, m
     db.close()
 
 
+def test_status_request_stays_pinned_while_eight_other_projects_open(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+    from fastapi.testclient import TestClient
+    from src.core.db import Database
+    from src.web import app as app_module
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    for project_id in ['p'] + [f'other{i}' for i in range(8)]:
+        pm.create_project(project_id, project_id)
+    pm.get_db('p')
+    entered, release = threading.Event(), threading.Event()
+    original = Database.get_index_progress
+
+    def delayed_progress(db):
+        if db.db_path == str(pm._index_path('p')):
+            entered.set()
+            assert release.wait(5)
+        return original(db)
+
+    monkeypatch.setattr(Database, 'get_index_progress', delayed_progress)
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            response = pool.submit(client.get, '/api/projects/p/status')
+            assert entered.wait(3)
+            with ThreadPoolExecutor(max_workers=8) as openers:
+                list(openers.map(pm.get_db, [f'other{i}' for i in range(8)]))
+            assert len(pm._db_pool) == 9
+            release.set()
+            assert response.result(timeout=5).status_code == 200
+    finally:
+        release.set()
+        app_module.set_pm(previous)
+        pm.close_all()
+
+
+def test_retired_writer_rejects_state_update(tmp_path):
+    from src.core.db import IndexRemovedError
+
+    db = Database(str(tmp_path / 'index.db'))
+    db.connect()
+    db.init_schema()
+    db.retire()
+    with pytest.raises(IndexRemovedError):
+        db.update_state(status='error')
+
+
+def test_reader_does_not_treat_partially_published_schema_as_stale(tmp_path, monkeypatch):
+    import src.core.db as db_module
+
+    path = str(tmp_path / 'index.db')
+    writer = Database(path)
+    writer.connect()
+    entered, release = threading.Event(), threading.Event()
+
+    def pause_schema():
+        entered.set()
+        assert release.wait(5)
+
+    writer.conn.create_function('pause_schema', 0, pause_schema)
+    monkeypatch.setattr(db_module, 'SCHEMA_SQL', """
+        CREATE TABLE calls (id INTEGER);
+        CREATE TABLE index_state (id INTEGER PRIMARY KEY, progress_phase TEXT);
+        SELECT pause_schema();
+        CREATE TABLE module_text (id INTEGER);
+    """)
+    reader = Database(path)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            initializing = pool.submit(writer.init_schema)
+            assert entered.wait(3)
+            opening = pool.submit(reader.connect)
+            time.sleep(.05)
+            assert not opening.done()
+            release.set()
+            initializing.result(timeout=5)
+            opening.result(timeout=5)
+        assert not reader.stale_schema_recreated
+        assert not reader.rebuild_required
+        assert writer._current_file_id() == reader._current_file_id()
+    finally:
+        release.set()
+        reader.close()
+        writer.close()
+
+
 def test_project_pool_is_thread_safe_when_projects_are_evicted(tmp_path, monkeypatch):
     import src.core.project_manager as project_manager
 
@@ -106,31 +195,26 @@ def test_concurrent_get_db_opens_one_database_per_project(tmp_path, monkeypatch)
         pm.close_all()
 
 
-def test_waiting_get_db_has_no_open_file_and_rechecks_deleted_project(tmp_path, monkeypatch):
+def test_pool_overflows_while_all_databases_are_leased(tmp_path, monkeypatch):
     import src.core.project_manager as project_manager
 
     monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 1)
     pm = ProjectManager(str(tmp_path / 'data'))
     pm.create_project('held', 'held')
-    pm.create_project('deleted', 'deleted')
-    waiting = threading.Event()
-
-    def request_deleted():
-        waiting.set()
-        return pm.get_db('deleted')
+    pm.create_project('overflow', 'overflow')
 
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             with pm.read_lease('held'):
-                future = pool.submit(request_deleted)
-                assert waiting.wait(2)
-                time.sleep(.05)
-                assert not pm._index_path('deleted').exists()
-                pm.delete_project('deleted')
-            with pytest.raises(Exception, match='deleted'):
-                future.result(timeout=5)
-        assert 'deleted' not in pm._db_pool
-        assert not pm._index_path('deleted').exists()
+                future = pool.submit(pm.get_db, 'overflow')
+                opened = future.result(timeout=5)
+                assert pm._index_path('overflow').exists()
+                assert len(pm._db_pool) == 2
+                assert 'overflow' in pm._db_overflow
+                assert opened.read_conn().execute('SELECT 1').fetchone()[0] == 1
+            assert len(pm._db_pool) == 1
+            assert 'overflow' not in pm._db_pool
+            assert opened._retired
     finally:
         pm.close_all()
 
@@ -165,41 +249,27 @@ def test_delete_waits_for_reserved_database_open_to_abort(tmp_path, monkeypatch)
         pm.close_all()
 
 
-def test_close_all_wakes_pool_waiter_and_rejects_its_pending_open(tmp_path, monkeypatch):
+def test_close_all_closes_overflow_after_leased_operation_finishes(tmp_path, monkeypatch):
     import src.core.project_manager as project_manager
 
     monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 1)
     pm = ProjectManager(str(tmp_path / 'data'))
     pm.create_project('held', 'held')
     pm.create_project('waiting', 'waiting')
-    lease = pm.read_lease('held')
-    lease.__enter__()
-    started = threading.Event()
-
-    def request_waiting():
-        started.set()
-        return pm.get_db('waiting')
-
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            pending = pool.submit(request_waiting)
-            assert started.wait(2)
-            time.sleep(.05)
-            closing = pool.submit(pm.close_all)
-            with pytest.raises(RuntimeError, match='closing|close_all'):
-                pending.result(timeout=5)
-            lease.__exit__(None, None, None)
+            with pm.read_lease('held'):
+                pending = pool.submit(pm.get_db, 'waiting')
+                overflow = pending.result(timeout=5)
+                closing = pool.submit(pm.close_all)
+                time.sleep(.05)
+                assert not closing.done()
             closing.result(timeout=5)
-        assert not pm._index_path('waiting').exists()
+        assert overflow._retired and overflow.conn is None
         assert not pm._db_pool
-        # Новый запрос после завершённого close_all разрешён; старый waiter
-        # завершился ошибкой выше и не может открыть этот индекс позднее.
+        # Новый запрос после завершённого close_all снова разрешён.
         assert pm.get_db('waiting').conn is not None
     finally:
-        try:
-            lease.__exit__(None, None, None)
-        except RuntimeError:
-            pass
         pm.close_all()
 
 

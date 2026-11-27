@@ -19,7 +19,10 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,11 +123,40 @@ def _worker(project_count: int, pool_limit: int, modules: int, lines: int,
                     db.close()
 
         before = _metrics(pm)
-        for project_no in range(project_count):
-            pm.get_search(f'bench_{project_no:03d}').search_code('benchmarkToken')
+        barrier = threading.Barrier(project_count)
+        measured = threading.Barrier(project_count)
+        peak = [before['sqlite_connections']]
+        done = threading.Event()
+
+        def sample_peak():
+            while not done.is_set():
+                peak[0] = max(peak[0], _metrics(pm)['sqlite_connections'])
+                time.sleep(.002)
+
+        sampler = threading.Thread(target=sample_peak, daemon=True)
+        sampler.start()
+
+        def search(project_no):
+            barrier.wait()
+            project_id = f'bench_{project_no:03d}'
+            with pm.read_lease(project_id):
+                # Все N объектов и их читающие соединения уже открыты, пока
+                # каждая задача снимает метрику; так короткий пик не теряется
+                # между двумя опросами измерителя.
+                peak[0] = max(peak[0], _metrics(pm)['sqlite_connections'])
+                measured.wait()
+                return pm.get_search(project_id).search_code('benchmarkToken')
+
+        try:
+            with ThreadPoolExecutor(max_workers=project_count) as pool:
+                list(pool.map(search, range(project_count)))
+        finally:
+            done.set()
+            sampler.join()
+        peak[0] = max(peak[0], _metrics(pm)['sqlite_connections'])
         after = _metrics(pm)
         pm.close_all()
-        return {'before_search': before, 'after_search': after}
+        return {'before_search': before, 'after_search': after, 'peak_connections': peak[0]}
 
 
 def main() -> int:
@@ -157,6 +189,9 @@ def main() -> int:
             result = subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=ROOT)
             metrics = json.loads(result.stdout.strip().splitlines()[-1])
             rows.append(f"  {label}: до поиска {metrics['before_search']}; после поиска {metrics['after_search']}")
+            if label == 'после':
+                rows.append(f"  пиковое число соединений при N={count} одновременных операциях: "
+                            f"{metrics['peak_connections']}")
         rows.append('')
     report = '\n'.join(rows)
     args.output.parent.mkdir(parents=True, exist_ok=True)
