@@ -453,6 +453,8 @@ def test_manifest_rehashes_fresh_file_even_with_reused_windows_identity(monkeypa
                 "st_mtime_ns": old_stat.st_mtime_ns,
                 "st_ctime_ns": old_stat.st_ctime_ns,
                 "st_ino": old_stat.st_ino,
+                "st_mode": actual.st_mode,
+                "st_file_attributes": getattr(actual, "st_file_attributes", 0),
             })()
         return actual
 
