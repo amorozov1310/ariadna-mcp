@@ -1933,21 +1933,22 @@ class ProjectManager:
         explicit = source_id if source_id and source_id != own else None
 
         def side(pid: str) -> tuple[str, list[str] | None, bool]:
-            engine = self.get_search(pid)
-            outline = engine.get_module_outline(module_name,
-                                                source_id=explicit or self.main_source(pid))
-            if not outline:
-                return '', None, False
-            mod = outline['module']
-            proc = next((p for p in outline['procedures']
-                         if p['name'].casefold() == procedure_name.strip().casefold()), None)
-            if not proc:
-                return mod['name'], None, False
-            text = engine.db.read_module_text(mod['id'])
-            if text is None:
-                return mod['name'], None, True
-            lines = text.split('\n')[proc['start_line'] - 1:proc['end_line']]
-            return f"{mod['name']}.{proc['name']}", lines, False
+            with self.read_lease(pid):
+                engine = self.get_search(pid)
+                outline = engine.get_module_outline(module_name,
+                                                    source_id=explicit or self.main_source(pid))
+                if not outline:
+                    return '', None, False
+                mod = outline['module']
+                proc = next((p for p in outline['procedures']
+                             if p['name'].casefold() == procedure_name.strip().casefold()), None)
+                if not proc:
+                    return mod['name'], None, False
+                text = engine.db.read_module_text(mod['id'])
+                if text is None:
+                    return mod['name'], None, True
+                lines = text.split('\n')[proc['start_line'] - 1:proc['end_line']]
+                return f"{mod['name']}.{proc['name']}", lines, False
 
         base_name, base_lines, base_unreadable = side(base_id)
         cur_name, cur_lines, cur_unreadable = side(project_id)
