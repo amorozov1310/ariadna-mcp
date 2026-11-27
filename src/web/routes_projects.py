@@ -213,7 +213,7 @@ async def add_source(
             xml_archive_filename=xml_fname,
         )
         if auto_reindex and source.xml_path:
-            pm.enqueue_reindex(project_id)
+            pm.reindex_async(project_id)
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
@@ -303,7 +303,7 @@ async def update_source(
         )
 
         if auto_reindex:
-            pm.enqueue_reindex(project_id, source_id=source_id)
+            pm.reindex_async(project_id, source_id=source_id)
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
