@@ -74,6 +74,7 @@ def test_analysis_and_term_caches_have_fixed_limits(tmp_path, monkeypatch):
     from src.core import cards
 
     monkeypatch.setattr(project_manager, 'BROKEN_CALL_CACHE_LIMIT', 2)
+    monkeypatch.setattr(project_manager, 'PROJECT_ERROR_CACHE_LIMIT', 2)
     pm = ProjectManager(str(tmp_path / 'data'))
     for project_id in ('p0', 'p1', 'p2'):
         pm.create_project(project_id, project_id)
@@ -85,6 +86,9 @@ def test_analysis_and_term_caches_have_fixed_limits(tmp_path, monkeypatch):
     for i in range(300):
         cards._term_share(db, conn, f'term{i}')
     assert len(db.__dict__['_card_term_share']) <= 256
+    for i in range(3):
+        pm._set_index_error(f'p{i}', f'error{i}')
+    assert len(pm._index_errors) == 2
     pm.close_all()
 
 
@@ -106,4 +110,28 @@ def test_deleting_project_releases_database_and_cached_results(tmp_path, monkeyp
     assert not db._readers
     assert 'demo' not in pm._broken_calls
     assert not pm._base_diffs
+    pm.close_all()
+
+
+def test_process_lock_maps_keep_only_active_locks(tmp_path):
+    import gc
+    from src.core import glossary
+    from src.core.project_manager import _REGISTRY_LOCKS, _REINDEX_LOCKS
+
+    pm = ProjectManager(str(tmp_path / 'data'))
+    project_lock = pm._reindex_lock('temporary')
+    project_lock_key = (str(pm.data_dir), 'temporary')
+    registry_lock_key = pm._registry_lock_key
+    glossary_lock_key = str((tmp_path / 'glossary.json').resolve())
+    assert pm._reindex_lock('temporary') is project_lock
+    registry_lock = pm._registry_lock()
+    glossary_lock = glossary._lock(tmp_path / 'glossary.json')
+    assert len(_REINDEX_LOCKS) >= 1 and len(_REGISTRY_LOCKS) >= 1
+
+    del project_lock, registry_lock, glossary_lock
+    gc.collect()
+
+    assert project_lock_key not in _REINDEX_LOCKS
+    assert registry_lock_key not in _REGISTRY_LOCKS
+    assert glossary_lock_key not in glossary._locks
     pm.close_all()

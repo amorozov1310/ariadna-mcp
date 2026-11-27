@@ -37,6 +37,8 @@ logger = logging.getLogger('ariadna')
 DB_POOL_LIMIT = 8
 BASE_DIFF_CACHE_LIMIT = 64
 BROKEN_CALL_CACHE_LIMIT = 64
+PROJECT_ERROR_CACHE_LIMIT = 128
+BACKGROUND_ERROR_CACHE_LIMIT = 64
 
 # Блокировка переиндексации — на процесс и на (data_dir, project_id), а не
 # на экземпляр. main.py держит один ProjectManager на процесс (общий для Web
@@ -45,7 +47,7 @@ BROKEN_CALL_CACHE_LIMIT = 64
 # процессе) не начнёт параллельный прогон. Разные проекты и data_dir
 # индексируются независимо. Другой процесс (ariadna-index рядом с сервером)
 # её не видит — его запуск параллельно с сервером не поддерживается.
-_REINDEX_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_REINDEX_LOCKS = WeakValueDictionary()
 _REINDEX_LOCKS_GUARD = threading.Lock()
 
 # Реестр projects.json меняется по схеме «перечитать → изменить → записать»
@@ -57,7 +59,7 @@ _REINDEX_LOCKS_GUARD = threading.Lock()
 # _load_registry → _save_registry при миграции). Под ней только работа с
 # реестром: распаковка архивов, удаление файлов и переиндексация идут
 # снаружи.
-_REGISTRY_LOCKS: dict[str, threading.RLock] = {}
+_REGISTRY_LOCKS = WeakValueDictionary()
 
 # Повторы os.replace при записи реестра (Windows, см. _write_registry_file):
 # 10 попыток с паузой 20, 40, … мс — в сумме до ~0,9 с.
@@ -238,10 +240,10 @@ class ProjectManager:
         self._closing_platform_workers = False
         # Кэш причин ошибок индексации; постоянная копия хранится рядом с
         # проектом в index-error.txt.
-        self._index_errors: dict[str, str] = {}
+        self._index_errors: OrderedDict[str, str] = OrderedDict()
         self._checks_warming: dict[str, threading.Thread] = {}
-        self._checks_failed: dict[str, tuple] = {}
-        self._warm_failed: dict[str, tuple] = {}
+        self._checks_failed: OrderedDict[str, tuple] = OrderedDict()
+        self._warm_failed: OrderedDict[str, tuple] = OrderedDict()
 
         # Ensure directories exist
         self.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -292,7 +294,7 @@ class ProjectManager:
                 thread = mapping.get(project_id)
                 if thread is None or not thread.is_alive():
                     mapping.pop(project_id, None)
-        self._index_errors.pop(project_id, None)
+            self._index_errors.pop(project_id, None)
 
     # ============================================
     # REGISTRY
@@ -1445,6 +1447,15 @@ class ProjectManager:
                     logger.exception("Проект %s: сравнение для «Отличий» не посчитано", project_id)
                     with self._base_diff_lock:
                         self._warm_failed[project_id] = missing
+                        self._warm_failed.move_to_end(project_id)
+                        while len(self._warm_failed) > BACKGROUND_ERROR_CACHE_LIMIT:
+                            self._warm_failed.popitem(last=False)
+                finally:
+                    with self._base_diff_lock:
+                        current = threading.current_thread()
+                        for worker_key, worker in list(self._warming.items()):
+                            if worker is not current and not worker.is_alive():
+                                self._warming.pop(worker_key, None)
 
             thread = threading.Thread(target=run, daemon=True, name=f'diff-{project_id}')
             self._warming[project_id] = thread
@@ -1453,7 +1464,10 @@ class ProjectManager:
 
     def index_error(self, project_id: str) -> str:
         """Причина последней ошибки; sidecar сохраняет её между запусками."""
-        message = self._index_errors.get(project_id)
+        with self._base_diff_lock:
+            message = self._index_errors.get(project_id)
+            if message is not None:
+                self._index_errors.move_to_end(project_id)
         if message is not None:
             return message
         try:
@@ -1462,7 +1476,11 @@ class ProjectManager:
             return ''
 
     def _set_index_error(self, project_id: str, message: str) -> None:
-        self._index_errors[project_id] = message
+        with self._base_diff_lock:
+            self._index_errors[project_id] = message
+            self._index_errors.move_to_end(project_id)
+            while len(self._index_errors) > PROJECT_ERROR_CACHE_LIMIT:
+                self._index_errors.popitem(last=False)
         error_path = self.projects_dir / project_id / 'index-error.txt'
         try:
             error_path.write_text(message, encoding='utf-8')
@@ -1470,7 +1488,8 @@ class ProjectManager:
             logger.exception('Не удалось сохранить причину ошибки индекса проекта %s', project_id)
 
     def _clear_index_error(self, project_id: str) -> None:
-        self._index_errors.pop(project_id, None)
+        with self._base_diff_lock:
+            self._index_errors.pop(project_id, None)
         try:
             (self.projects_dir / project_id / 'index-error.txt').unlink()
         except FileNotFoundError:
@@ -1652,6 +1671,15 @@ class ProjectManager:
                     logger.exception("Проект %s: проверка вызовов не посчитана", project_id)
                     with self._base_diff_lock:
                         self._checks_failed[project_id] = (key, str(e) or type(e).__name__)
+                        self._checks_failed.move_to_end(project_id)
+                        while len(self._checks_failed) > BACKGROUND_ERROR_CACHE_LIMIT:
+                            self._checks_failed.popitem(last=False)
+                finally:
+                    with self._base_diff_lock:
+                        current = threading.current_thread()
+                        for worker_key, worker in list(self._checks_warming.items()):
+                            if worker is not current and not worker.is_alive():
+                                self._checks_warming.pop(worker_key, None)
 
             thread = threading.Thread(target=run, daemon=True, name=f'checks-{project_id}')
             self._checks_warming[project_id] = thread

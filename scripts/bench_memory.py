@@ -75,7 +75,7 @@ def _metrics(pm) -> dict:
     databases = list(pm._db_pool.values())
     sqlite_connections = sum(bool(db.conn) + len(db._readers) for db in databases)
     return {'rss_mb': round(_rss_mb(), 1), 'sqlite_connections': sqlite_connections,
-            'file_descriptors': _fd_count()}
+            'fd_or_handles': _fd_count()}
 
 
 def _worker(project_count: int, pool_limit: int, modules: int, lines: int) -> dict:
@@ -130,6 +130,7 @@ def main() -> int:
         return 0
 
     rows = [f'Синтетический стенд: {args.modules} модулей x {args.lines} блоков на проект.',
+            'RSS, SQLite-соединения, файловые дескрипторы (Windows: process handles).',
             '«До» — неограниченный пул (эмуляция исходного ProjectManager); «после» — пул с лимитом 8.', '']
     for count in (1, 8, 32):
         rows.append(f'N={count}')
