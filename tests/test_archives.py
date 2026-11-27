@@ -155,7 +155,7 @@ def test_rejected_update_keeps_previous_dump():
 
             pm.update_source('p1', 'main', xml_archive=_zip({'new.xml': b'new'}),
                              xml_archive_filename='x.zip')
-            assert sorted(p.name for p in xml.iterdir()) == ['new.xml']   # без остатков старого
+            assert sorted(p.name for p in xml.iterdir()) == ['.ariadna-manifest.json', 'new.xml']   # без остатков старого
             assert _leftovers(xml.parent) == []
         finally:
             pm.close_all()

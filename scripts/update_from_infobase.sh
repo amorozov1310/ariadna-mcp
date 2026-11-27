@@ -8,9 +8,8 @@
 #      ConfigDumpInfo.xml), поэтому каталог выгрузки (--dump-dir) хранится
 #      между запусками. Без графического экрана Конфигуратор запускается
 #      через xvfb-run (пакет xvfb).
-#   2. Передача в Ариадну: архивом tar.gz по сети (по умолчанию) или
-#      rsync в папку источников проекта (--target-root). Макеты (Template.*)
-#      не передаются — Ариадне они не нужны.
+#   2. По умолчанию — только разница по манифесту; --full-upload отправляет
+#      tar.gz целиком. --target-root использует rsync. Template.* не передаются.
 #   3. POST /api/projects/<проект>/sources/<источник>/refresh — Ариадна
 #      переиндексирует источник, скрипт ждёт окончания.
 #
@@ -40,6 +39,7 @@ usage() {
   --extension-sources 'А=src1,Б=src2'   источники Ариадны для расширений
                            (по умолчанию — имя расширения)
   --dump-dir КАТАЛОГ       постоянный каталог выгрузки (обязательно)
+  --full-upload            передать полную выгрузку архивом (по умолчанию — разница)
   --target-root КАТАЛОГ    передача rsync в папку sources проекта вместо архива
   --server-dump            многопоточная выгрузка на сервере 1С (-Server)
   --platform ПУТЬ          путь к 1cv8 (по умолчанию — самая новая в /opt/1cv8)
@@ -51,7 +51,7 @@ EOF
 
 ARIADNA_URL='' PROJECT='' SOURCE='main' IB_FILE='' IB_SERVER='' USER_1C=''
 EXTENSIONS='' EXT_SOURCES='' DUMP_DIR='' TARGET_ROOT='' SERVER_DUMP=0
-PLATFORM='' TIMEOUT_MIN=120 SKIP_DUMP=0
+PLATFORM='' TIMEOUT_MIN=120 SKIP_DUMP=0 FULL_UPLOAD=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --ariadna-url) ARIADNA_URL="$2"; shift 2 ;;
@@ -68,6 +68,7 @@ while [ $# -gt 0 ]; do
         --platform) PLATFORM="$2"; shift 2 ;;
         --timeout-minutes) TIMEOUT_MIN="$2"; shift 2 ;;
         --skip-dump) SKIP_DUMP=1; shift ;;
+        --full-upload) FULL_UPLOAD=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Неизвестный параметр: $1 (--help — справка)" >&2; exit 3 ;;
     esac
@@ -164,7 +165,7 @@ refresh() {
     local sid="$1" archive="$2"
     local url="$ARIADNA_URL/api/projects/$(urlencode "$PROJECT")/sources/$(urlencode "$sid")/refresh"
     local resp="$LOG_DIR/ariadna_response.json"
-    local curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F wait=1 -F "timeout=$((TIMEOUT_MIN * 60))"
+    local curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F wait=1 -F refresh_manifest=1 -F "timeout=$((TIMEOUT_MIN * 60))"
                      --max-time $((TIMEOUT_MIN * 60 + 600)))
     [ -n "${ARIADNA_TOKEN:-}" ] && curl_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
     [ -n "$archive" ] && curl_args+=(-F "xml_archive=@$archive;type=application/gzip")
@@ -183,6 +184,60 @@ PY
     log "Источник «$sid»: $summary"
 }
 
+delta_refresh() {
+    local sid="$1" dir="$2" url="$ARIADNA_URL/api/projects/$(urlencode "$PROJECT")/sources/$(urlencode "$sid")"
+    local manifest="$LOG_DIR/server_manifest.json" delta="$DUMP_DIR/delta_$sid.zip"
+    local resp="$LOG_DIR/ariadna_response.json" status attempt get_args curl_args
+    for attempt in 1 2; do
+        get_args=(-sS -o "$manifest" -w '%{http_code}')
+        [ -n "${ARIADNA_TOKEN:-}" ] && get_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
+        status="$(curl "${get_args[@]}" "$url/manifest")" || fail 2 'connection lost while requesting source manifest'
+        if [ "$status" = 404 ] || [ "$status" = 405 ]; then return 1; fi
+        [ "$status" = 200 ] || fail 2 "Ariadna returned $status for source manifest $sid: $(cat "$manifest" 2>/dev/null)"
+        if ! command -v python3 >/dev/null; then
+            log 'Python 3 is unavailable; falling back to full archive upload'
+            return 1
+        fi
+        python3 "$SCRIPT_DIR/build_source_delta.py" "$dir" "$manifest" "$delta" > "$LOG_DIR/delta_summary.json" \
+            || fail 2 'failed to build delta archive'
+        local base summary target_version elapsed=0 indexed=0
+        summary="$(cat "$LOG_DIR/delta_summary.json")"
+        base="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["version"])' "$manifest")"
+        curl_args=(-sS -o "$resp" -w '%{http_code}' -X POST -F "base_version=$base" -F wait=0
+                   -F "delta_archive=@$delta;type=application/zip")
+        [ -n "${ARIADNA_TOKEN:-}" ] && curl_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
+        status="$(curl "${curl_args[@]}" "$url/delta")" || fail 2 'connection lost while uploading source delta'
+        if [ "$status" = 404 ] || [ "$status" = 405 ]; then return 1; fi
+        if [ "$status" = 409 ] && [ "$attempt" = 1 ]; then
+            log "Source manifest changed for $sid; fetching it again"
+            continue
+        fi
+        [[ "$status" = 200 || "$status" = 202 ]] || fail 2 "Ariadna returned $status for delta $sid: $(cat "$resp" 2>/dev/null)"
+        target_version="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["target_version"])' "$LOG_DIR/delta_summary.json")"
+        while (( elapsed < TIMEOUT_MIN * 60 )); do
+            status="$(curl "${get_args[@]}" "$url/manifest")" || fail 2 'connection lost while polling source manifest'
+            if [ "$status" = 200 ]; then
+                indexed="$(python3 - "$manifest" "$target_version" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1],encoding='utf-8'))
+print('1' if m.get('version')==sys.argv[2] and m.get('indexed') else '0')
+PY
+)"
+                [ "$indexed" = 1 ] && break
+            fi
+            sleep 2; elapsed=$((elapsed + 2))
+        done
+        [ "$indexed" = 1 ] || fail 2 "source indexing did not finish within $TIMEOUT_MIN minutes: $sid"
+        log "Source $sid: delta uploaded and indexed: $summary"
+        rm -f "$delta"
+        return 0
+    done
+    fail 2 "source manifest changed twice; retry the update: $sid"
+
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 n=0
 for item in "${ITEMS[@]}"; do
     IFS='|' read -r name dir sid <<< "$item"
@@ -196,6 +251,8 @@ for item in "${ITEMS[@]}"; do
         rsync -a --delete --exclude='Template.*' --exclude='logs/' "$dir/" "$target/" \
             || fail 2 "rsync завершился с ошибкой"
         refresh "$sid" ''
+    elif [ "$FULL_UPLOAD" = 0 ] && delta_refresh "$sid" "$dir"; then
+        :
     else
         archive="$DUMP_DIR/upload_$n.tar.gz"
         log "Архив для передачи: $archive"

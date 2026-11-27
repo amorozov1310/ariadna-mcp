@@ -8,13 +8,10 @@
        раз — полная; дальше — с -update -force: платформа переписывает только
        изменённые файлы (по ConfigDumpInfo.xml в каталоге выгрузки), поэтому
        каталог выгрузки (-DumpDir) нужно сохранять между запусками.
-    2. Передача в Ариадну, один из двух способов:
-       - в папку (-TargetRoot): robocopy /MIR в папку источников проекта
-         Ариадны (локальную или общую \\сервер\...) — копируются только
-         изменённые файлы;
-       - архивом по сети (по умолчанию): ZIP по HTTP.
-       Макеты (Template.*) не передаются: Ариадне они не нужны, а это больше
-       половины объёма выгрузки типовой.
+    2. По умолчанию скрипт получает серверный манифест и передаёт только
+       изменённые файлы и удаления. -FullUpload включает прежнюю полную ZIP-
+       передачу; -TargetRoot сохраняет прежнее зеркало robocopy /MIR.
+       Макеты (Template.*) не передаются.
     3. Ариадна переиндексирует источник и ждёт окончания:
        POST /api/projects/<проект>/sources/<источник>/refresh.
 
@@ -72,7 +69,9 @@ param(
     [string]$Token = $env:ARIADNA_TOKEN,
     [int]$TimeoutMinutes = 120,
     # Не выгружать — взять то, что уже лежит в DumpDir (выгрузку сделали иначе)
-    [switch]$SkipDump
+    [switch]$SkipDump,
+    # Передать полную выгрузку архивом; по умолчанию отправляется разница.
+    [switch]$FullUpload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -176,7 +175,7 @@ function Invoke-Refresh($Item, [string]$ZipPath) {
     $url = "$AriadnaUrl/api/projects/$([uri]::EscapeDataString($Project))/sources/$([uri]::EscapeDataString($Item.Source))/refresh"
     $resp = Join-Path $LogDir 'ariadna_response.json'
     $curl = @('-sS', '-o', $resp, '-w', '%{http_code}', '-X', 'POST',
-              '-F', 'wait=1', '-F', "timeout=$($TimeoutMinutes * 60)",
+              '-F', 'wait=1', '-F', 'refresh_manifest=1', '-F', "timeout=$($TimeoutMinutes * 60)",
               '--max-time', "$($TimeoutMinutes * 60 + 600)")
     if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
     if ($ZipPath) { $curl += @('-F', "xml_archive=@$ZipPath;type=application/zip") }
@@ -186,6 +185,59 @@ function Invoke-Refresh($Item, [string]$ZipPath) {
     $json = $body | ConvertFrom-Json
     Write-Log ("Источник «{0}»: {1}, {2} с; модулей {3}, процедур {4}" -f $Item.Source, $json.status,
                $json.duration_sec, $json.index.total_modules, $json.index.total_procedures)
+}
+
+function Invoke-DeltaRefresh($Item) {
+    $baseUrl = "$AriadnaUrl/api/projects/$([uri]::EscapeDataString($Project))/sources/$([uri]::EscapeDataString($Item.Source))"
+    $manifestPath = Join-Path $LogDir 'server_manifest.json'
+    $deltaPath = Join-Path $DumpDir 'delta_upload.zip'
+    $responsePath = Join-Path $LogDir 'ariadna_response.json'
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $curl = @('-sS', '-o', $manifestPath, '-w', '%{http_code}')
+        if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
+        $status = & curl.exe @curl "$baseUrl/manifest"
+        if ($status -in @('404', '405')) { return $false }
+        if ($status -ne '200') { Fail 2 "Ариадна ответила $status на запрос манифеста «$($Item.Source)»: $(Get-Content $manifestPath -Raw -ErrorAction SilentlyContinue)" }
+        if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+            Write-Log 'Python 3 is unavailable; falling back to full archive upload'
+            return $false
+        }
+        $summary = & python (Join-Path $PSScriptRoot 'build_source_delta.py') $Item.Dir $manifestPath $deltaPath
+        if ($LASTEXITCODE -ne 0) { Fail 2 'Не удалось построить архив разницы' }
+        $baseVersion = (Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json).version
+        $curl = @('-sS', '-o', $responsePath, '-w', '%{http_code}', '-X', 'POST',
+                  '-F', "base_version=$baseVersion", '-F', 'wait=0',
+                  '-F', "delta_archive=@$deltaPath;type=application/zip")
+        if ($Token) { $curl += @('-H', "Authorization: Bearer $Token") }
+        $status = & curl.exe @curl "$baseUrl/delta"
+        if ($status -in @('404', '405')) { return $false }
+        if ($status -eq '409' -and $attempt -eq 1) {
+            Write-Log "Source manifest changed for $($Item.Source); fetching it again"
+            continue
+        }
+        $body = if (Test-Path $responsePath) { Get-Content $responsePath -Raw -Encoding UTF8 } else { '' }
+        if ($status -notin @('200', '202')) { Fail 2 "Ariadna returned $status for delta $($Item.Source): $body" }
+        $targetVersion = ($summary | ConvertFrom-Json).target_version
+        $deadline = [DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
+        $state = $null
+        do {
+            $manifestCurl = @('-sS', '-o', $manifestPath, '-w', '%{http_code}')
+            if ($Token) { $manifestCurl += @('-H', "Authorization: Bearer $Token") }
+            $manifestStatus = & curl.exe @manifestCurl "$baseUrl/manifest"
+            if ($manifestStatus -eq '200') {
+                $state = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($state.version -eq $targetVersion -and $state.indexed) { break }
+            }
+            Start-Sleep -Seconds 2
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+        if (-not $state -or $state.version -ne $targetVersion -or -not $state.indexed) {
+            Fail 2 "Source indexing did not finish within $TimeoutMinutes minutes: $($Item.Source)"
+        }
+        Write-Log ("Source {0}: delta uploaded and indexed: {1}" -f $Item.Source, $summary)
+        Remove-Item $deltaPath -ErrorAction SilentlyContinue
+        return $true
+    }
+    Fail 2 "Манифест источника «$($Item.Source)» менялся дважды; повторите запуск"
 }
 
 $n = 0
@@ -201,6 +253,8 @@ foreach ($item in $Items) {
         & robocopy.exe $item.Dir $target /MIR /XF 'Template.*' /XD logs /R:2 /W:5 /NP /NFL /NDL /NJH /NJS | Out-Null
         if ($LASTEXITCODE -ge 8) { Fail 2 "robocopy завершился с кодом $LASTEXITCODE" }
         Invoke-Refresh $item ''
+    } elseif (-not $FullUpload -and (Invoke-DeltaRefresh $item)) {
+        continue
     } else {
         # Имя архива — латиницей: у расширений имена обычно русские, а curl.exe
         # в Windows PowerShell 5.1 получает аргументы в кодировке ANSI.
