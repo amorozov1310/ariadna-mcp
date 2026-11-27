@@ -219,9 +219,10 @@ def _main(argv=None) -> int:
     try:
         # Прогресс — в stderr: без него медленный метод (code на крупной
         # конфигурации — секунды на вопрос) выглядит как зависание.
-        results = evaluate(pm.get_search(project), cases, tuple(args.methods.split(',')),
-                           progress=lambda n, total: print(f'\rвопрос {n}/{total}', end='',
-                                                           file=sys.stderr, flush=True))
+        with pm.read_lease(project):
+            results = evaluate(pm.get_search(project), cases, tuple(args.methods.split(',')),
+                               progress=lambda n, total: print(f'\rвопрос {n}/{total}', end='',
+                                                               file=sys.stderr, flush=True))
         print(file=sys.stderr)
     finally:
         pm.close_all()
