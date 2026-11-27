@@ -461,6 +461,35 @@ def test_close_all_waits_for_checks_and_blocks_new_warmups(tmp_path, monkeypatch
         pm.close_all()
 
 
+def test_checks_worker_retries_removed_index_while_project_still_exists(tmp_path, monkeypatch):
+    from src.core.db import IndexRemovedError
+
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p1', 'p1')
+    calls = 0
+    completed = threading.Event()
+
+    def transiently_removed(_project_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise IndexRemovedError('synthetic index replacement')
+        completed.set()
+        return {'missing': [], 'not_export': []}
+
+    monkeypatch.setattr(pm, 'broken_calls', transiently_removed)
+    try:
+        assert not pm.warm_broken_calls('p1')
+        assert completed.wait(5)
+        pm._checks_warming['p1'].join(5)
+        assert calls == 2
+        assert 'p1' not in pm._checks_failed
+        assert not pm.checks_warming('p1')
+        assert not pm._db_pins
+    finally:
+        pm.close_all()
+
+
 def test_analysis_and_term_caches_have_fixed_limits(tmp_path, monkeypatch):
     import src.core.project_manager as project_manager
     from src.core import cards

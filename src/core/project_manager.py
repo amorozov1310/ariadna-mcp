@@ -14,7 +14,7 @@ import time
 import os
 import threading
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from functools import partial
@@ -1233,13 +1233,41 @@ class ProjectManager:
             self.get_db(project_id)
             yield
         finally:
-            self._unpin_db(project_id)
+            # close_all() joins report workers while holding _db_lock. Their
+            # pins must be released without trimming that same pool lock.
+            self._unpin_db(project_id, trim_pool=not self._closing_platform_workers)
+
+    def _start_pinned_worker(self, target, name: str, project_ids, *, on_created=None) -> threading.Thread | None:
+        """Передать потоку закрепления индексов на всё время его работы."""
+        pins = ExitStack()
+        try:
+            for project_id in dict.fromkeys(project_ids):
+                pins.enter_context(self.project_pin(project_id))
+        except (KeyError, IndexRemovedError):
+            pins.close()
+            return None
+
+        def run():
+            try:
+                target()
+            finally:
+                pins.close()
+
+        thread = threading.Thread(target=run, daemon=True, name=name)
+        try:
+            if on_created is not None:
+                on_created(thread)
+            thread.start()
+        except RuntimeError:
+            pins.close()
+            raise
+        return thread
 
     def _pin_db(self, project_id: str) -> None:
         with self._db_pins_changed:
             self._db_pins[project_id] = self._db_pins.get(project_id, 0) + 1
 
-    def _unpin_db(self, project_id: str) -> None:
+    def _unpin_db(self, project_id: str, *, trim_pool: bool = True) -> None:
         with self._db_pins_changed:
             count = self._db_pins.get(project_id, 0) - 1
             if count > 0:
@@ -1247,7 +1275,8 @@ class ProjectManager:
             else:
                 self._db_pins.pop(project_id, None)
             self._db_pins_changed.notify_all()
-        self._trim_db_pool()
+        if trim_pool:
+            self._trim_db_pool()
 
     def _trim_db_pool(self) -> None:
         """Сжать мягкое переполнение после освобождения любой аренды читателя."""
@@ -1457,11 +1486,13 @@ class ProjectManager:
                 if (project.platform_version or newest) != target:
                     continue
                 try:
-                    engine = self.get_search(project.id)
-                    try:
-                        warm_ready_report(engine, index, self.platform_mode(project.id), project.id)
-                    finally:
-                        engine.db.close_thread_reader()
+                    with self.project_pin(project.id):
+                        engine = self.get_search(project.id)
+                        try:
+                            warm_ready_report(engine, index, self.platform_mode(project.id), project.id,
+                                              project_pin=self.project_pin)
+                        finally:
+                            engine.db.close_thread_reader()
                 except Exception:
                     logger.exception('Проект %s: не удалось запустить проверку платформы', project.id)
 
@@ -1609,9 +1640,11 @@ class ProjectManager:
                             if worker is not current and not worker.is_alive():
                                 self._warming.pop(worker_key, None)
 
-            thread = threading.Thread(target=run, daemon=True, name=f'diff-{project_id}')
-            self._warming[project_id] = thread
-            thread.start()
+            thread = self._start_pinned_worker(
+                run, f'diff-{project_id}', (pid for pair in missing for pid in pair),
+                on_created=lambda worker: self._warming.__setitem__(project_id, worker))
+            if thread is None:
+                return True
         return False
 
     def index_error(self, project_id: str) -> str:
@@ -1839,7 +1872,18 @@ class ProjectManager:
 
             def run():
                 try:
-                    self.broken_calls(project_id)
+                    for attempt in range(2):
+                        try:
+                            self.broken_calls(project_id)
+                            break
+                        except (KeyError, IndexRemovedError):
+                            try:
+                                self.get_project(project_id)
+                            except KeyError:
+                                logger.info('Проект %s удалён во время проверки вызовов', project_id)
+                                return
+                            if attempt:
+                                raise
                 except Exception as e:
                     logger.exception("Проект %s: проверка вызовов не посчитана", project_id)
                     with self._base_diff_lock:
@@ -1854,9 +1898,11 @@ class ProjectManager:
                             if worker is not current and not worker.is_alive():
                                 self._checks_warming.pop(worker_key, None)
 
-            thread = threading.Thread(target=run, daemon=True, name=f'checks-{project_id}')
-            self._checks_warming[project_id] = thread
-            thread.start()
+            thread = self._start_pinned_worker(
+                run, f'checks-{project_id}', (project_id,),
+                on_created=lambda worker: self._checks_warming.__setitem__(project_id, worker))
+            if thread is None:
+                return True
         return False
 
     def checks_warming(self, project_id: str) -> bool:
@@ -2196,8 +2242,9 @@ class ProjectManager:
                 version = self.platform_help_version(project_id)
                 index = self.platform_help.get(version) if version else None
                 if index is not None:
-                    warm_ready_report(self.get_search(project_id), index, self.platform_mode(project_id),
-                                      project_id, warmed_key)
+                    with self.project_pin(project_id):
+                        warm_ready_report(self.get_search(project_id), index, self.platform_mode(project_id),
+                                          project_id, warmed_key, project_pin=self.project_pin)
             except FileNotFoundError:
                 pass  # Удаление справки запускает свой прогрев после смены версии.
             except Exception:
@@ -2712,8 +2759,10 @@ class ProjectManager:
                 event.wait()
             with self._db_lock:
                 pool = list(self._db_pool.values())
-                # Задачи уже держат свой Database и не обращаются к пулу.
-                wait_report_jobs(pool)
+            # Report workers release project pins through _db_lock, so never
+            # join them while holding the pool lock.
+            wait_report_jobs(pool)
+            with self._db_lock:
                 self._db_pool.clear()
                 self._db_overflow.clear()
                 databases = list(self._db_instances)
