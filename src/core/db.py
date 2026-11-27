@@ -712,15 +712,19 @@ class Database:
         """Освободить читающее соединение завершающегося фонового потока."""
         conn = getattr(self._local, 'conn', None)
         if conn is not None:
-            # Соединение, выданное другим потокам при достижении лимита,
-            # принадлежит пулу Database до close()/retire(): один поток не
-            # может закрыть его, пока другой сохранил ссылку для операции.
-            if not conn._shared:
-                conn.close()
-                with self._readers_lock:
+            # Проверка и удаление из реестра идут под той же блокировкой, что
+            # выдача соединения другому потоку. Так между проверкой _shared и
+            # close() никто не получит уже закрываемый объект.
+            with self._readers_lock:
+                shared = conn._shared
+                if not shared:
                     self._readers.pop(conn, None)
-                    self._readers_lock.notify_all()
-            self._local.conn = None
+                self._local.conn = None
+                self._readers_lock.notify_all()
+            # Соединение, разделённое между потоками, остаётся в пуле Database
+            # до close()/retire(): один поток не может закрыть чужую ссылку.
+            if not shared:
+                conn.close()
 
     def _closed_reader_error(self) -> sqlite3.Error:
         if self._retired:

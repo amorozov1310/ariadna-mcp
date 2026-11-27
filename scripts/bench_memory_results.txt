@@ -3,18 +3,18 @@ RSS, SQLite-соединения, файловые дескрипторы (Windo
 «До» — неограниченный пул со старым писателем; «после» — лимит 8 и отдельный writer.
 
 N=1
-  до: до поиска {'rss_mb': 29.1, 'sqlite_connections': 1, 'fd_or_handles': 121}; после поиска {'rss_mb': 29.8, 'sqlite_connections': 2, 'fd_or_handles': 124}
+  до: до поиска {'rss_mb': 29.1, 'sqlite_connections': 1, 'fd_or_handles': 121}; после поиска {'rss_mb': 29.7, 'sqlite_connections': 2, 'fd_or_handles': 124}
   после: до поиска {'rss_mb': 28.4, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 29.2, 'sqlite_connections': 2, 'fd_or_handles': 124}
   пиковое число соединений при N=1 одновременных операциях: 2
 
 N=8
-  до: до поиска {'rss_mb': 33.9, 'sqlite_connections': 8, 'fd_or_handles': 156}; после поиска {'rss_mb': 37.4, 'sqlite_connections': 16, 'fd_or_handles': 180}
-  после: до поиска {'rss_mb': 28.4, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 33.5, 'sqlite_connections': 16, 'fd_or_handles': 180}
+  до: до поиска {'rss_mb': 34.2, 'sqlite_connections': 8, 'fd_or_handles': 156}; после поиска {'rss_mb': 37.3, 'sqlite_connections': 16, 'fd_or_handles': 180}
+  после: до поиска {'rss_mb': 28.4, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 33.7, 'sqlite_connections': 16, 'fd_or_handles': 180}
   пиковое число соединений при N=8 одновременных операциях: 16
 
 N=32
-  до: до поиска {'rss_mb': 51.3, 'sqlite_connections': 32, 'fd_or_handles': 276}; после поиска {'rss_mb': 60.8, 'sqlite_connections': 64, 'fd_or_handles': 372}
-  после: до поиска {'rss_mb': 28.5, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 39.1, 'sqlite_connections': 16, 'fd_or_handles': 180}
+  до: до поиска {'rss_mb': 51.3, 'sqlite_connections': 32, 'fd_or_handles': 276}; после поиска {'rss_mb': 62.3, 'sqlite_connections': 64, 'fd_or_handles': 372}
+  после: до поиска {'rss_mb': 28.8, 'sqlite_connections': 0, 'fd_or_handles': 116}; после поиска {'rss_mb': 39.9, 'sqlite_connections': 16, 'fd_or_handles': 180}
   пиковое число соединений при N=32 одновременных операциях: 64
 
 После 4 серий по 128 HTTP-запросов манифеста индекса и графа по 16 проектам (до 32 одновременно; холодный пул):
