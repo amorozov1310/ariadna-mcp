@@ -99,11 +99,14 @@ class TokenStore:
                 # после исправления файла.
                 logger.error('Токены: не прочитан %s (%s) — доступ закрыт', self.path, e)
                 self._tokens, self._by_hash, self._mtime = {}, {}, mtime
+                self._last_persist.clear()
                 self._broken = True
                 return
         self._broken = False
         self._tokens = tokens
         self._by_hash = {t.hash: t for t in tokens.values()}
+        self._last_persist = {token_id: ts for token_id, ts in self._last_persist.items()
+                              if token_id in tokens}
         self._mtime = mtime
 
     def enabled(self) -> bool:
@@ -203,6 +206,7 @@ class TokenStore:
             if info is None:
                 raise KeyError(token_id)
             self._by_hash.pop(info.hash, None)
+            self._last_persist.pop(token_id, None)
             self._save()
         return info
 

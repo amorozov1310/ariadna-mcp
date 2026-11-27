@@ -37,6 +37,22 @@ def test_token_store_create_verify_revoke(tmp_path):
     assert not store.enabled() and store.verify(token) is None
 
 
+def test_revoked_token_marks_do_not_accumulate_and_tokens_stay_revoked(tmp_path):
+    store = TokenStore(tmp_path)
+    revoked = []
+    for number in range(5):
+        info, token = store.create(f'Токен {number}', 'admin')
+        assert store.verify(token) is not None
+        assert info.id in store._last_persist
+        store.revoke(info.id)
+        revoked.append(token)
+        assert info.id not in store._last_persist
+        assert len(store._last_persist) <= len(store._tokens)
+
+    assert all(store.verify(token) is None for token in revoked)
+    assert store._last_persist == {}
+
+
 def test_broken_tokens_file_keeps_server_closed(tmp_path):
     (tmp_path / 'tokens.json').write_text('{не json', encoding='utf-8')
     store = TokenStore(tmp_path)

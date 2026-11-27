@@ -70,6 +70,19 @@ def test_hbk_pages_and_toc():
     assert select.name_en == 'Select'
 
 
+def test_platform_help_error_cache_is_bounded(tmp_path):
+    store = ph.PlatformHelpStore(tmp_path / 'справка')
+    for number in range(ph._ERROR_CACHE_LIMIT + 1):
+        version = f'8.3.27.{number}'
+        with pytest.raises(RuntimeError):
+            with store._operation(version, 'Проверка'):
+                raise RuntimeError(str(number))
+
+    assert len(store._errors) == ph._ERROR_CACHE_LIMIT
+    assert '8.3.27.0' not in store._errors
+    assert store._errors[f'8.3.27.{ph._ERROR_CACHE_LIMIT}'] == str(ph._ERROR_CACHE_LIMIT)
+
+
 def test_exact_name_excludes_similar_pages_and_query_language(store):
     index = store.get(NEW)
     for query in ('сТРнайТИ', 'sTRfIND()'):

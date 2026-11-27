@@ -110,6 +110,20 @@ def test_platform_calls(project):
     assert result.count('Ошибка') == 2 and result.count('Не проверено') == 1
 
 
+def test_report_error_cache_is_bounded_and_errors_remain_visible(project):
+    pm, _ = project
+    db = pm.get_db('demo')
+    with platform_check._REPORTS_LOCK:
+        for number in range(platform_check._MAX_REPORT_ERRORS + 1):
+            platform_check._remember_report_error(db, f'key-{number}', f'ошибка {number}')
+        errors = platform_check._REPORT_ERRORS[db]
+        assert len(errors) == platform_check._MAX_REPORT_ERRORS
+        assert 'key-0' not in errors
+        with pytest.raises(platform_check.ReportUnavailable, match='ошибка 16'):
+            platform_check._known_report((db, 'key-16'), warm=False)
+        assert 'key-16' not in errors
+
+
 def test_help_upload_warms_reports_for_sixteen_projects_during_pool_churn(tmp_path, monkeypatch):
     import src.core.project_manager as project_manager
 

@@ -70,6 +70,7 @@ import threading
 import time
 import zipfile
 import zlib
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +94,7 @@ _MAX_PAGE_BYTES = 2 * 1024 * 1024       # страница справки бол
 _MAX_UNPACKED_BYTES = 512 * 1024 * 1024
 _MAX_FILES = 200_000                    # защита от «zip-бомбы» в загруженном файле
 _VERSION_RE = re.compile(r'[0-9]+(?:\.[0-9]+){3}')
+_ERROR_CACHE_LIMIT = 64
 
 
 class HbkError(ValueError):
@@ -1095,7 +1097,7 @@ class PlatformHelpStore:
         self.root = Path(root)
         self._lock = threading.Lock()
         self._building: dict[str, str] = {}        # версия → откуда строится
-        self._errors: dict[str, str] = {}          # версия → причина последней неудачи
+        self._errors: OrderedDict[str, str] = OrderedDict()  # версия → причина последней неудачи
 
     def path(self, version: str) -> Path:
         if not _VERSION_RE.fullmatch(version):
@@ -1238,6 +1240,9 @@ class PlatformHelpStore:
         except Exception as e:
             with self._lock:
                 self._errors[version] = str(e)
+                self._errors.move_to_end(version)
+                while len(self._errors) > _ERROR_CACHE_LIMIT:
+                    self._errors.popitem(last=False)
             raise
         finally:
             with self._lock:

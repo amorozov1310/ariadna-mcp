@@ -631,6 +631,7 @@ _RESTORE_LOCKS = WeakValueDictionary()
 _PUBLISH_LOCKS = WeakValueDictionary()
 _MAX_REPORTS = 3
 _MAX_ARCHIVES = 3
+_MAX_REPORT_ERRORS = 16
 _CACHE_ARCHIVE = re.compile(r'platform-check(?:-[0-9a-f]{64})?\.zip')
 
 
@@ -931,6 +932,14 @@ def _remember(cache_id, report):
         _REPORTS.popitem(last=False)
 
 
+def _remember_report_error(db, key, error):
+    errors = _REPORT_ERRORS.setdefault(db, OrderedDict())
+    errors[key] = error
+    errors.move_to_end(key)
+    while len(errors) > _MAX_REPORT_ERRORS:
+        errors.popitem(last=False)
+
+
 def _known_report(cache_id, *, warm):
     report = _REPORTS.get(cache_id)
     if cache_id in _REPORT_JOBS and (warm or report is None):
@@ -942,6 +951,8 @@ def _known_report(cache_id, *, warm):
     errors = _REPORT_ERRORS.get(db, {})
     if key in errors:
         error = errors[key] if warm else errors.pop(key)
+        if warm:
+            errors.move_to_end(key)
         raise ReportUnavailable(f'Error: не удалось подготовить отчёт проверки платформы. {error}')
 
 
@@ -1005,7 +1016,7 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
         except Exception as exc:
             logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
             with _REPORTS_LOCK:
-                _REPORT_ERRORS.setdefault(db, {})[key] = str(exc) or type(exc).__name__
+                _remember_report_error(db, key, str(exc) or type(exc).__name__)
 
     with restore_lock:
         with _REPORTS_LOCK:
