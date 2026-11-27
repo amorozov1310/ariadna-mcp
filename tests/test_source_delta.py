@@ -136,6 +136,55 @@ def test_zip_rejects_symlink_entry(tmp_path):
         source_delta.apply(root, archive, target, current["version"], current)
 
 
+def test_actual_paths_rejects_casefold_collision(monkeypatch, tmp_path):
+    """Разные имена с одинаковым casefold нельзя склеивать в одну запись:
+    иначе один из файлов «исчезал» из манифеста и считался удалённым."""
+    root = tmp_path / "xml"
+    root.mkdir()
+
+    def fake_walk(top, *, followlinks=False, onerror=None):
+        yield str(top), [], ["Straße.xml", "Strasse.xml"]
+
+    monkeypatch.setattr(source_delta.os, "walk", fake_walk)
+    with pytest.raises(source_delta.DeltaError, match="Коллизия"):
+        source_delta._actual_paths(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NTFS различает «ß» и «ss» в именах файлов")
+def test_delta_rejects_casefold_collision_in_dump(tmp_path):
+    root = tmp_path / "xml"
+    root.mkdir()
+    (root / "Straße.xml").write_bytes(b"one")
+    try:
+        (root / "Strasse.xml").write_bytes(b"two")
+    except OSError:
+        pytest.skip("файловая система не различает эти имена")
+    current = source_delta.manifest(root, tmp_path / "cache.json")
+    target = _target({"Straße.xml": b"new"})
+    with pytest.raises(source_delta.DeltaError, match="Коллизия"):
+        source_delta.apply(root, _archive({"Straße.xml": b"new"}), target,
+                           current["version"], current, tmp_path / "state")
+
+
+def test_final_check_rejects_deleted_file_left_in_dump(monkeypatch, tmp_path):
+    root = tmp_path / "xml"
+    root.mkdir()
+    (root / "gone.xml").write_bytes(b"old")
+    current = source_delta.manifest(root, tmp_path / "cache.json")
+    real_replace = os.replace
+
+    def keep_gone(src, dst):
+        if Path(src).name == "gone.xml" and Path(dst).parent.name.startswith("rollback"):
+            return
+        real_replace(src, dst)
+
+    monkeypatch.setattr(source_delta.os, "replace", keep_gone)
+    with pytest.raises(source_delta.DeltaError, match="остался"):
+        source_delta.apply(root, _archive({}), _target({}), current["version"], current,
+                           tmp_path / "state")
+    assert (root / "gone.xml").read_bytes() == b"old"
+
+
 def test_target_rejects_case_mismatched_shared_parent(tmp_path):
     root = tmp_path / "xml"
     current = source_delta.manifest(root, tmp_path / "cache.json")

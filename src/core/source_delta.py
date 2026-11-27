@@ -493,10 +493,8 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
         changed = {p for p, spec in normalized.items() if old_files.get(p) != spec}
         if changed != supplied:
             raise DeltaError("Архив должен содержать все изменённые и добавленные файлы")
-        removed = set(old_files) - set(normalized)
-        if set(old_files) - set(normalized) != removed:
-            raise DeltaError("Набор удалений не совпадает с целевым манифестом")
         _checkpoint('b')
+        removed = set(old_files) - set(normalized)
         if (len(removed) > SUSPICIOUS_DELETE_FLOOR
                 and len(removed) > len(old_files) / 2):
             raise DeltaError("Разница удаляет слишком много файлов; выполните полную передачу выгрузки")
@@ -585,6 +583,13 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
             file = root.joinpath(*PurePosixPath(actual_rel or rel).parts)
             if actual_rel != rel or not file.is_file() or file.stat().st_size != spec["size"]:
                 raise DeltaError("Итоговый файл не прошёл проверку имени или размера: " + rel)
+        # Удаления проверяются тем же способом: файла из прежнего манифеста,
+        # которого нет в целевом, не должно остаться в выгрузке (в том числе
+        # под другим регистром, если такого имени нет в целевом манифесте).
+        for rel in removed:
+            actual_rel = actual_files.get(rel.casefold())
+            if actual_rel is not None and actual_rel not in normalized:
+                raise DeltaError("Удалённый файл остался в выгрузке: " + rel)
         journal_data["committed"] = True
         _atomic_json(journal, journal_data)
         _checkpoint('f')
