@@ -13,13 +13,13 @@ import json
 import os
 import time
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..core.project_manager import ReindexInProgressError
 from ..core.source_delta import DeltaBusy, DeltaConflict, DeltaError, parse_manifest_json
-from .app import get_pm
+from .app import get_pm, project_read_lease
 
 router = APIRouter()
 
@@ -123,7 +123,8 @@ async def refresh_source(
     return await _reindex_source(pm, project_id, source_id, wait, timeout, started, deadline)
 
 
-@router.get('/api/projects/{project_id}/sources/{source_id}/manifest')
+@router.get('/api/projects/{project_id}/sources/{source_id}/manifest',
+            dependencies=[Depends(project_read_lease)])
 async def source_manifest(project_id: str, source_id: str):
     """Версия и хеши файлов выгрузки; вычисление не запускает переиндексацию."""
     try:

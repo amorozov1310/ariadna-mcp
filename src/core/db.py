@@ -9,7 +9,12 @@ import os
 import threading
 import time
 import zlib
+from contextlib import contextmanager
+from collections import OrderedDict
 from datetime import datetime
+
+_SCHEMA_LOCKS_GUARD = threading.Lock()
+_SCHEMA_LOCKS: dict[str, threading.RLock] = {}
 
 
 SCHEMA_SQL = """
@@ -440,32 +445,73 @@ class _ReaderConnection:
     ProgrammingError «Cannot operate on a closed database», которая
     уходила агенту как непредвиденная ошибка."""
 
-    def __init__(self, conn: sqlite3.Connection, closed_error=None):
+    def __init__(self, conn: sqlite3.Connection, closed_error=None, on_idle=None):
         self._conn = conn
         self._lock = threading.Lock()
         self._closed = False
+        self._active = 0
+        self._shared = False
+        self._idle = threading.Condition(self._lock)
+        self._on_idle = on_idle
+        self._lease_local = threading.local()
         self._closed_error = closed_error or (
             lambda: sqlite3.ProgrammingError("Cannot operate on a closed database."))
 
     def execute(self, sql: str, params=()) -> _Rows:
-        if self._closed:
-            raise self._closed_error()
+        try:
+            with self._idle:
+                if self._closed and not getattr(self._lease_local, 'count', 0):
+                    raise self._closed_error()
+                self._active += 1
+                try:
+                    cur = self._conn.execute(sql, params)
+                    try:
+                        rows = _Rows(cur.fetchall(), cur.description)
+                    finally:
+                        cur.close()
+                finally:
+                    self._active -= 1
+                    self._idle.notify_all()
+        finally:
+            if self._on_idle is not None:
+                self._on_idle()
+        return rows
+
+    def acquire(self) -> bool:
         with self._lock:
-            if self._closed:
-                raise self._closed_error()
-            cur = self._conn.execute(sql, params)
-            try:
-                return _Rows(cur.fetchall(), cur.description)
-            finally:
-                cur.close()
+            if self._closed and not getattr(self._lease_local, 'count', 0):
+                return False
+            self._active += 1
+            self._lease_local.count = getattr(self._lease_local, 'count', 0) + 1
+            return True
+
+    def leased_by_current_thread(self) -> bool:
+        return bool(getattr(self._lease_local, 'count', 0))
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+    def release(self) -> None:
+        with self._idle:
+            if self._active:
+                self._active -= 1
+                self._lease_local.count = max(0, getattr(self._lease_local, 'count', 0) - 1)
+                self._idle.notify_all()
+        if self._on_idle is not None:
+            self._on_idle()
 
     def refuse_new(self) -> None:
         """Новые запросы на этом соединении больше не начнутся."""
-        self._closed = True
+        with self._lock:
+            self._closed = True
 
     def close(self) -> None:
-        self.refuse_new()
-        with self._lock:                # дождаться текущего запроса
+        with self._idle:
+            self._closed = True
+            while self._active:
+                self._idle.wait()
             self._conn.close()          # повторный close() sqlite3 безвреден
 
     def __getattr__(self, name):
@@ -475,8 +521,16 @@ class _ReaderConnection:
 class Database:
     """Per-project SQLite database wrapper."""
 
+    # Потоки Web UI/MCP могут обращаться к одному индексу. Держим максимум
+    # восемь лениво открываемых читателей на индекс; вытесненный поток при
+    # следующем запросе получит новое соединение.
+    MAX_READERS = 8
+
     def __init__(self, db_path: str):
         self.db_path = db_path
+        lock_key = self._schema_lock_key(db_path)
+        with _SCHEMA_LOCKS_GUARD:
+            self._schema_lock = _SCHEMA_LOCKS.setdefault(lock_key, threading.RLock())
         self.rebuild_marker_path = db_path + '.reindex-required'
         # True, если connect() удалил индекс со старой схемой. ProjectManager
         # пересобирает его из XML, чтобы не показывать пустую БД.
@@ -489,8 +543,8 @@ class Database:
         # очистка временных каталогов падали с WinError 32. Поколение
         # растёт при каждом close(): поток, чьё соединение закрыли извне,
         # замечает это в read_conn и открывает новое.
-        self._readers: set[_ReaderConnection] = set()
-        self._readers_lock = threading.Lock()
+        self._readers: OrderedDict[_ReaderConnection, None] = OrderedDict()
+        self._readers_lock = threading.Condition()
         self._generation = 0
         # Индекс удаляется (delete_project): читающие соединения больше не
         # открываются — ни к старому файлу, который сейчас удаляет rmtree
@@ -498,6 +552,18 @@ class Database:
         self._retired = False
         # (st_dev, st_ino) файла индекса при открытии — см. file_replaced().
         self._file_id: tuple[int, int] | None = None
+        self._pool_lease_released = None
+
+    @staticmethod
+    def _schema_lock_key(db_path: str) -> str:
+        return os.path.normcase(os.path.abspath(db_path)) if db_path not in (':memory:', '') else db_path
+
+    @classmethod
+    def forget_schema_lock(cls, db_path: str) -> None:
+        """Удалить блокировку пути после удаления проекта и его индекса."""
+        key = cls._schema_lock_key(db_path)
+        with _SCHEMA_LOCKS_GUARD:
+            _SCHEMA_LOCKS.pop(key, None)
 
     def _open_conn(self) -> sqlite3.Connection:
         """Open one connection with the PRAGMAs/functions every connection
@@ -505,27 +571,32 @@ class Database:
         (already on) is what lets several connections to the same file
         coexist — one writing, the rest reading — without blocking."""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.row_factory = sqlite3.Row
-        # D5: str.casefold does full Unicode case folding (unlike SQLite's
-        # built-in NOCASE, which is ASCII-only). *_cf columns are filled with
-        # str.casefold() at insert time; параметр для сравнения с ними
-        # приводится в Python до SQL (casefold(?) на каждой строке стоил
-        # втрое больше времени). Функция в SQL остаётся для колонок без _cf
-        # (casefold(a.type_desc)); deterministic=True позволяет SQLite
-        # вычислить casefold(?) от параметра один раз на запрос.
-        conn.create_function('casefold', 1, lambda s: s.casefold() if s is not None else None,
-                             deterministic=True)
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.row_factory = sqlite3.Row
+            # D5: str.casefold does full Unicode case folding (unlike SQLite's
+            # built-in NOCASE, which is ASCII-only). *_cf columns are filled with
+            # str.casefold() at insert time; параметр для сравнения с ними
+            # приводится в Python до SQL (casefold(?) на каждой строке стоил
+            # втрое больше времени). Функция в SQL остаётся для колонок без _cf
+            # (casefold(a.type_desc)); deterministic=True позволяет SQLite
+            # вычислить casefold(?) от параметра один раз на запрос.
+            conn.create_function('casefold', 1, lambda s: s.casefold() if s is not None else None,
+                                 deterministic=True)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     def connect(self) -> sqlite3.Connection:
-        self._recreate_if_stale_schema()
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        self.conn = self._open_conn()
-        self._file_id = self._current_file_id()
-        return self.conn
+        with self._schema_lock:
+            self._recreate_if_stale_schema()
+            os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
+            self.conn = self._open_with_retry()
+            self._file_id = self._current_file_id()
+            return self.conn
 
     def _current_file_id(self) -> tuple[int, int] | None:
         """(st_dev, st_ino) файла индекса; None — файла нет. На Windows
@@ -554,7 +625,7 @@ class Database:
             return False
         return current != self._file_id
 
-    def read_conn(self) -> '_ReaderConnection':
+    def read_conn(self, *, lease: bool = False) -> '_ReaderConnection':
         """Per-thread read connection (Этап 4/D7): search/call-graph/
         diagnostics reads no longer share the single writer connection
         object across threads — each thread gets its own, opened lazily
@@ -562,8 +633,16 @@ class Database:
         serialize concurrent reads through the same Connection object.
         Callers must never write through this connection."""
         conn = getattr(self._local, 'conn', None)
+        if conn is not None and conn.leased_by_current_thread():
+            if not lease or conn.acquire():
+                return conn
         if conn is not None and getattr(self._local, 'generation', None) == self._generation:
-            return conn
+            with self._readers_lock:
+                if not conn._closed and conn in self._readers:
+                    self._readers.move_to_end(conn)
+                    if not lease or conn.acquire():
+                        return conn
+                    self._readers.pop(conn, None)
         if self._retired:
             raise IndexRemovedError(self.db_path)
         # Соединения нет или его закрыл close() из другого потока.
@@ -575,8 +654,9 @@ class Database:
                 raise IndexRemovedError(self.db_path)
             # Nothing to read yet — make sure the writer has created
             # the file/schema first rather than racing it here.
-            self.connect()
-            self.init_schema()
+            with self._schema_lock:
+                self.connect()
+                self.init_schema()
         # Открыть и зарегистрировать — под той же блокировкой, что retire() и
         # close(): иначе соединение, открытое между проверкой _retired и
         # регистрацией, пережило бы закрытие, и на Windows rmtree удаляемого
@@ -584,20 +664,67 @@ class Database:
         with self._readers_lock:
             if self._retired:
                 raise IndexRemovedError(self.db_path)
-            conn = _ReaderConnection(self._open_with_retry(), self._closed_reader_error)
-            self._readers.add(conn)
+            while len(self._readers) >= self.MAX_READERS:
+                oldest = next((candidate for candidate in self._readers
+                               if candidate.active == 0), None)
+                if oldest is not None:
+                    # Не закрывать читателя, чей слот кэша потока вытесняется:
+                    # вызывающий код мог сохранить соединение на всю операцию
+                    # с несколькими SQL. _ReaderConnection сериализует execute(),
+                    # поэтому общий читатель безопасно обслуживает другой поток,
+                    # не ломая уже выданные ссылки. close()/retire() по-прежнему
+                    # закрывают все соединения на границе жизненного цикла.
+                    self._readers.move_to_end(oldest)
+                    if lease and not oldest.acquire():
+                        continue
+                    oldest._shared = True
+                    self._local.generation = self._generation
+                    self._local.conn = oldest
+                    return oldest
+                self._readers_lock.wait()
+                if self._retired:
+                    raise IndexRemovedError(self.db_path)
+            conn = _ReaderConnection(self._open_with_retry(), self._closed_reader_error,
+                                     self._notify_reader_available)
+            if lease:
+                conn.acquire()
+            self._readers[conn] = None
             self._local.generation = self._generation
         self._local.conn = conn
         return conn
+
+    @contextmanager
+    def read_lease(self, *, trim_pool: bool = True):
+        """Удерживать читателя на время нескольких запросов одной операции."""
+        conn = self.read_conn(lease=True)
+        try:
+            yield conn
+        finally:
+            conn.release()
+            if trim_pool and self._pool_lease_released is not None:
+                self._pool_lease_released()
+
+    def _notify_reader_available(self) -> None:
+        with self._readers_lock:
+            self._readers_lock.notify_all()
 
     def close_thread_reader(self) -> None:
         """Освободить читающее соединение завершающегося фонового потока."""
         conn = getattr(self._local, 'conn', None)
         if conn is not None:
-            conn.close()
+            # Проверка и удаление из реестра идут под той же блокировкой, что
+            # выдача соединения другому потоку. Так между проверкой _shared и
+            # close() никто не получит уже закрываемый объект.
             with self._readers_lock:
-                self._readers.discard(conn)
-            self._local.conn = None
+                shared = conn._shared
+                if not shared:
+                    self._readers.pop(conn, None)
+                self._local.conn = None
+                self._readers_lock.notify_all()
+            # Соединение, разделённое между потоками, остаётся в пуле Database
+            # до close()/retire(): один поток не может закрыть чужую ссылку.
+            if not shared:
+                conn.close()
 
     def _closed_reader_error(self) -> sqlite3.Error:
         if self._retired:
@@ -638,6 +765,12 @@ class Database:
         return zlib.decompress(row[0]).decode('utf-8') if row is not None else None
 
     def _recreate_if_stale_schema(self):
+        # Не проверять существующую схему одновременно с её первичной
+        # публикацией другим Database для того же пути.
+        with self._schema_lock:
+            self._recreate_if_stale_schema_locked()
+
+    def _recreate_if_stale_schema_locked(self):
         """
         No migrations (per IMPROVEMENT_PLAN): the index is fully rebuilt
         from source on reindex, so a DB created under an older schema is
@@ -684,10 +817,13 @@ class Database:
             pass
 
     def init_schema(self):
-        if not self.conn:
-            self.connect()
-        self.conn.executescript(SCHEMA_SQL)
-        self.conn.commit()
+        with self._schema_lock:
+            if self._retired:
+                raise IndexRemovedError(self.db_path)
+            if not self.conn:
+                self.connect()
+            self.conn.executescript(SCHEMA_SQL)
+            self.conn.commit()
 
     def reset(self):
         """Clear all data, keep schema."""
@@ -720,6 +856,10 @@ class Database:
         if self.conn:
             self.conn.close()
             self.conn = None
+        self.close_readers()
+
+    def close_readers(self):
+        """Закрыть все читатели этого индекса и сбросить их поколение."""
         # Читающие соединения всех потоков: открыты с check_same_thread=False,
         # поэтому закрывать их отсюда можно. Их потоки при следующем
         # read_conn увидят новое поколение и откроют соединение заново.
@@ -737,12 +877,17 @@ class Database:
             except sqlite3.Error:
                 pass
         self._local.conn = None
+        with self._readers_lock:
+            self._readers_lock.notify_all()
 
     def get_stats(self) -> dict:
         # Read-only — uses this thread's own connection (Этап 4/D7) so
         # polling status during a background reindex never contends with
         # the writer connection the indexer thread is using.
-        conn = self.read_conn()
+        with self.read_lease() as conn:
+            return self._get_stats(conn)
+
+    def _get_stats(self, conn: '_ReaderConnection') -> dict:
         stats = {}
         for table in ['metadata_objects', 'attributes', 'forms', 'modules',
                        'procedures', 'calls', 'sources']:
@@ -771,10 +916,10 @@ class Database:
         время индексации открывалась десятки секунд. Здесь один GROUP BY по
         metadata_objects (десятки тысяч строк).
         """
-        conn = self.read_conn()
-        rows = conn.execute(
-            "SELECT kind, COUNT(*) as cnt FROM metadata_objects GROUP BY kind ORDER BY cnt DESC"
-        ).fetchall()
+        with self.read_lease() as conn:
+            rows = conn.execute(
+                "SELECT kind, COUNT(*) as cnt FROM metadata_objects GROUP BY kind ORDER BY cnt DESC"
+            ).fetchall()
         return {r['kind']: r['cnt'] for r in rows}
 
     def get_index_progress(self) -> dict:
@@ -788,8 +933,8 @@ class Database:
         подвисал ровно тогда, когда прогресс и нужен, и страница выглядела
         замершей. Здесь читается одна строка по первичному ключу.
         """
-        conn = self.read_conn()
-        state = conn.execute("SELECT * FROM index_state WHERE id=1").fetchone()
+        with self.read_lease() as conn:
+            state = conn.execute("SELECT * FROM index_state WHERE id=1").fetchone()
         if state is None:
             return {'status': 'empty', 'progress_current': 0,
                     'progress_total': 0, 'progress_phase': '', 'updated_at': ''}
@@ -864,6 +1009,8 @@ class Database:
 
     def update_state(self, *, updated_at=None, **kwargs):
         now = updated_at or datetime.now().isoformat()
+        if self._retired:
+            raise IndexRemovedError(self.db_path)
         if not self.conn:
             self.connect()
         existing = self.conn.execute("SELECT id FROM index_state WHERE id=1").fetchone()

@@ -116,6 +116,27 @@ def test_close_closes_reader_of_another_thread_and_it_reopens():
             db.close()
 
 
+def test_thread_cleanup_does_not_close_a_reader_reused_from_the_bounded_pool(monkeypatch):
+    monkeypatch.setattr(Database, 'MAX_READERS', 1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(os.path.join(tmpdir, 'index.db'))
+        db.connect()
+        db.init_schema()
+        first, second = _Worker(), _Worker()
+        try:
+            original = first.call(db.read_conn)
+            reused = second.call(db.read_conn)
+            assert reused is original
+
+            first.call(db.close_thread_reader)
+            assert not _closed(reused)
+            assert second.call(lambda: db.read_conn().execute('SELECT 1').fetchone()[0]) == 1
+        finally:
+            first.stop()
+            second.stop()
+            db.close()
+
+
 def _pm_with_project(tmpdir: str, index_dir: str) -> ProjectManager:
     import io
     import zipfile

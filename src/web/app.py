@@ -55,6 +55,14 @@ def get_pm() -> ProjectManager:
     return _pm
 
 
+def project_read_lease(project_id: str):
+    """Закрепить Database в пуле на HTTP-запрос, не занимая reader-поток."""
+    # FastAPI может запускать вход и выход синхронной зависимости в разных
+    # потоках. Читательскую аренду получают непосредственно SQL-операции.
+    with get_pm().project_pin(project_id):
+        yield
+
+
 # ============================================
 # Template globals (Этап U0)
 # ============================================

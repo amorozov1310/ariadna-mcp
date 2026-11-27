@@ -2,13 +2,13 @@
 инструмент MCP diff_from_base, для человека: сводка, доработанные / новые /
 удалённые объекты, diff текста процедуры."""
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from urllib.parse import quote
 
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from .app import get_pm, templates
+from .app import get_pm, templates, project_read_lease
 
 router = APIRouter()
 
@@ -180,7 +180,8 @@ async def update_export(project_id: str, release: str = '', format: str = 'md'):
     return _download(body, fmt, diff_report.filename('obnovlenie', project_id, fmt))
 
 
-@router.get("/projects/{project_id}/diff/conflict", response_class=HTMLResponse)
+@router.get("/projects/{project_id}/diff/conflict", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 async def conflict_page(request: Request, project_id: str, release: str, module: str, name: str):
     """Обе правки процедуры — проекта и релиза, каждая от общей базы."""
     project = _project(project_id)

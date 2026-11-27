@@ -951,7 +951,8 @@ def _check_revision(engine, conn, index, mode, key, project_id):
         raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
 
-def _request_report(engine, index, mode, revision, project_id, *, warm=False, invalid=None):
+def _request_report(engine, index, mode, revision, project_id, *, warm=False, invalid=None,
+                    project_pin=None):
     db = engine.db
     conn = db.read_conn()
     key = _cache_key(engine, index, mode, revision)
@@ -963,7 +964,25 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
             return key, report
         restore_lock = _RESTORE_LOCKS.setdefault(cache_id, Lock())
 
-    def prepare(report):
+    def prepare(report, pin):
+        # Рабочий поток отчёта живёт дольше HTTP/MCP-вызова, который его создал.
+        # Удерживаем Database и читателя до конца запросов; не сжимаем пул,
+        # пока close_all() ждёт завершения этой задачи.
+        try:
+            with db.read_lease(trim_pool=False):
+                prepare_with_reader(report)
+        finally:
+            try:
+                db.close_thread_reader()
+            finally:
+                try:
+                    if pin is not None:
+                        pin.__exit__(None, None, None)
+                finally:
+                    with _REPORTS_LOCK:
+                        _REPORT_JOBS.pop(cache_id, None)
+
+    def prepare_with_reader(report):
         try:
             reader = db.read_conn()
 
@@ -987,12 +1006,6 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
             logger.exception('Проект %s: снимок проверки платформы не построен', project_id)
             with _REPORTS_LOCK:
                 _REPORT_ERRORS.setdefault(db, {})[key] = str(exc) or type(exc).__name__
-        finally:
-            try:
-                db.close_thread_reader()
-            finally:
-                with _REPORTS_LOCK:
-                    del _REPORT_JOBS[cache_id]
 
     with restore_lock:
         with _REPORTS_LOCK:
@@ -1012,12 +1025,17 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
         with _REPORTS_LOCK:
             if db in _CLOSING_DATABASES:
                 raise ReportUnavailable('Индекс закрывается. Повторите проверку.')
-            thread = Thread(target=prepare, args=(report,), daemon=True, name=f'platform-check-{project_id}')
+            pin = project_pin(project_id) if project_pin is not None else None
+            if pin is not None:
+                pin.__enter__()
+            thread = Thread(target=prepare, args=(report, pin), daemon=True, name=f'platform-check-{project_id}')
             _REPORT_JOBS[cache_id] = thread
             try:
                 thread.start()
             except RuntimeError:
-                del _REPORT_JOBS[cache_id]
+                _REPORT_JOBS.pop(cache_id, None)
+                if pin is not None:
+                    pin.__exit__(None, None, None)
                 raise
     raise ReportUnavailable('Отчёт готовится. Повторите вызов через минуту-две.')
 
@@ -1044,7 +1062,7 @@ def warm_report(engine, index, mode, ready_at, warmed_key=None):
         return key
 
 
-def warm_ready_report(engine, index, mode, project_id, warmed_key=None):
+def warm_ready_report(engine, index, mode, project_id, warmed_key=None, *, project_pin=None):
     conn = engine.db.read_conn()
     try:
         revision = check_index(conn, project_id)
@@ -1052,18 +1070,22 @@ def warm_ready_report(engine, index, mode, project_id, warmed_key=None):
                 "SELECT 1 FROM modules WHERE file_path != '' LIMIT 1").fetchone():
             if warmed_key is not None and warmed_key == _cache_key(engine, index, mode, revision):
                 return
-            _request_report(engine, index, mode, revision, project_id, warm=True)
+            _request_report(engine, index, mode, revision, project_id, warm=True,
+                            project_pin=project_pin)
     except ReportUnavailable:
         pass  # Уже готовится либо сообщение будет выдано при запросе отчёта.
 
 
-def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision):
+def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision, *,
+                project_pin=None):
     """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
-    key, report = _request_report(engine, index, mode, revision, project_id)
+    key, report = _request_report(engine, index, mode, revision, project_id,
+                                  project_pin=project_pin)
     try:
         page = report.page(source_id, limit, offset, levels)
     except (IndexError, ValueError, zlib.error):
-        key, report = _request_report(engine, index, mode, revision, project_id, invalid=report)
+        key, report = _request_report(engine, index, mode, revision, project_id, invalid=report,
+                                      project_pin=project_pin)
         page = report.page(source_id, limit, offset, levels)
     conn = engine.db.read_conn()
     _check_revision(engine, conn, index, mode, key, project_id)

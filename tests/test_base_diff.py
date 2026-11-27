@@ -130,6 +130,131 @@ def test_diff_from_base_tool(pm):
     assert execute_tool(pm, 'diff_from_base', {'project_id': 'typical'}).startswith('Error:')
 
 
+def test_eight_parallel_diffs_with_shared_base_do_not_wait_for_pool_slots(pm, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import src.core.project_manager as project_manager
+    import src.core.base_diff as base_diff
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    for i in range(8):
+        project_id = f'parallel_{i}'
+        _project(pm, project_id, FIXTURES / 'xml_ru', base='typical')
+        pm.reindex(project_id)
+    for thread in list(pm._warming.values()):
+        thread.join(15)
+    for i in range(8):
+        pm._invalidate_analysis_caches(f'parallel_{i}')
+    with pm._base_diff_lock:
+        pm._base_diffs.clear()
+    calls = 0
+    calls_lock = threading.Lock()
+    rendezvous = threading.Barrier(8)
+
+    class Result:
+        def totals(self):
+            return {'completed': 1}
+
+    def compute(*_args):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        rendezvous.wait(timeout=10)
+        return Result()
+
+    monkeypatch.setattr(base_diff, 'compute_base_diff', compute)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(pm.get_base_diff, f'parallel_{i}') for i in range(8)]
+        assert [future.result(timeout=15).totals() for future in futures] == [
+            {'completed': 1} for _ in range(8)]
+    assert calls == 8
+
+
+def test_diff_waits_for_reader_before_taking_pair_lock(pm, monkeypatch):
+    """Пока запрос ждёт аренду читателя, другая операция должна войти в пару."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    pm.reindex('custom')
+    for thread in list(pm._warming.values()):
+        thread.join(15)
+    with pm._base_diff_lock:
+        pm._base_diffs.clear()
+    pair = ('custom', 'typical', 'main', 'main')
+    pair_lock = threading.Lock()
+    pm._diff_pair_locks[pair] = pair_lock
+    entered, release = threading.Event(), threading.Event()
+    original_lease = pm.read_lease
+
+    @contextmanager
+    def paused_lease(project_id):
+        if project_id == 'custom' and not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        with original_lease(project_id) as db:
+            yield db
+
+    monkeypatch.setattr(pm, 'read_lease', paused_lease)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(pm.get_base_diff, 'custom')
+            assert entered.wait(3)
+            # Старый порядок держал pair_lock, пока не получил reader lease.
+            assert pair_lock.acquire(blocking=False)
+            pair_lock.release()
+            release.set()
+            assert pending.result(timeout=10) is not None
+    finally:
+        release.set()
+
+
+def test_export_and_eight_playground_diffs_complete_together(pm, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    pm.reindex('custom')
+    for thread in list(pm._warming.values()):
+        thread.join(15)
+    with pm._base_diff_lock:
+        pm._base_diffs.clear()
+
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+
+        def playground_diff(_):
+            return client.post('/api/projects/custom/playground', json={
+                'tool': 'diff_from_base', 'params': {},
+            })
+
+        with ThreadPoolExecutor(max_workers=9) as pool:
+            diffs = [pool.submit(playground_diff, i) for i in range(8)]
+            export = pool.submit(client.get, '/projects/custom/diff/export')
+            responses = [f.result(timeout=30) for f in diffs]
+            export_response = export.result(timeout=30)
+        assert all(r.status_code == 200 for r in responses)
+        assert all(not r.json()['is_error'] for r in responses)
+        assert export_response.status_code == 200
+        assert 'Что доработано' in export_response.text
+    finally:
+        app_module.set_pm(previous)
+
+
+def test_broken_calls_cache_replaces_previous_revision_after_source_removal(pm):
+    pm.broken_calls('custom')
+    previous_key = pm._broken_calls['custom'][0]
+    pm.remove_source('custom', 'main')
+
+    current = pm.broken_calls('custom')
+
+    assert pm._broken_calls['custom'][0] != previous_key
+    assert pm.broken_calls_ready('custom')
+    assert current == {'missing': [], 'not_export': [], 'external': [], 'dynamic': 0}
+
+
 def test_web_diff_pages(pm):
     from fastapi.testclient import TestClient
     from src.web import app as app_module
@@ -575,6 +700,45 @@ def test_no_diff_while_a_project_is_indexing(pm):
     pm._warm_related('custom')
     pm._warming['custom'].join(10)
     assert pm.warm_diffs('custom') is True
+
+
+def test_diff_pair_lock_survives_cache_invalidation(pm, monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    pair = ('custom', 'typical', 'main', 'main')
+    pair_lock = threading.Lock()
+    started, resume = threading.Event(), threading.Event()
+    active = maximum = 0
+    guard = threading.Lock()
+    pm._diff_pair_locks[pair] = pair_lock
+
+    def compare():
+        nonlocal active, maximum
+        lock = pm._diff_pair_locks.setdefault(pair, threading.Lock())
+        with lock:
+            with guard:
+                active += 1
+                maximum = max(maximum, active)
+            started.set()
+            resume.wait(10)
+            with guard:
+                active -= 1
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(compare)
+            assert started.wait(10)
+            pm._invalidate_analysis_caches('custom')
+            assert pm._diff_pair_locks[pair] is pair_lock
+            second = pool.submit(compare)
+            time.sleep(.05)
+            resume.set()
+            first.result(timeout=10)
+            second.result(timeout=10)
+        assert maximum == 1
+    finally:
+        resume.set()
 
 
 def test_diff_pages_layout(release_pm):

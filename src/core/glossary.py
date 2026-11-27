@@ -16,6 +16,7 @@
 import json
 import re
 import threading
+from weakref import WeakValueDictionary
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -30,7 +31,7 @@ TARGET_OBJECT, TARGET_ATTRIBUTE, TARGET_PROCEDURE = 'object', 'attribute', 'proc
 _WORD = re.compile(r'\w+')
 _SPLIT_TERMS = re.compile(r'[,;\n]+')
 _MIN_SHARED = 4          # общая часть основ, при которой слова считаются одним
-_locks: dict[str, threading.Lock] = {}
+_locks = WeakValueDictionary()
 _locks_guard = threading.Lock()
 
 

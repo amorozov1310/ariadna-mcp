@@ -5,11 +5,11 @@ data source (main config vs extension), and every result carries its
 `source_id` / `source_label` so the UI can show where each match came from.
 """
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse
 
 from ..core.project_manager import PROJECT_GONE
-from .app import templates, get_pm
+from .app import templates, get_pm, project_read_lease
 
 router = APIRouter()
 
@@ -17,7 +17,8 @@ router = APIRouter()
 PAGE = 50                               # строк результата за раз; «Показать ещё» — +PAGE
 
 
-@router.get("/projects/{project_id}/search", response_class=HTMLResponse)
+@router.get("/projects/{project_id}/search", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 def search_page(request: Request, project_id: str, q: str = '', kind: str = '',
                 mode: str = 'metadata', module_filter: str = '', export_only: str = '',
                 source_id: str = '', n: int = PAGE):
@@ -85,7 +86,8 @@ def search_page(request: Request, project_id: str, q: str = '', kind: str = '',
 PROCEDURE_LINES = 400                   # строк кода сразу; дальше — «Показать полностью»
 
 
-@router.get("/projects/{project_id}/procedure", response_class=HTMLResponse)
+@router.get("/projects/{project_id}/procedure", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 def procedure_page(request: Request, project_id: str, module: str, name: str = '',
                    source_id: str = '', line: int = 0, tab: str = 'code', full: str = ''):
     """Страница процедуры: объявление, код с номерами строк, кто вызывает и что
@@ -156,7 +158,8 @@ def procedure_page(request: Request, project_id: str, module: str, name: str = '
     })
 
 
-@router.get("/projects/{project_id}/object/{full_name:path}", response_class=HTMLResponse)
+@router.get("/projects/{project_id}/object/{full_name:path}", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 def object_detail(request: Request, project_id: str, full_name: str, source_id: str = '',
                   tab: str = ''):
     pm = get_pm()
@@ -299,7 +302,8 @@ def _calls_context(request: Request, project_id: str, view: str, procedure: str,
     return pm, ctx
 
 
-@router.get("/projects/{project_id}/calltree", response_class=HTMLResponse)
+@router.get("/projects/{project_id}/calltree", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 def calltree_page(
     request: Request, project_id: str,
     procedure: str = '', module: str = '', direction: str = 'down', depth: int = 3,
@@ -321,7 +325,8 @@ def calltree_page(
     return templates.TemplateResponse(name="calltree.html", request=request, context=ctx)
 
 
-@router.get("/projects/{project_id}/graph", response_class=HTMLResponse)
+@router.get("/projects/{project_id}/graph", response_class=HTMLResponse,
+            dependencies=[Depends(project_read_lease)])
 def graph_page(
     request: Request, project_id: str,
     procedure: str = '', module: str = '', direction: str = 'down', depth: int = 3,
@@ -334,7 +339,8 @@ def graph_page(
     return templates.TemplateResponse(name="graph.html", request=request, context=ctx)
 
 
-@router.get("/api/projects/{project_id}/procedures/suggest")
+@router.get("/api/projects/{project_id}/procedures/suggest",
+            dependencies=[Depends(project_read_lease)])
 def suggest_procedures(project_id: str, q: str = ''):
     """Подсказка имени процедуры в форме «Вызовов»: имя, модуль, часть проекта."""
     pm = get_pm()
@@ -349,7 +355,8 @@ def suggest_procedures(project_id: str, q: str = ''):
             for r in rows]
 
 
-@router.get("/api/projects/{project_id}/graph/calltree")
+@router.get("/api/projects/{project_id}/graph/calltree",
+            dependencies=[Depends(project_read_lease)])
 def api_calltree_graph(
     project_id: str,
     procedure: str = '', module: str = '', direction: str = 'down', depth: int = 3,
@@ -478,7 +485,8 @@ def api_calltree_graph(
     })
 
 
-@router.get("/api/projects/{project_id}/graph/references")
+@router.get("/api/projects/{project_id}/graph/references",
+            dependencies=[Depends(project_read_lease)])
 def api_references_graph(
     project_id: str,
     object_name: str = '',

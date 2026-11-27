@@ -415,8 +415,9 @@ def semantic_search_payload(pm: ProjectManager, args: dict) -> dict | str:
         error = _unknown_source_error(pm, project_id, source_id)
         if error:
             return error
-    return semantic_search.search(pm.get_search(project_id), project_id, args.get('query', ''),
-                                  source_id, args.get('limit'), args.get('offset', 0))
+    with pm.read_lease(project_id):
+        return semantic_search.search(pm.get_search(project_id), project_id, args.get('query', ''),
+                                      source_id, args.get('limit'), args.get('offset', 0))
 
 
 def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
@@ -426,6 +427,20 @@ def execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
         capped = tool in _PAGED_TOOLS and requested is not None and int(requested) > MAX_LIMIT
     except (TypeError, ValueError):
         capped = False
+    # MCP-вызов может делать несколько отдельных SQL-запросов через один
+    # SearchEngine. Держим Database в пуле до форматирования всего ответа,
+    # иначе вытеснение между запросами закрывает читателя посреди операции.
+    if tool in ('list_projects', 'platform_help'):
+        return _execute_tool_capped(pm, tool, args, capped, requested)
+    project_id, error = _resolve_project_id(pm, args)
+    if error:
+        return error
+    with pm.read_lease(project_id):
+        return _execute_tool_capped(pm, tool, args, capped, requested)
+
+
+def _execute_tool_capped(pm: ProjectManager, tool: str, args: dict,
+                         capped: bool, requested) -> str:
     if not capped:
         return _execute_tool(pm, tool, args)
     text = _execute_tool(pm, tool, {**args, 'limit': MAX_LIMIT})
@@ -1009,7 +1024,8 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             offset = max(0, offset)
             try:
                 page, more, counts, modules = check_calls(
-                    engine, index, mode, source_id, limit, offset, levels, project_id, revision)
+                    engine, index, mode, source_id, limit, offset, levels, project_id, revision,
+                    project_pin=pm.project_pin)
             except ReportUnavailable as e:
                 return str(e)
             except (FileNotFoundError, sqlite3.OperationalError):

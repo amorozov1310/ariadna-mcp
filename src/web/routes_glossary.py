@@ -5,12 +5,12 @@ list_glossary, remove_glossary_term, но для человека: таблиц�
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..core.glossary import split_terms
-from .app import get_pm, templates
+from .app import get_pm, templates, project_read_lease
 
 router = APIRouter()
 
@@ -51,7 +51,8 @@ def glossary_page(request: Request, project_id: str, error: str = '', saved: str
     })
 
 
-@router.post("/api/projects/{project_id}/glossary")
+@router.post("/api/projects/{project_id}/glossary",
+             dependencies=[Depends(project_read_lease)])
 async def glossary_save(
     project_id: str,
     target: str = Form(...),
@@ -91,7 +92,8 @@ def glossary_delete(project_id: str, entry_id: str):
     return RedirectResponse(f"/projects/{project_id}/glossary", status_code=303)
 
 
-@router.get("/api/projects/{project_id}/glossary/suggest")
+@router.get("/api/projects/{project_id}/glossary/suggest",
+            dependencies=[Depends(project_read_lease)])
 def glossary_suggest(project_id: str, q: str = ''):
     """Подсказка поля «Объект конфигурации»: объекты, реквизиты и процедуры
     по началу имени — полные имена, как их принимает словарь."""

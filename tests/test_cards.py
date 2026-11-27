@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.core.cards import CARD_FORMAT, build_cards, chunk_body
+from src.core.cards import CARD_FORMAT, _term_share, build_cards, chunk_body
 from src.core.project_manager import ProjectManager
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -81,6 +81,56 @@ def test_query_text_is_in_the_body(pm):
     card = _cards(pm)[('Справочник.Склады.МодульОбъекта', 'ТипСкладаПоУмолчанию')]
     assert card.region == 'СлужебныеПроцедурыИФункции'
     assert 'ВЫБРАТЬ ПЕРВЫЕ 1' in '\n'.join(c.text for c in card.chunks)
+
+
+def test_term_frequency_cache_tracks_index_revision(pm):
+    db = pm.get_db('p1')
+    conn = db.read_conn()
+    assert _term_share(db, conn, 'процедур') > 0
+    assert '\0total' in db.__dict__['_card_term_share']
+
+    # Имитируем новую ревизию карточек с обновлённым словарём.
+    conn.execute('DELETE FROM card_fts')
+    conn.execute("UPDATE index_state SET updated_at='next-card-revision' WHERE id=1")
+    assert _term_share(db, conn, 'процедур') == 0
+    assert db.__dict__['_card_term_share']['\0total'] == max(
+        1, conn.execute('SELECT COUNT(*) FROM card_chunks').fetchone()[0])
+
+
+def test_old_term_frequency_calculation_cannot_publish_into_new_revision(pm):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    db = pm.get_db('p1')
+    conn = db.read_conn()
+    conn.execute("UPDATE index_state SET updated_at='old-revision' WHERE id=1")
+    entered, release = threading.Event(), threading.Event()
+    original_execute = conn.execute
+
+    class DelayedConnection:
+        def execute(self, sql, *args):
+            if sql == 'SELECT COUNT(*) FROM card_chunks':
+                entered.set()
+                assert release.wait(5)
+                return type('Row', (), {'fetchone': lambda _self: (999999,)})()
+            return original_execute(sql, *args)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            old = pool.submit(_term_share, db, DelayedConnection(), 'rareoldterm')
+            assert entered.wait(3)
+            conn.execute("UPDATE index_state SET updated_at='new-revision' WHERE id=1")
+            current = _term_share(db, conn, 'rarecurrentterm')
+            current_total = db.__dict__['_card_term_share']['\0total']
+            release.set()
+            old.result(timeout=5)
+        cache = db.__dict__['_card_term_share']
+        assert db.__dict__['_card_term_share_revision'] == 'new-revision'
+        assert cache['\0total'] == current_total
+        assert cache['rarecurrentterm'] == current
+        assert 'rareoldterm' not in cache
+    finally:
+        release.set()
 
 
 def test_module_filter(pm):

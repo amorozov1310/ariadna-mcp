@@ -165,6 +165,52 @@ def test_reindex_async_marks_indexing_before_returning(monkeypatch):
             pm.close_all()
 
 
+def test_new_index_reindex_and_status_open_serially(monkeypatch):
+    """Первое открытие не делит PRAGMA WAL между writer и MCP-статусом."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from src.core.db import Database
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _pm(tmpdir)  # у p1 есть источник, но индекса ещё нет
+        index_path = str(pm._index_path('p1'))
+        original_open = Database._open_conn
+        opening, continue_open = threading.Event(), threading.Event()
+        continue_reindex = threading.Event()
+
+        def pause_first_open(db):
+            if db.db_path == index_path and not opening.is_set():
+                opening.set()
+                assert continue_open.wait(5)
+            return original_open(db)
+
+        def hold_reindex(_self, *_args, **_kwargs):
+            assert continue_reindex.wait(5)
+
+        monkeypatch.setattr(Database, '_open_conn', pause_first_open)
+        monkeypatch.setattr(ProjectManager, 'reindex', hold_reindex)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                reindex = pool.submit(pm.reindex_async, 'p1')
+                assert opening.wait(3)
+                status = pool.submit(_status, pm)
+                time.sleep(.05)
+                assert not status.done()
+                continue_open.set()
+                assert reindex.result(timeout=8)['status'] == 'started'
+                assert status.result(timeout=8).startswith('Status: indexing')
+                continue_reindex.set()
+            deadline = time.monotonic() + 5
+            while pm._reindexing and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert not pm._reindexing
+        finally:
+            continue_open.set()
+            continue_reindex.set()
+            pm.close_all()
+
+
 def test_reindex_async_error_releases_lock_and_starts_nothing(monkeypatch):
     """Проект удалили между вызовами (другой экземпляр — Web UI): ошибка,
     блокировка отпущена, поток не запущен."""

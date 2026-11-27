@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import struct
+import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -107,6 +108,137 @@ def test_platform_calls(project):
     assert 'требует режима совместимости 8.3.26' in result
     assert 'Внутренняя()' not in result and 'ТолькоСлово' not in result
     assert result.count('Ошибка') == 2 and result.count('Не проверено') == 1
+
+
+def test_help_upload_warms_reports_for_sixteen_projects_during_pool_churn(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path))
+    project_ids = [f'help_{index:02d}' for index in range(16)]
+    for project_id in project_ids:
+        _index_fixture(pm, project_id)
+        project = pm.get_project(project_id)
+        project.platform_version = ''
+        pm._save_project_to_disk(project_id, project)
+
+    previous = web._pm
+    web.set_pm(pm)
+    new_version = '8.3.28.1'
+    try:
+        client = TestClient(web.app, headers={'Host': '127.0.0.1'})
+        readers_started = Barrier(33)
+
+        def read(index):
+            readers_started.wait(timeout=10)
+            total = 0
+            for turn in range(64):
+                project_id = project_ids[(index + turn) % len(project_ids)]
+                with pm.read_lease(project_id) as db:
+                    total += db.read_conn().execute('SELECT COUNT(*) FROM modules').fetchone()[0]
+            return total
+
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            reads = [pool.submit(read, index) for index in range(32)]
+            readers_started.wait(timeout=10)
+            _upload_help(client, new_version)
+            assert all(result.result(timeout=20) > 0 for result in reads)
+
+        _join_workers([t for t in running_threads() if t.name == f'platform-check-warm-{new_version}'])
+        from src.core.platform_check import wait_report_jobs
+        wait_report_jobs(list(pm._db_pool.values()))
+
+        archives = {project_id: list(pm._index_path(project_id).parent.glob('platform-check-*.zip'))
+                    for project_id in project_ids}
+        assert all(archives.values()), {pid: len(paths) for pid, paths in archives.items()}
+        for project_id in project_ids:
+            first_check = execute_tool(pm, 'check_platform_calls', {'project_id': project_id})
+            assert 'Отчёт готовится' not in first_check
+            assert new_version in first_check
+        assert not pm._db_pins
+        assert len(pm._db_pool) <= 8
+        assert not any(reader.active for db in pm._db_pool.values() for reader in db._readers)
+    finally:
+        web.set_pm(previous)
+        pm.close_all()
+
+
+def test_reindex_warms_first_report_while_other_projects_evict_pool(tmp_path, monkeypatch):
+    """Первый отчёт должен пережить вытеснение во время его построения."""
+    import src.core.project_manager as project_manager
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path))
+    project_ids = [f'warm_{index:02d}' for index in range(16)]
+    for project_id in project_ids:
+        _index_fixture(pm, project_id)
+        project = pm.get_project(project_id)
+        project.platform_version = ''
+        pm._save_project_to_disk(project_id, project)
+    pm.platform_help.build_from_bytes(VERSION, context_book())
+
+    target_id = project_ids[0]
+    target_module = pm.get_source_xml_path(target_id, 'sample') / 'CommonModules/Пример/Ext/Module.bsl'
+    build_started = Event()
+    readers_done = Event()
+    active = {'target': False}
+    original_build = platform_check._Report._build
+
+    def delayed_build(report, engine, conn, index, mode):
+        if active['target'] and engine.db.db_path == str(pm._index_path(target_id)):
+            build_started.set()
+            assert readers_done.wait(timeout=20)
+        return original_build(report, engine, conn, index, mode)
+
+    monkeypatch.setattr(platform_check._Report, '_build', delayed_build)
+    previous = web._pm
+    web.set_pm(pm)
+    try:
+        client = TestClient(web.app, headers={'Host': '127.0.0.1'})
+        for turn in range(3):
+            with target_module.open('a', encoding='utf-8') as module:
+                module.write(f'\nПроцедура Обновление{turn}() Экспорт\n'
+                             f'    НесуществующийВызов{turn}();\nКонецПроцедуры\n')
+            build_started.clear()
+            readers_done.clear()
+            active['target'] = True
+            start = Barrier(33)
+
+            def read_other(index):
+                start.wait(timeout=10)
+                build_started.wait(timeout=10)
+                total = 0
+                for offset in range(12):
+                    project_id = project_ids[1 + (index + offset) % 15]
+                    with pm.read_lease(project_id) as db:
+                        total += db.read_conn().execute(
+                            'SELECT COUNT(*) FROM modules').fetchone()[0]
+                return total
+
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                reads = [pool.submit(read_other, index) for index in range(32)]
+                start.wait(timeout=10)
+                response = client.post(
+                    f'/api/projects/{target_id}/sources/sample/refresh', data={'wait': '0'})
+                assert response.status_code == 202, response.text
+                assert build_started.wait(timeout=15)
+                assert all(read.result(timeout=20) > 0 for read in reads)
+                readers_done.set()
+
+            deadline = time.monotonic() + 20
+            while pm.get_project(target_id).status == 'indexing' and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert pm.get_project(target_id).status == 'ready'
+            first_check = execute_tool(pm, 'check_platform_calls', {'project_id': target_id})
+            assert 'Отчёт готовится' not in first_check, first_check
+            assert f'НесуществующийВызов{turn}' in first_check, first_check
+            active['target'] = False
+        assert not pm._db_pins
+        assert len(pm._db_pool) <= 8
+    finally:
+        readers_done.set()
+        web.set_pm(previous)
+        pm.close_all()
 
 
 def test_help_mode_by_project(project):

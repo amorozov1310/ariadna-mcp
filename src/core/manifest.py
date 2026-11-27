@@ -86,73 +86,74 @@ def _source_rows(conn) -> dict[str, dict]:
 
 def project_manifest(pm: ProjectManager, project_id: str) -> dict:
     """Манифест индекса проекта. KeyError — проекта нет."""
-    project = pm.get_project(project_id)
-    db = pm.get_db(project_id)
-    conn = db.read_conn()
-    progress = db.get_index_progress()
-    parser_states = db.get_parser_states(conn)
-    by_source = _source_rows(conn)
-    current_fp = parser_fingerprint.parser_fingerprint()
+    # Снимок манифеста собирается несколькими запросами: удерживаем одну БД и
+    # её читателя до конца, чтобы параллельное вытеснение не закрыло соединение.
+    with pm.read_lease(project_id) as db:
+        project = pm.get_project(project_id)
+        conn = db.read_conn()
+        progress = db.get_index_progress()
+        parser_states = db.get_parser_states(conn)
+        by_source = _source_rows(conn)
+        current_fp = parser_fingerprint.parser_fingerprint()
+        sources = []
+        issues = []
+        for src in project.sources:
+            row = by_source.get(src.id, {})
+            state = parser_states.get(src.id) or {}
+            cards = row.get('cards', {'modules_with_code': 0, 'modules_current': 0})
+            # sources.indexed_at заполняет обход метаданных из Configuration.xml.
+            metadata_from = 'xml' if row.get('indexed_at') else ''
+            fingerprint = state.get('fingerprint', '')
+            item = {
+                'id': src.id,
+                'label': src.label,
+                'source_type': src.source_type,
+                'config_name': row.get('config_name', ''),
+                'config_version': row.get('config_version', ''),
+                'metadata_from': metadata_from,
+                'has_code': bool(src.xml_path),
+                'indexed_at': row.get('indexed_at') or src.indexed_at,
+                'modules': row.get('modules', 0),
+                'parser_fingerprint': fingerprint,
+                'parser_current': bool(fingerprint) and fingerprint == current_fp,
+                'last_full_reparse_at': state.get('last_full_reparse_at', ''),
+                'last_full_reparse_reason': state.get('last_full_reparse_reason', ''),
+                'cards': cards,
+            }
+            sources.append(item)
+            if not item['indexed_at']:
+                issues.append(f'источник {src.id} не проиндексирован')
+                continue
+            if src.xml_path and not item['parser_current']:
+                issues.append(f'источник {src.id} разобран другой версией парсера — '
+                              f'переиндексируйте проект')
+            if cards['modules_current'] < cards['modules_with_code']:
+                issues.append(f'источник {src.id}: поисковые карточки построены для '
+                              f"{cards['modules_current']} из {cards['modules_with_code']} "
+                              f'модулей — переиндексируйте проект')
 
-    sources = []
-    issues = []
-    for src in project.sources:
-        row = by_source.get(src.id, {})
-        state = parser_states.get(src.id) or {}
-        cards = row.get('cards', {'modules_with_code': 0, 'modules_current': 0})
-        # sources.indexed_at заполняет обход метаданных из Configuration.xml.
-        metadata_from = 'xml' if row.get('indexed_at') else ''
-        fingerprint = state.get('fingerprint', '')
-        item = {
-            'id': src.id,
-            'label': src.label,
-            'source_type': src.source_type,
-            'config_name': row.get('config_name', ''),
-            'config_version': row.get('config_version', ''),
-            'metadata_from': metadata_from,
-            'has_code': bool(src.xml_path),
-            'indexed_at': row.get('indexed_at') or src.indexed_at,
-            'modules': row.get('modules', 0),
-            'parser_fingerprint': fingerprint,
-            'parser_current': bool(fingerprint) and fingerprint == current_fp,
-            'last_full_reparse_at': state.get('last_full_reparse_at', ''),
-            'last_full_reparse_reason': state.get('last_full_reparse_reason', ''),
-            'cards': cards,
+        stats = project.index_stats
+        return {
+            'schema_version': MANIFEST_SCHEMA_VERSION,
+            'ariadna_version': __version__,
+            'project_id': project.id,
+            'name': project.name,
+            'status': project.status,
+            'ready': project.status == 'ready',
+            'index': {
+                'state': progress.get('status', 'empty'),
+                'updated_at': progress.get('updated_at', ''),
+                'last_indexed': stats.last_indexed,
+                'duration_sec': stats.duration_sec,
+                'objects': stats.total_objects,
+                'modules': stats.total_modules,
+                'procedures': stats.total_procedures,
+                'calls': stats.total_calls,
+            },
+            'formats': {
+                'parser_fingerprint': current_fp,
+                'card_format': CARD_FORMAT,
+            },
+            'sources': sources,
+            'issues': issues,
         }
-        sources.append(item)
-        if not item['indexed_at']:
-            issues.append(f'источник {src.id} не проиндексирован')
-            continue
-        if src.xml_path and not item['parser_current']:
-            issues.append(f'источник {src.id} разобран другой версией парсера — '
-                          f'переиндексируйте проект')
-        if cards['modules_current'] < cards['modules_with_code']:
-            issues.append(f'источник {src.id}: поисковые карточки построены для '
-                          f"{cards['modules_current']} из {cards['modules_with_code']} "
-                          f'модулей — переиндексируйте проект')
-
-    stats = project.index_stats
-    return {
-        'schema_version': MANIFEST_SCHEMA_VERSION,
-        'ariadna_version': __version__,
-        'project_id': project.id,
-        'name': project.name,
-        'status': project.status,
-        'ready': project.status == 'ready',
-        'index': {
-            'state': progress.get('status', 'empty'),
-            'updated_at': progress.get('updated_at', ''),
-            'last_indexed': stats.last_indexed,
-            'duration_sec': stats.duration_sec,
-            'objects': stats.total_objects,
-            'modules': stats.total_modules,
-            'procedures': stats.total_procedures,
-            'calls': stats.total_calls,
-        },
-        'formats': {
-            'parser_fingerprint': current_fp,
-            'card_format': CARD_FORMAT,
-        },
-        'sources': sources,
-        'issues': issues,
-    }
