@@ -82,7 +82,8 @@ def test_status_request_stays_pinned_while_eight_other_projects_open(tmp_path, m
             assert entered.wait(3)
             with ThreadPoolExecutor(max_workers=8) as openers:
                 list(openers.map(pm.get_db, [f'other{i}' for i in range(8)]))
-            assert len(pm._db_pool) == 9
+            assert len(pm._db_pool) <= 8
+            assert pm._db_pool.get('p') is not None
             release.set()
             assert response.result(timeout=5).status_code == 200
     finally:
@@ -209,9 +210,9 @@ def test_pool_overflows_while_all_databases_are_leased(tmp_path, monkeypatch):
                 future = pool.submit(pm.get_db, 'overflow')
                 opened = future.result(timeout=5)
                 assert pm._index_path('overflow').exists()
-                assert len(pm._db_pool) == 2
-                assert 'overflow' in pm._db_overflow
-                assert opened.read_conn().execute('SELECT 1').fetchone()[0] == 1
+                assert len(pm._db_pool) == 1
+                assert 'overflow' not in pm._db_pool
+                assert opened._retired
             assert len(pm._db_pool) == 1
             assert 'overflow' not in pm._db_pool
             assert opened._retired
@@ -414,23 +415,20 @@ def test_database_lease_release_trims_soft_pool_overflow_and_schema_locks(tmp_pa
     for project_id in project_ids:
         pm.create_project(project_id, project_id)
 
-    original_connect = Database.connect
     all_open = threading.Barrier(len(project_ids))
+    overflow_seen = threading.Event()
 
-    def concurrent_connect(db):
-        all_open.wait(timeout=8)
-        return original_connect(db)
+    def leased_read(project_id):
+        with pm.read_lease(project_id) as db:
+            all_open.wait(timeout=8)
+            if len(pm._db_pool) > 2:
+                overflow_seen.set()
+            return db.read_conn().execute('SELECT 1').fetchone()[0]
 
-    monkeypatch.setattr(Database, 'connect', concurrent_connect)
     try:
         with ThreadPoolExecutor(max_workers=len(project_ids)) as pool:
-            databases = list(pool.map(pm.get_db, project_ids))
-        assert len(pm._db_pool) > 2  # мягкий предел на время пересекающихся открытий
-
-        # Это аренда читателя Database без pin от ProjectManager. Её отпускание
-        # всё равно должно сократить переполнение от неприкреплённых get_db.
-        with databases[0].read_lease() as conn:
-            assert conn.execute('SELECT 1').fetchone()[0] == 1
+            assert list(pool.map(leased_read, project_ids)) == [1] * len(project_ids)
+        assert overflow_seen.is_set()  # мягкий предел во время активных аренд
         assert len(pm._db_pool) <= 2
 
         keys = {Database._schema_lock_key(str(pm._index_path(pid))) for pid in project_ids}
@@ -497,6 +495,100 @@ def test_manifest_and_call_graph_http_leases_survive_concurrent_eviction(tmp_pat
         assert open_connections <= 8 * (1 + Database.MAX_READERS)
     finally:
         app_module.set_pm(previous)
+        pm.close_all()
+
+
+def test_index_manifest_and_call_graph_requests_survive_pool_eviction(tmp_path, monkeypatch):
+    """Именно манифест индекса, а не файловый манифест источника."""
+    import src.core.project_manager as project_manager
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    project_ids = [f'p{i}' for i in range(16)]
+    for project_id in project_ids:
+        pm.create_project(project_id, project_id)
+
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+
+        def request(index):
+            project_id = project_ids[index % len(project_ids)]
+            if index % 2:
+                return client.get(f'/api/projects/{project_id}/manifest')
+            return client.get(f'/api/projects/{project_id}/graph/calltree',
+                              params={'procedure': 'Work'})
+
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            responses = list(pool.map(request, range(256)))
+        assert [response.status_code for response in responses] == [200] * 256
+        assert all(response.json().get('project_id') or response.json().get('nodes') is not None
+                   for response in responses)
+        assert not pm._db_pins
+        assert len(pm._db_pool) <= 8
+    finally:
+        app_module.set_pm(previous)
+        pm.close_all()
+
+
+def test_http_request_dependency_does_not_release_reader_on_another_thread(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.core.db import _ReaderConnection
+    from src.web import app as app_module
+
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p', 'p')
+    pm.get_db('p')
+    wrong_thread_releases = []
+    original_release = _ReaderConnection.release
+
+    def checked_release(conn):
+        if not conn.leased_by_current_thread():
+            wrong_thread_releases.append(conn)
+        return original_release(conn)
+
+    monkeypatch.setattr(_ReaderConnection, 'release', checked_release)
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            responses = list(pool.map(
+                lambda _: client.get('/projects/p/search?q=synthetic'), range(40)))
+        assert [response.status_code for response in responses] == [200] * 40
+        assert not wrong_thread_releases
+        assert not pm._db_pins
+    finally:
+        app_module.set_pm(previous)
+        pm.close_all()
+
+
+def test_concurrent_unleased_get_db_opens_trim_pool_to_limit(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    project_ids = [f'p{i}' for i in range(16)]
+    for project_id in project_ids:
+        pm.create_project(project_id, project_id)
+
+    start = threading.Barrier(16)
+
+    def open_unleased(project_id):
+        start.wait()
+        return pm.get_db(project_id)
+
+    try:
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(open_unleased, project_ids))
+        assert len(pm._db_pool) <= 8
+        assert not pm._db_pins
+        assert all(not any(reader.active for reader in db._readers)
+                   for db in pm._db_pool.values())
+    finally:
         pm.close_all()
 
 
