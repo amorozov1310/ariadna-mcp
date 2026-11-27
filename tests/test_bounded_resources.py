@@ -92,6 +92,66 @@ def test_reader_limit_reuses_live_connection_instead_of_closing_between_queries(
         db.close()
 
 
+def test_http_calltree_holds_reader_across_recursive_sql_under_pool_pressure(
+        tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 8)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    project_ids = [f'p{i}' for i in range(16)]
+    for project_id in project_ids:
+        pm.create_project(project_id, project_id)
+        pm.get_db(project_id)
+
+    db = pm.get_db('p0')
+    db.conn.execute("INSERT INTO sources(id, label) VALUES ('main', 'synthetic')")
+    module_id = db.conn.execute(
+        "INSERT INTO modules(source_id, name, module_type, name_cf) "
+        "VALUES ('main', 'CommonModule.Stress', 'common', 'commonmodule.stress')"
+    ).lastrowid
+    procedure_ids = []
+    for index in range(40):
+        procedure_ids.append(db.conn.execute(
+            "INSERT INTO procedures(module_id, name, kind, name_cf) VALUES (?, ?, 'procedure', ?)",
+            (module_id, f'Work{index:02d}', f'work{index:02d}')).lastrowid)
+    for index, caller_id in enumerate(procedure_ids[:-1]):
+        call_id = db.conn.execute(
+            "INSERT INTO calls(caller_id, callee_name, callee_module, callee_proc, callee_kind, line) "
+            "VALUES (?, ?, 'CommonModule.Stress', ?, 'local', ?)",
+            (caller_id, f'Work{index + 1:02d}', f'Work{index + 1:02d}', index + 1)
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO calls_resolved(call_id, callee_id, confidence) VALUES (?, ?, 'exact')",
+            (call_id, procedure_ids[index + 1]))
+    db.conn.commit()
+
+    previous = app_module._pm
+    app_module.set_pm(pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1'})
+
+        def request(index):
+            if index % 2 == 0:
+                return client.get('/api/projects/p0/graph/calltree',
+                                  params={'procedure': 'Work00', 'depth': 4})
+            return client.get(f'/api/projects/p{index % 16}/status')
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            responses = list(pool.map(request, range(96)))
+        assert [response.status_code for response in responses] == [200] * len(responses)
+        trees = [response.json() for index, response in enumerate(responses) if index % 2 == 0]
+        assert all(len(tree['nodes']) == 5 for tree in trees)
+        assert not pm._db_pins
+        assert len(pm._db_pool) <= 8
+        assert not any(reader.active for database in pm._db_pool.values()
+                       for reader in database._readers)
+    finally:
+        app_module.set_pm(previous)
+        pm.close_all()
+
+
 def test_status_request_stays_pinned_while_eight_other_projects_open(tmp_path, monkeypatch):
     import src.core.project_manager as project_manager
     from fastapi.testclient import TestClient
