@@ -214,6 +214,11 @@ class ProjectManager:
         self._db_lock = threading.Lock()
         self._db_pins: dict[str, int] = {}
         self._db_pins_changed = threading.Condition(self._db_lock)
+        # Один открывающий поток на проект; Event позволяет ждать его вне
+        # блокировки пула и не сериализует открытия разных индексов.
+        self._db_opening: dict[str, threading.Event] = {}
+        self._closing = False
+        self._pool_generation = 0
         self._registry: dict[str, ProjectInfo] | None = None
         # (st_mtime_ns, st_size) projects.json на момент последней загрузки или
         # собственной записи; None — кэш не сверен с диском.
@@ -245,6 +250,7 @@ class ProjectManager:
         # проектом в index-error.txt.
         self._index_errors: OrderedDict[str, str] = OrderedDict()
         self._checks_warming: dict[str, threading.Thread] = {}
+        self._closing_checks = False
         self._checks_failed: OrderedDict[str, tuple] = OrderedDict()
         self._warm_failed: OrderedDict[str, tuple] = OrderedDict()
 
@@ -272,10 +278,16 @@ class ProjectManager:
         на Web UI и MCP, см. main.py), так что закрыть индекс достаточно
         здесь. retire(), а не close(): запросы, которые уже держат этот
         Database (SearchEngine), не должны открыть файл заново."""
-        with self._db_lock:
+        with self._db_pins_changed:
             db = self._db_pool.pop(project_id, None)
+            opening = self._db_opening.get(project_id)
+            self._db_pins_changed.notify_all()
         if db is not None:
             db.retire()
+        # Дождаться открытия, начатого до удаления из реестра: его поток
+        # повторно проверит проект и закроет соединение до удаления файлов.
+        if opening is not None:
+            opening.wait()
 
     def _invalidate_analysis_caches(self, project_id: str) -> None:
         """Освободить результаты, зависящие от индекса проекта."""
@@ -650,6 +662,9 @@ class ProjectManager:
             elif not project_dir.exists() and not index_files.exists():
                 raise KeyError(f"Project '{project_id}' not found")
 
+        with self._db_pins_changed:
+            self._db_pins_changed.notify_all()
+
         self._retire_project_db(project_id)
         self._forget_project_resources(project_id)
 
@@ -880,9 +895,16 @@ class ProjectManager:
         # _clear_source_data handles all cascading deletes including the
         # `sources` row, attributes, modules, procedures, calls, FTS rebuild.
         try:
-            db = self.get_db(project_id)
-            self._clear_source_data(db, source_id)
-            db.update_state()
+            if self._index_path(project_id).exists():
+                db = Database(str(self._index_path(project_id)))
+                try:
+                    db.connect()
+                    db.init_schema()
+                    self._db_instances.add(db)
+                    self._clear_source_data(db, source_id)
+                    db.update_state()
+                finally:
+                    db.close()
         except Exception:
             # If DB doesn't exist yet (project never indexed), skip — not fatal
             pass
@@ -1096,49 +1118,95 @@ class ProjectManager:
         же, что при открытии (Database.file_replaced, один os.stat): если
         файл удалили или заменили снаружи, старые соединения закрываются и
         индекс открывается заново."""
-        with self._db_pins_changed:
-            db = self._db_pool.get(project_id)
-            if db is not None and db.conn:
-                if not db.file_replaced():
+        generation = self._pool_generation
+        while True:
+            evicted = []
+            is_opener = False
+            with self._db_pins_changed:
+                if self._closing:
+                    raise RuntimeError("ProjectManager is closing")
+                if generation != self._pool_generation:
+                    raise RuntimeError("Database request interrupted by close_all")
+                if project_id not in self._load_registry():
+                    raise ProjectNotFoundError(project_id)
+                db = self._db_pool.get(project_id)
+                if db is not None and db.conn and not db.file_replaced():
                     self._db_pool.move_to_end(project_id)
                     return db
-                logger.warning("Файл индекса проекта %s удалён или заменён снаружи — "
-                               "индекс открывается заново", project_id)
-            if db is not None:
-                self._db_pool.pop(project_id, None)
-                db.retire()
-
-            # Открыть (и тем более создать) индекс — только для проекта из
-            # реестра. Проверка — под той же блокировкой пула: delete_project
-            # сперва убирает проект из реестра и лишь затем закрывает пул,
-            # поэтому открытие либо успевает до закрытия (и будет закрыто),
-            # либо видит, что проекта нет. Иначе запрос посреди удаления
-            # создавал новый пустой index.db, а на Windows держал файл,
-            # который удаляет rmtree.
-            if project_id not in self._load_registry():
-                raise ProjectNotFoundError(project_id)
-
-            db_path = str(self._index_path(project_id))
-            db = Database(db_path)
-            self._db_instances.add(db)
-            db.connect()
-            db.init_schema()
-            while len(self._db_pool) >= DB_POOL_LIMIT:
-                evict_id = next((pid for pid in self._db_pool
-                                 if not self._db_pins.get(pid)), None)
-                if evict_id is None:
-                    # Condition.wait освобождает общую блокировку пула,
-                    # чтобы работающий поток мог вернуть lease.
-                    self._db_pins_changed.wait()
-                    continue
-                evicted = self._db_pool.pop(evict_id)
-                evicted.retire()
-            self._db_pool[project_id] = db
+                if db is not None:
+                    self._db_pool.pop(project_id, None)
+                    evicted.append(db)
+                opening = self._db_opening.get(project_id)
+                if opening is not None:
+                    event = opening
+                else:
+                    limit = max(1, DB_POOL_LIMIT)
+                    if len(self._db_pool) + len(self._db_opening) >= limit:
+                        evict_id = next((pid for pid in self._db_pool
+                                         if not self._db_pins.get(pid)), None)
+                        if evict_id is not None:
+                            other = self._db_pool.pop(evict_id)
+                            evicted.append(other)
+                        else:
+                            # Ожидание освобождения места не держит mutex.
+                            self._db_pins_changed.wait()
+                            continue
+                    event = threading.Event()
+                    self._db_opening[project_id] = event
+                    is_opener = True
+            for old_db in evicted:
+                old_db.retire()
+            if not is_opener:
+                # Ждём открытие этого индекса вне общей блокировки и затем
+                # заново проверяем пул/реестр.
+                event.wait()
+                continue
+            db = None
+            try:
+                db = Database(str(self._index_path(project_id)))
+                self._db_instances.add(db)
+                db.connect()
+                db.init_schema()
+            except BaseException:
+                if db is not None:
+                    db.close()
+                with self._db_pins_changed:
+                    self._db_opening.pop(project_id, None)
+                    event.set()
+                    self._db_pins_changed.notify_all()
+                raise
+            with self._db_pins_changed:
+                self._db_opening.pop(project_id, None)
+                if self._closing or project_id not in self._load_registry():
+                    db.retire()
+                    event.set()
+                    self._db_pins_changed.notify_all()
+                    if self._closing:
+                        raise RuntimeError("ProjectManager is closing")
+                    raise ProjectNotFoundError(project_id)
+                self._db_pool[project_id] = db
+                event.set()
+                self._db_pins_changed.notify_all()
             if db.stale_schema_recreated or db.rebuild_required:
-                # Обработать до снятия блокировки пула, чтобы другой запрос
-                # не увидел новый пустой файл со статусом «готов».
                 self._handle_stale_schema(project_id, db)
             return db
+
+    @contextmanager
+    def read_lease(self, project_id: str):
+        """Закрепить индекс в пуле на всю пользовательскую операцию."""
+        while True:
+            db = self.get_db(project_id)
+            with self._db_pins_changed:
+                if self._closing:
+                    raise RuntimeError("ProjectManager is closed")
+                if self._db_pool.get(project_id) is db:
+                    self._db_pins[project_id] = self._db_pins.get(project_id, 0) + 1
+                    break
+        try:
+            with db.read_lease():
+                yield db
+        finally:
+            self._unpin_db(project_id)
 
     def _pin_db(self, project_id: str) -> None:
         with self._db_pins_changed:
@@ -1674,10 +1742,15 @@ class ProjectManager:
         """Готова ли проверка вызовов; нет — считает её в фоне (на крупной
         конфигурации это десятки секунд) и возвращает False: страница
         открывается сразу с «Идёт проверка…» и ждёт."""
+        with self._base_diff_lock:
+            if self._closing_checks:
+                return False
         if self.broken_calls_ready(project_id):
             return True
         key = self._diff_key(self.get_db(project_id))
         with self._base_diff_lock:
+            if self._closing_checks:
+                return False
             failed = self._checks_failed.get(project_id)
             if failed and failed[0] == key:
                 # Упала на этом же индексе — показать причину, а не крутить заново.
@@ -1719,19 +1792,32 @@ class ProjectManager:
         """Вызовы несуществующих и неэкспортных методов (src/core/broken_calls.py).
         Полный результат кэшируется до переиндексации: страница и постраничная
         выдача MCP не пересчитывают его на каждый запрос."""
+        with self.read_lease(project_id) as db:
+            return self._broken_calls_for_db(project_id, db, source_id, module_name)
+
+    def _broken_calls_for_db(self, project_id: str, db: Database,
+                             source_id: str = '', module_name: str = '') -> dict:
         from .broken_calls import find_broken_calls
-        db = self.get_db(project_id)
         key = self._diff_key(db)
         with self._base_diff_lock:
             cached = self._broken_calls.get(project_id)
         if not cached or cached[0] != key:
             conn = db.read_conn()
-            cached = (key, find_broken_calls(conn, read_module=db.read_module_text))
-            with self._base_diff_lock:
-                self._broken_calls[project_id] = cached
-                self._broken_calls.move_to_end(project_id)
-                while len(self._broken_calls) > BROKEN_CALL_CACHE_LIMIT:
-                    self._broken_calls.popitem(last=False)
+            value = find_broken_calls(conn, read_module=db.read_module_text)
+            # Индекс мог измениться, пока считалась сводка. Старый расчёт
+            # допустимо вернуть текущему вызову, но публиковать его нельзя.
+            if self._diff_key(db) == key:
+                candidate = (key, value)
+                with self._base_diff_lock:
+                    current = self._broken_calls.get(project_id)
+                    if current is None or current[0] == key:
+                        self._broken_calls[project_id] = candidate
+                        self._broken_calls.move_to_end(project_id)
+                        while len(self._broken_calls) > BROKEN_CALL_CACHE_LIMIT:
+                            self._broken_calls.popitem(last=False)
+                cached = candidate
+            else:
+                cached = (key, value)
         result = cached[1]
         if not source_id and not module_name:
             return result
@@ -1810,11 +1896,9 @@ class ProjectManager:
         lock = self._reindex_lock(project_id)
         if not async_owned:
             lock.acquire()
-        self._pin_db(project_id)
         try:
             return self._reindex_locked(project_id, source_id=source_id)
         finally:
-            self._unpin_db(project_id)
             if not async_owned:
                 lock.release()
 
@@ -1835,10 +1919,18 @@ class ProjectManager:
         from .indexer import Indexer
         from .xml_walker import XMLWalker
 
-        project, db = self._mark_indexing(project_id)
-        # Читающие соединения остаются привязаны к текущему объекту Database:
-        # их не закрываем посреди запроса. WAL позволяет писателю обновлять
-        # индекс параллельно; close_all/retire закроют handles после работы.
+        db = Database(str(self._index_path(project_id)))
+        self._db_instances.add(db)
+        try:
+            db.connect()
+            db.init_schema()
+            project, _ = self._mark_indexing(project_id, db=db)
+        except Exception:
+            db.close()
+            raise
+        succeeded = False
+        # Писатель живёт отдельно от пула. Читатели пула могут видеть его
+        # commits через WAL и не могут вытеснить его соединение.
         self._invalidate_analysis_caches(project_id)
         if db.rebuild_required:
             # Маркер требует перестроить весь индекс, поэтому частичную
@@ -2023,8 +2115,7 @@ class ProjectManager:
                 pass  # Удаление справки запускает свой прогрев после смены версии.
             except Exception:
                 logger.exception('Проект %s: не удалось запустить проверку платформы', project_id)
-            self._warm_related(project_id)
-
+            succeeded = True
             return total_stats
 
         except Exception as e:
@@ -2034,8 +2125,12 @@ class ProjectManager:
             db.update_state(status='error', progress_phase='')
             raise
         finally:
-            db.conn.execute("PRAGMA synchronous=NORMAL")
-            db.conn.commit()
+            if db.conn:
+                db.conn.execute("PRAGMA synchronous=NORMAL")
+                db.conn.commit()
+            db.close()
+            if succeeded:
+                self._warm_related(project_id)
 
     def _seed_from_base(self, project: 'ProjectInfo', db: Database) -> bool:
         """Первый индекс проекта с базой — копия индекса базы: дальше обычная
@@ -2083,7 +2178,7 @@ class ProjectManager:
                     project.id, base_id)
         return True
 
-    def _mark_indexing(self, project_id: str) -> tuple['ProjectInfo', Database]:
+    def _mark_indexing(self, project_id: str, *, db: Database | None = None) -> tuple['ProjectInfo', Database]:
         """Записать начало переиндексации: status='indexing' в реестр и в
         index_state (прогресс 0, фаза 'scanning'). Возвращает проект и БД.
 
@@ -2099,12 +2194,21 @@ class ProjectManager:
         не нужен, а reindex() без reindex_async (CLI, тесты) остаётся
         самодостаточным."""
         project = self.get_project(project_id)
-        db = self.get_db(project_id)
-        project.status = 'indexing'
-        self._save_project_to_disk(project_id, project)
-        db.update_state(status='indexing', progress_current=0, progress_total=0,
-                        progress_phase='scanning')
-        return project, db
+        owns_db = db is None
+        db = db or Database(str(self._index_path(project_id)))
+        if owns_db:
+            self._db_instances.add(db)
+            db.connect()
+            db.init_schema()
+        try:
+            project.status = 'indexing'
+            self._save_project_to_disk(project_id, project)
+            db.update_state(status='indexing', progress_current=0, progress_total=0,
+                            progress_phase='scanning')
+            return project, db
+        finally:
+            if owns_db:
+                db.close()
 
     def reindex_async(self, project_id: str, source_id: str | None = None) -> dict:
         """
@@ -2134,11 +2238,9 @@ class ProjectManager:
         # запись не удалась (проект удалили между вызовами), поток не
         # запускается.
         try:
-            self._pin_db(project_id)
             self._clear_index_error(project_id)
             self._mark_indexing(project_id)
         except Exception as e:
-            self._unpin_db(project_id)
             lock.release()
             logger.exception("Не удалось начать переиндексацию проекта %s", project_id)
             return {'status': 'error', 'project_id': project_id,
@@ -2158,7 +2260,6 @@ class ProjectManager:
                 except AttributeError:
                     pass
                 lock.release()
-                self._unpin_db(project_id)
                 with self._base_diff_lock:
                     self._reindexing.discard(threading.current_thread())
 
@@ -2473,6 +2574,8 @@ class ProjectManager:
     def close_all(self):
         """Close all open database connections."""
         from .platform_check import wait_report_jobs
+        with self._base_diff_lock:
+            self._closing_checks = True
         # Фоновые переиндексации и сравнения (warm_diffs) работают с индексами —
         # дождаться их. Переиндексация пишет status='ready' чуть раньше, чем
         # отпускает соединение: закрыть его под ней — на Windows access
@@ -2492,8 +2595,22 @@ class ProjectManager:
                 warming = list(self._warming.values())
             for thread in warming:
                 thread.join(timeout=60)
+            with self._base_diff_lock:
+                checks = list(self._checks_warming.values())
+            for thread in checks:
+                thread.join()
             for thread in platform_workers:
                 thread.join()
+            # Теперь фоновые операции завершены. Разбудить все get_db,
+            # ожидающие место или открытие; их generation устареет, поэтому
+            # они завершатся ошибкой даже после сброса флага shutdown.
+            with self._db_pins_changed:
+                self._closing = True
+                self._pool_generation += 1
+                opening = list(self._db_opening.values())
+                self._db_pins_changed.notify_all()
+            for event in opening:
+                event.wait()
             with self._db_lock:
                 pool = list(self._db_pool.values())
                 # Задачи уже держат свой Database и не обращаются к пулу.
@@ -2505,3 +2622,7 @@ class ProjectManager:
         finally:
             with self._base_diff_lock:
                 self._closing_platform_workers = False
+                self._closing_checks = False
+            with self._db_pins_changed:
+                self._closing = False
+                self._db_pins_changed.notify_all()

@@ -106,7 +106,7 @@ def test_delete_project_closes_connections_of_all_threads(readers_in_threads):
     assert _closed(writer) and all(_closed(c) for c in readers)
 
 
-def test_async_reindex_database_is_pinned_during_pool_pressure(monkeypatch):
+def test_async_reindex_writer_is_independent_of_pool_pressure(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = ProjectManager(os.path.join(tmpdir, 'data'), os.path.join(tmpdir, 'index'))
         pm.create_project('p1', 'p1')
@@ -175,6 +175,69 @@ def test_ninth_parallel_status_reader_waits_and_reindex_does_not_close_lease(
             assert pending.result(timeout=10)['status'] == 'ready'
     finally:
         resume.set()
+
+
+@pytest.mark.parametrize('tool', ['search_procedures', 'semantic_search_code'])
+def test_mcp_search_lease_survives_pool_eviction_mid_operation(
+        readers_in_threads, monkeypatch, tool):
+    import src.core.project_manager as project_manager
+    from src.core.search import SearchEngine
+    from src.mcp_server import semantic_search as semantic_module
+
+    pm, _, _ = readers_in_threads
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 1)
+    entered, release = threading.Event(), threading.Event()
+    if tool == 'search_procedures':
+        original = SearchEngine.search_procedures
+
+        def delayed(engine, *args, **kwargs):
+            result = original(engine, *args, **kwargs)
+            entered.set()
+            assert release.wait(10)
+            return result
+
+        monkeypatch.setattr(SearchEngine, 'search_procedures', delayed)
+        args = {'project_id': 'p1', 'query': 'Рассчитать'}
+    else:
+        original = semantic_module.search
+
+        def delayed(engine, *args, **kwargs):
+            result = original(engine, *args, **kwargs)
+            entered.set()
+            assert release.wait(10)
+            return result
+
+        monkeypatch.setattr(semantic_module, 'search', delayed)
+        args = {'project_id': 'p1', 'query': 'расчет цены'}
+
+    def pressure():
+        for i in range(8):
+            project_id = f'pressure{i}'
+            pm.create_project(project_id, project_id)
+            pm.get_db(project_id)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            search = pool.submit(execute_tool, pm, tool, args)
+            assert entered.wait(5)
+            p1_db = pm._db_pool['p1']
+            wait_started = threading.Event()
+
+            def start_pressure():
+                wait_started.set()
+                pressure()
+
+            eviction = pool.submit(start_pressure)
+            assert wait_started.wait(2)
+            time.sleep(.05)
+            assert not eviction.done()
+            assert pm._db_pool.get('p1') is p1_db
+            release.set()
+            result = search.result(timeout=10)
+            assert not result.startswith('Error:'), result
+            eviction.result(timeout=10)
+    finally:
+        release.set()
 
 
 def test_evicted_search_engine_stays_retired_and_project_can_be_deleted(monkeypatch):

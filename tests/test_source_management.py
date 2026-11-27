@@ -146,6 +146,22 @@ def test_remove_source_wipes_db_rows():
         pm.close_all()
 
 
+def test_remove_last_source_leaves_no_searchable_procedures():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pm = _setup(tmpdir)
+        xml_fixture = Path(__file__).parent / 'fixtures' / 'xml_ru'
+        pm.add_source('test', 'main', 'Main', xml_archive=zip_dir(xml_fixture),
+                      xml_archive_filename='x.zip')
+        pm.reindex('test')
+        assert pm.get_db('test').get_stats()['procedures'] > 0
+
+        pm.remove_source('test', 'main')
+
+        assert pm.get_db('test').get_stats()['procedures'] == 0
+        assert pm.get_search('test').search_procedures('') == []
+        pm.close_all()
+
+
 def test_remove_nonexistent_source_is_noop():
     """Removing a source that doesn't exist should not crash."""
     with tempfile.TemporaryDirectory() as tmpdir:

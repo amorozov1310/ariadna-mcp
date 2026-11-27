@@ -2,8 +2,9 @@
 """Сравнить удержание памяти и SQLite handles при поиске по N индексам.
 
 Все проекты синтетические и создаются во временном каталоге. Режим «до»
-эмулирует неограниченный пул старого ProjectManager; «после» использует
-штатный предел. Каждый замер идёт в отдельном процессе, чтобы RSS не зависел
+эмулирует неограниченный пул старого ProjectManager с писателем в пуле;
+«после» использует штатный предел и отдельный writer, закрытый до поиска.
+Каждый замер идёт в отдельном процессе, чтобы RSS не зависел
 от предыдущего прогона.
 """
 
@@ -80,8 +81,10 @@ def _metrics(pm) -> dict:
             'fd_or_handles': _fd_count()}
 
 
-def _worker(project_count: int, pool_limit: int, modules: int, lines: int) -> dict:
+def _worker(project_count: int, pool_limit: int, modules: int, lines: int,
+            legacy_writers: bool = False) -> dict:
     import src.core.project_manager as project_manager
+    from src.core.db import Database
     from src.core.project_manager import ProjectManager
 
     project_manager.DB_POOL_LIMIT = pool_limit
@@ -90,23 +93,31 @@ def _worker(project_count: int, pool_limit: int, modules: int, lines: int) -> di
         for project_no in range(project_count):
             project_id = f'bench_{project_no:03d}'
             pm.create_project(project_id, project_id)
-            db = pm.get_db(project_id)
-            conn = db.conn
-            conn.execute("INSERT INTO sources(id, label, source_type) VALUES ('main', 'synthetic', 'main')")
-            for module_no in range(modules):
-                name = f'CommonModule.Benchmark{module_no:04d}'
-                content = '\n'.join(
-                    f'Procedure WorkLine{line_no}() Export\n    benchmarkToken = {module_no + line_no}\nEndProcedure'
-                    for line_no in range(lines))
-                cursor = conn.execute(
-                    "INSERT INTO modules(source_id, name, module_type, file_path, line_count, name_cf) "
-                    "VALUES ('main', ?, 'common', ?, ?, ?)",
-                    (name, f'{name}.bsl', len(content.splitlines()), name.casefold()))
-                module_id = cursor.lastrowid
-                conn.execute('INSERT INTO module_text(module_id, content) VALUES (?, ?)',
-                             (module_id, zlib.compress(content.encode('utf-8'))))
-                conn.execute('INSERT INTO module_text_fts(rowid, text) VALUES (?, ?)', (module_id, content))
-            conn.commit()
+            db = (pm.get_db(project_id) if legacy_writers else
+                  Database(str(pm._index_path(project_id))))
+            if not legacy_writers:
+                db.connect()
+                db.init_schema()
+            try:
+                conn = db.conn
+                conn.execute("INSERT INTO sources(id, label, source_type) VALUES ('main', 'synthetic', 'main')")
+                for module_no in range(modules):
+                    name = f'CommonModule.Benchmark{module_no:04d}'
+                    content = '\n'.join(
+                        f'Procedure WorkLine{line_no}() Export\n    benchmarkToken = {module_no + line_no}\nEndProcedure'
+                        for line_no in range(lines))
+                    cursor = conn.execute(
+                        "INSERT INTO modules(source_id, name, module_type, file_path, line_count, name_cf) "
+                        "VALUES ('main', ?, 'common', ?, ?, ?)",
+                        (name, f'{name}.bsl', len(content.splitlines()), name.casefold()))
+                    module_id = cursor.lastrowid
+                    conn.execute('INSERT INTO module_text(module_id, content) VALUES (?, ?)',
+                                 (module_id, zlib.compress(content.encode('utf-8'))))
+                    conn.execute('INSERT INTO module_text_fts(rowid, text) VALUES (?, ?)', (module_id, content))
+                conn.commit()
+            finally:
+                if not legacy_writers:
+                    db.close()
 
         before = _metrics(pm)
         for project_no in range(project_count):
@@ -124,21 +135,25 @@ def main() -> int:
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--projects', type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument('--pool-limit', type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument('--legacy-writers', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     logging.basicConfig(level=logging.ERROR)
 
     if args.worker:
-        print(json.dumps(_worker(args.projects, args.pool_limit, args.modules, args.lines)))
+        print(json.dumps(_worker(args.projects, args.pool_limit, args.modules, args.lines,
+                                 args.legacy_writers)))
         return 0
 
     rows = [f'Синтетический стенд: {args.modules} модулей x {args.lines} блоков на проект.',
             'RSS, SQLite-соединения, файловые дескрипторы (Windows: process handles).',
-            '«До» — неограниченный пул (эмуляция исходного ProjectManager); «после» — пул с лимитом 8.', '']
+            '«До» — неограниченный пул со старым писателем; «после» — лимит 8 и отдельный writer.', '']
     for count in (1, 8, 32):
         rows.append(f'N={count}')
-        for label, limit in (('до', count), ('после', 8)):
+        for label, limit, legacy_writers in (('до', count, True), ('после', 8, False)):
             cmd = [sys.executable, str(Path(__file__).resolve()), '--worker', '--projects', str(count),
                    '--pool-limit', str(limit), '--modules', str(args.modules), '--lines', str(args.lines)]
+            if legacy_writers:
+                cmd.append('--legacy-writers')
             result = subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=ROOT)
             metrics = json.loads(result.stdout.strip().splitlines()[-1])
             rows.append(f"  {label}: до поиска {metrics['before_search']}; после поиска {metrics['after_search']}")

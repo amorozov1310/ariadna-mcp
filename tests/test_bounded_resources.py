@@ -1,6 +1,10 @@
 """Регрессии ограниченных кэшей и соединений индексов."""
 
 from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
+
+import pytest
 from src.core.db import Database
 from src.core.project_manager import ProjectManager
 
@@ -60,13 +64,230 @@ def test_project_pool_is_thread_safe_when_projects_are_evicted(tmp_path, monkeyp
     def query(worker_no):
         for turn in range(30):
             project_id = project_ids[(worker_no + turn) % len(project_ids)]
-            assert pm.get_db(project_id).read_conn().execute('SELECT 1').fetchone()[0] == 1
+            with pm.read_lease(project_id) as db:
+                assert db.read_conn().execute('SELECT 1').fetchone()[0] == 1
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         list(pool.map(query, range(12)))
 
     assert len(pm._db_pool) <= 3
     pm.close_all()
+
+
+def test_concurrent_get_db_opens_one_database_per_project(tmp_path, monkeypatch):
+    monkeypatch.setattr('src.core.project_manager.DB_POOL_LIMIT', 2)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p1', 'p1')
+    original = Database.connect
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    lock = threading.Lock()
+
+    def delayed_connect(db):
+        nonlocal calls
+        with lock:
+            calls += 1
+        entered.set()
+        assert release.wait(5)
+        return original(db)
+
+    monkeypatch.setattr(Database, 'connect', delayed_connect)
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(pm.get_db, 'p1') for _ in range(8)]
+            assert entered.wait(2)
+            release.set()
+            databases = [future.result(timeout=5) for future in futures]
+        assert calls == 1
+        assert len({id(db) for db in databases}) == 1
+    finally:
+        release.set()
+        pm.close_all()
+
+
+def test_waiting_get_db_has_no_open_file_and_rechecks_deleted_project(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 1)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('held', 'held')
+    pm.create_project('deleted', 'deleted')
+    waiting = threading.Event()
+
+    def request_deleted():
+        waiting.set()
+        return pm.get_db('deleted')
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with pm.read_lease('held'):
+                future = pool.submit(request_deleted)
+                assert waiting.wait(2)
+                time.sleep(.05)
+                assert not pm._index_path('deleted').exists()
+                pm.delete_project('deleted')
+            with pytest.raises(Exception, match='deleted'):
+                future.result(timeout=5)
+        assert 'deleted' not in pm._db_pool
+        assert not pm._index_path('deleted').exists()
+    finally:
+        pm.close_all()
+
+
+def test_delete_waits_for_reserved_database_open_to_abort(tmp_path, monkeypatch):
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p1', 'p1')
+    original = Database.connect
+    opening, release = threading.Event(), threading.Event()
+
+    def delayed_connect(db):
+        opening.set()
+        assert release.wait(5)
+        return original(db)
+
+    monkeypatch.setattr(Database, 'connect', delayed_connect)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(pm.get_db, 'p1')
+            assert opening.wait(2)
+            deletion = pool.submit(pm.delete_project, 'p1')
+            time.sleep(.05)
+            assert not deletion.done()
+            release.set()
+            with pytest.raises(Exception, match='p1'):
+                pending.result(timeout=5)
+            deletion.result(timeout=5)
+        assert not pm._index_path('p1').parent.exists()
+        assert 'p1' not in pm._db_pool
+    finally:
+        release.set()
+        pm.close_all()
+
+
+def test_close_all_wakes_pool_waiter_and_rejects_its_pending_open(tmp_path, monkeypatch):
+    import src.core.project_manager as project_manager
+
+    monkeypatch.setattr(project_manager, 'DB_POOL_LIMIT', 1)
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('held', 'held')
+    pm.create_project('waiting', 'waiting')
+    lease = pm.read_lease('held')
+    lease.__enter__()
+    started = threading.Event()
+
+    def request_waiting():
+        started.set()
+        return pm.get_db('waiting')
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(request_waiting)
+            assert started.wait(2)
+            time.sleep(.05)
+            closing = pool.submit(pm.close_all)
+            with pytest.raises(RuntimeError, match='closing|close_all'):
+                pending.result(timeout=5)
+            lease.__exit__(None, None, None)
+            closing.result(timeout=5)
+        assert not pm._index_path('waiting').exists()
+        assert not pm._db_pool
+        # Новый запрос после завершённого close_all разрешён; старый waiter
+        # завершился ошибкой выше и не может открыть этот индекс позднее.
+        assert pm.get_db('waiting').conn is not None
+    finally:
+        try:
+            lease.__exit__(None, None, None)
+        except RuntimeError:
+            pass
+        pm.close_all()
+
+
+def test_reindex_warms_after_all_independent_writers_finish(tmp_path, monkeypatch):
+    pm = ProjectManager(str(tmp_path / 'data'))
+    for i in range(8):
+        pm.create_project(f'p{i}', f'p{i}')
+    barrier = threading.Barrier(8)
+    mark = pm._mark_indexing
+
+    def check_writer(project_id, *, db=None):
+        assert db is not None
+        assert db not in pm._db_pool.values()
+        return mark(project_id, db=db)
+
+    monkeypatch.setattr(pm, '_mark_indexing', check_writer)
+    monkeypatch.setattr(pm, '_warm_related', lambda _project_id: barrier.wait(timeout=10))
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda pid: pm.reindex(pid), [f'p{i}' for i in range(8)]))
+        assert len(results) == 8
+    finally:
+        pm.close_all()
+
+
+def test_slow_old_broken_call_calculation_cannot_replace_new_revision(tmp_path, monkeypatch):
+    from src.core import broken_calls
+
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p1', 'p1')
+    revision = ['old']
+    monkeypatch.setattr(pm, '_diff_key', lambda _db: ('p1', revision[0]))
+    started, release = threading.Event(), threading.Event()
+    calls = 0
+
+    def calculate(_conn, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            assert release.wait(5)
+            label = 'old'
+        else:
+            label = 'new'
+        return {'missing': [label], 'not_export': []}
+
+    monkeypatch.setattr(broken_calls, 'find_broken_calls', calculate)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            old = pool.submit(pm.broken_calls, 'p1')
+            assert started.wait(2)
+            revision[0] = 'new'
+            assert pm.broken_calls('p1')['missing'] == ['new']
+            release.set()
+            assert old.result(timeout=5)['missing'] == ['old']
+        assert pm._broken_calls['p1'] == (('p1', 'new'), {'missing': ['new'], 'not_export': []})
+    finally:
+        release.set()
+        pm.close_all()
+
+
+def test_close_all_waits_for_checks_and_blocks_new_warmups(tmp_path, monkeypatch):
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p1', 'p1')
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_broken_calls(_project_id):
+        entered.set()
+        assert release.wait(5)
+        return {'missing': [], 'not_export': []}
+
+    monkeypatch.setattr(pm, 'broken_calls', slow_broken_calls)
+    try:
+        assert not pm.warm_broken_calls('p1')
+        assert entered.wait(2)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            closing = pool.submit(pm.close_all)
+            deadline = time.monotonic() + 2
+            while not pm._closing_checks and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert pm._closing_checks
+            assert not pm.warm_broken_calls('p1')
+            release.set()
+            closing.result(timeout=5)
+        assert all(not thread.is_alive() for thread in pm._checks_warming.values())
+    finally:
+        release.set()
+        pm.close_all()
 
 
 def test_analysis_and_term_caches_have_fixed_limits(tmp_path, monkeypatch):
