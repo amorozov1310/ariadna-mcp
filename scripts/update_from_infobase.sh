@@ -190,18 +190,25 @@ delta_refresh() {
     local deadline="${5:-$((SECONDS + TIMEOUT_MIN * 60))}"
     local base="$ARIADNA_URL/api/projects/$(urlencode "$PROJECT")/sources/$(urlencode "$sid")"
     local manifest="$LOG_DIR/manifest_$n.json" target="$LOG_DIR/target_$n.json"
-    local archive="$DUMP_DIR/delta_$n.zip" resp="$LOG_DIR/ariadna_response.json" status auth=()
+    local archive="$DUMP_DIR/delta_$n.zip" resp="$LOG_DIR/ariadna_response.json"
+    local get_status='' post_status='' auth=()
     [ -n "${ARIADNA_TOKEN:-}" ] && auth+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
     while :; do
-        status="$(curl -sS --max-time 60 -o "$manifest" -w '%{http_code}' "${auth[@]}" "$base/manifest")" \
+        # Таймаут GET — из оставшегося срока, иначе после истечения общего
+        # срока ожидание манифеста ничего не ограничивает.
+        local get_timeout=$((deadline - SECONDS))
+        [ "$get_timeout" -gt 60 ] && get_timeout=60
+        [ "$get_timeout" -lt 1 ] && get_timeout=1
+        get_status="$(curl -sS --max-time "$get_timeout" -o "$manifest" -w '%{http_code}' \
+            "${auth[@]}" "$base/manifest")" \
             || fail 2 "Не удалось связаться с Ариадной ($base/manifest)"
-        [ "$status" = 409 ] && [ "$SECONDS" -lt "$deadline" ] || break
+        [ "$get_status" = 409 ] && [ "$SECONDS" -lt "$deadline" ] || break
         sleep 5
     done
-    if [ "$status" = 404 ] || ! command -v python3 >/dev/null; then
+    if [ "$get_status" = 404 ] || ! command -v python3 >/dev/null; then
         return 1
     fi
-    [ "$status" = 200 ] || fail 2 "Ошибка получения манифеста: HTTP $status: $(cat "$manifest")"
+    [ "$get_status" = 200 ] || fail 2 "Ошибка получения манифеста: HTTP $get_status: $(cat "$manifest")"
     python3 "$(dirname "$0")/build_delta.py" "$dir" "$manifest" "$archive" "$target" >/dev/null \
         || fail 2 'Не удалось собрать разницу'
     local base_version
@@ -214,17 +221,19 @@ delta_refresh() {
                          -F "delta_archive=@$archive;type=application/zip"
                          --max-time $((remaining + 60)))
         [ -n "${ARIADNA_TOKEN:-}" ] && curl_args+=(-H "Authorization: Bearer $ARIADNA_TOKEN")
-        status="$(curl "${curl_args[@]}" "$base/delta")" || fail 2 "Не удалось связаться с Ариадной ($base/delta)"
-        if [ "$status" = 409 ] && grep -q 'изменил' "$resp" && [ "$attempt" -eq 1 ]; then
+        post_status="$(curl "${curl_args[@]}" "$base/delta")" || fail 2 "Не удалось связаться с Ариадной ($base/delta)"
+        if [ "$post_status" = 409 ] && grep -q 'изменил' "$resp" && [ "$attempt" -eq 1 ]; then
             log "Манифест изменился во время передачи; пересобираю разницу"
             delta_refresh "$sid" "$dir" "$n" 2 "$deadline"
             return $?
         fi
-        [ "$status" = 409 ] && [ "$SECONDS" -lt "$deadline" ] || break
+        [ "$post_status" = 409 ] && [ "$SECONDS" -lt "$deadline" ] || break
         log "Источник занят; повтор через 5 секунд"
         sleep 5
     done
-    [ "$status" = 200 ] || fail 2 "Ошибка обновления источника $sid: HTTP $status: $(cat "$resp")"
+    # Успешен только ответ самого POST: если срок истёк после сборки разницы,
+    # POST не выполнялся, и код 200 от GET манифеста обновлением не считается.
+    [ "$post_status" = 200 ] || fail 2 "Ошибка обновления источника $sid: HTTP ${post_status:-нет ответа}: $(cat "$resp" 2>/dev/null)"
     log "Источник $sid: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print("{}, {} с; модулей {}, процедур {}".format(d.get("status"),d.get("duration_sec"),(d.get("index") or {}).get("total_modules"),(d.get("index") or {}).get("total_procedures"))' "$resp")"
     rm -f "$archive"
     return 0

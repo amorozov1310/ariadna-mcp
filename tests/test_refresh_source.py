@@ -429,8 +429,41 @@ def test_delta_wait_zero_does_not_wait_before_applying(web, monkeypatch):
 def test_robot_scripts_retry_busy_statuses():
     bash = (Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.sh').read_text(encoding='utf-8')
     powershell = (Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.ps1').read_text(encoding='utf-8')
-    assert '[ "$status" = 409 ] && [ "$SECONDS" -lt "$deadline" ]' in bash
+    assert '[ "$get_status" = 409 ] && [ "$SECONDS" -lt "$deadline" ]' in bash
+    assert '[ "$post_status" = 409 ] && [ "$SECONDS" -lt "$deadline" ]' in bash
     assert "$status -ne '409' -or [Environment]::TickCount64 -ge $Deadline" in powershell
+
+
+def test_bash_robot_requires_successful_post_not_only_manifest(tmp_path):
+    """Срок истёк до POST: 200 от GET манифеста не считается обновлением."""
+    if os.name == 'nt' or shutil.which('bash') is None or shutil.which('python3') is None:
+        pytest.skip('нужны bash и python3 (POSIX)')
+    dump = tmp_path / 'dump'
+    dump.mkdir()
+    (dump / 'Configuration.xml').write_text('<x/>', encoding='utf-8')
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_curl = fake_bin / 'curl'
+    fake_curl.write_text(
+        '#!/bin/sh\n'
+        'out=\n'
+        'while [ $# -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    -o) out="$2"; shift 2 ;;\n'
+        '    -w) shift 2 ;;\n'
+        '    *) shift ;;\n'
+        '  esac\n'
+        'done\n'
+        '[ -n "$out" ] && printf \'{"version":"v1","files":{}}\' > "$out"\n'
+        'printf 200\n', encoding='utf-8')
+    fake_curl.chmod(0o755)
+    env = {**os.environ, 'PATH': f'{fake_bin}{os.pathsep}{os.environ["PATH"]}'}
+    script = Path(__file__).parent.parent / 'scripts' / 'update_from_infobase.sh'
+    proc = subprocess.run(['bash', str(script), '--skip-dump', '--dump-dir', str(dump),
+                           '--ariadna-url', 'http://127.0.0.1:1', '--project', 'p',
+                           '--timeout-minutes', '0'],
+                          env=env, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
 
 
 def test_refresh_no_wait_and_unknown_source(web):
