@@ -12,6 +12,7 @@ import tempfile
 import time
 import zipfile
 import contextlib
+from fnmatch import fnmatchcase
 import zlib
 from pathlib import Path, PurePosixPath
 
@@ -325,8 +326,19 @@ def recover(root: Path, workspace: Path | None = None, *, lock_held: bool = Fals
 
 def _recover_locked(root: Path, workspace: Path) -> bool:
     journal = _journal_path(workspace)
-    if not journal.exists():
-        for orphan in (*workspace.glob('staging-*'), *workspace.glob('rollback-*')):
+    try:
+        journal.stat()
+    except FileNotFoundError:
+        # Path.glob скрывает PermissionError при обходе на некоторых версиях
+        # pathlib. iterdir поднимает отказ чтения, и recover возвращает False.
+        try:
+            children = list(workspace.iterdir())
+        except FileNotFoundError:
+            return True
+        orphans = [path for path in children
+                   if fnmatchcase(path.name, 'staging-*') or
+                   fnmatchcase(path.name, 'rollback-*')]
+        for orphan in orphans:
             result = remove_path_safely(orphan, workspace.parent)
             if not result:
                 logger.warning('Не удалось очистить остаток транзакции %s: %s', orphan, result.reason)

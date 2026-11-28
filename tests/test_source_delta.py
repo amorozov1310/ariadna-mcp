@@ -349,14 +349,14 @@ def test_recover_reports_staging_enumeration_failure(tmp_path, monkeypatch):
     root.mkdir()
     staging = workspace / 'staging-held'
     staging.mkdir(parents=True)
-    original = Path.glob
+    original = Path.iterdir
 
-    def denied(path, pattern):
+    def denied(path):
         if path == workspace:
             raise PermissionError('enumeration denied')
-        return original(path, pattern)
+        return original(path)
 
-    monkeypatch.setattr(Path, 'glob', denied)
+    monkeypatch.setattr(Path, 'iterdir', denied)
     assert source_delta.recover(root, workspace) is False
     assert staging.is_dir()
 

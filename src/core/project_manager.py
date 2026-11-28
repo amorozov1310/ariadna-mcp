@@ -779,9 +779,12 @@ class ProjectManager:
                     setattr(project, key, value)
                 raise
             selected_help_version = self.platform_help_version(project_id) if 'platform_version' in kwargs else None
-        if selected_help_version is not None:
-            from .platform_check import select_report_version
-            select_report_version(self._index_path(project_id), selected_help_version)
+            if selected_help_version is not None:
+                # Выбор ZIP должен следовать за тем же обновлением реестра.
+                # Иначе два параллельных update_project могут записать выбор
+                # в обратном порядке после снятия блокировки.
+                from .platform_check import select_report_version
+                select_report_version(self._index_path(project_id), selected_help_version)
         return project
 
     @contextmanager

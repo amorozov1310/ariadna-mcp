@@ -5,6 +5,7 @@
 """
 
 import hashlib
+from fnmatch import fnmatchcase
 from contextlib import ExitStack
 import json
 import logging
@@ -954,10 +955,13 @@ def cleanup_report_temps(directory, allowed_root=None, protected_roots=(), *, in
         return RemovalResult(False, 'каталог временных архивов небезопасен')
     results = []
     try:
-        paths = list(directory.glob('.platform-check-*.zip.*.tmp'))
-        if include_archives:
-            paths.extend(path for path in directory.glob('platform-check*.zip')
-                         if _CACHE_ARCHIVE.fullmatch(path.name))
+        paths = []
+        for path in directory.iterdir():
+            if fnmatchcase(path.name, '.platform-check-*.zip.*.tmp'):
+                paths.append(path)
+            elif (include_archives and fnmatchcase(path.name, 'platform-check*.zip')
+                  and _CACHE_ARCHIVE.fullmatch(path.name)):
+                paths.append(path)
         for path in paths:
             results.append(_unlink_archive(path, allowed_root, protected_roots))
     except OSError:

@@ -1055,14 +1055,14 @@ def test_report_version_mapping_is_recovered_after_process_restart(tmp_path):
 def test_cleanup_report_temps_reports_enumeration_failure(tmp_path, monkeypatch):
     directory = tmp_path / '.ariadna-service' / 'reports' / 'demo'
     directory.mkdir(parents=True)
-    original = Path.glob
+    original = Path.iterdir
 
-    def denied(path, pattern):
+    def denied(path):
         if path == directory:
             raise PermissionError('enumeration denied')
-        return original(path, pattern)
+        return original(path)
 
-    monkeypatch.setattr(Path, 'glob', denied)
+    monkeypatch.setattr(Path, 'iterdir', denied)
     result = platform_check.cleanup_report_temps(directory, tmp_path)
     assert not result
 

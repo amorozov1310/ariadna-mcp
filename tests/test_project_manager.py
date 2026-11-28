@@ -113,6 +113,39 @@ def test_protected_roots_cover_legacy_service_project_ids(tmp_path):
         pm.close_all()
 
 
+def test_delete_rechecks_registry_before_removing_project_tree(tmp_path, monkeypatch):
+    from src.core import platform_check
+    from src.core.project_manager import ProjectFilesNotRemovedError
+    from src.core.fs_safety import RemovalResult
+
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('candidate', 'Candidate')
+    candidate_dir = pm.projects_dir / 'candidate'
+    original_projects_dir = pm.projects_dir
+    injected = False
+
+    def register_nested_project(*_args, **_kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            # Моделируем новый проект, чей индекс уже оказался внутри удаляемого
+            # дерева после первоначального снимка защищённых корней.
+            pm.projects_dir = candidate_dir
+            pm.create_project('foreign', 'Foreign')
+            foreign_index = pm._index_path('foreign')
+            foreign_index.write_bytes(b'foreign index')
+        return RemovalResult(True)
+
+    monkeypatch.setattr(platform_check, 'cleanup_report_temps', register_nested_project)
+    try:
+        with pytest.raises(ProjectFilesNotRemovedError):
+            pm.delete_project('candidate')
+        assert pm._index_path('foreign').read_bytes() == b'foreign index'
+    finally:
+        pm.projects_dir = original_projects_dir
+        pm.close_all()
+
+
 def test_registration_waits_until_project_file_cleanup_finishes(tmp_path, monkeypatch):
     from src.core import project_manager as project_manager_module
 
@@ -216,6 +249,57 @@ def test_project_version_updates_move_report_selection(tmp_path):
     directory = platform_check.report_directory(pm._index_path('demo')).resolve()
     assert platform_check._SELECTED_VERSIONS[directory] == '8.3.11.1'
     pm.close_all()
+
+
+def test_concurrent_project_version_updates_keep_latest_report_selection(tmp_path, monkeypatch):
+    from src.core import platform_check
+
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('demo', 'Demo')
+    older_entered = Event()
+    release_older = Event()
+    newer_started = Event()
+    newer_done = Event()
+    errors = []
+    original = platform_check.select_report_version
+
+    def pause_older(db_path, version):
+        if version == '8.3.10.1':
+            older_entered.set()
+            assert release_older.wait(5)
+        original(db_path, version)
+
+    def update_newer():
+        newer_started.set()
+        try:
+            pm.update_project('demo', platform_version='8.3.11.1')
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            newer_done.set()
+
+    monkeypatch.setattr(platform_check, 'select_report_version', pause_older)
+    older = Thread(target=pm.update_project,
+                   args=('demo',), kwargs={'platform_version': '8.3.10.1'})
+    older.start()
+    assert older_entered.wait(5)
+    newer = Thread(target=update_newer)
+    newer.start()
+    assert newer_started.wait(5)
+    try:
+        assert not newer_done.wait(0.5)
+    finally:
+        release_older.set()
+    older.join(5)
+    newer.join(5)
+    try:
+        assert not older.is_alive() and not newer.is_alive()
+        assert not errors
+        directory = platform_check.report_directory(pm._index_path('demo')).resolve()
+        assert pm.get_project('demo').platform_version == '8.3.11.1'
+        assert platform_check._SELECTED_VERSIONS[directory] == '8.3.11.1'
+    finally:
+        pm.close_all()
 
 
 def test_help_migration_resumes_partial_copy_and_skips_report_archives(tmp_path):
