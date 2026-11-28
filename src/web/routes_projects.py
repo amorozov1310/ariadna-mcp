@@ -338,13 +338,15 @@ async def remove_source(project_id: str, source_id: str, next: str = Form('')):
 async def delete_project(project_id: str):
     pm = get_pm()
     try:
-        await run_in_threadpool(pm.delete_project, project_id)
+        deleted = await run_in_threadpool(pm.delete_project, project_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except ProjectFilesNotRemovedError as e:
         raise HTTPException(500, f"Не удалось удалить проект до конца: {e}")
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if not deleted:
+        return JSONResponse({"status": "not_found", "project_id": project_id}, status_code=404)
     return JSONResponse({"status": "deleted", "project_id": project_id})
 
 

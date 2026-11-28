@@ -33,6 +33,7 @@ from .bsl_reference import module_context_vars
 from .code_fingerprints import bundled_fingerprints
 from .db import IndexRemovedError
 from .fsretry import replace_with_retry, retry_on_permission_error
+from .fs_safety import directory_is_safe, remove_path_safely
 from .metadata_model import MANAGER_OBJECT_KINDS, canonicalize_kind, indexed_manager_objects
 from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
 from .platform_help import (COLLECTION_KINDS, COLLECTION_MANAGER_TYPES, compatibility_warning,
@@ -727,11 +728,17 @@ def _publish_lock(directory):
         return _PUBLISH_LOCKS.setdefault(directory, Lock())
 
 
-def _unlink_archive(path):
+def _unlink_archive(path, allowed_root=None):
     """Удалить архив; занятый (на Windows его может держать читатель) оставить
     до следующего прохода, не прерывая очистку остальных."""
     try:
-        retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+        path = Path(path)
+        allowed_root = Path(allowed_root) if allowed_root is not None else path.parent.parent.parent
+        if not directory_is_safe(path.parent, allowed_root):
+            logger.warning('Пропускаю очистку архива вне безопасного каталога: %s', path)
+            return
+        if not remove_path_safely(path, allowed_root, recursive=False):
+            logger.warning('Пропускаю очистку архива вне разрешённого корня: %s', path)
     except OSError:
         logger.info('Архив проверки платформы занят и не удалён: %s', path.name)
 
@@ -739,6 +746,10 @@ def _unlink_archive(path):
 def prune_report_archives(db_path, keep=()):
     """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
     directory = _report_directory(db_path)
+    allowed_root = directory.parent.parent
+    if not directory_is_safe(directory, allowed_root):
+        logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
+        return
     keep = {_archive_path(db_path, key).name for key in keep}
     with _publish_lock(directory):
         with _REPORTS_LOCK:
@@ -747,13 +758,15 @@ def prune_report_archives(db_path, keep=()):
             keep.add(selected)
         for path in directory.glob('platform-check*.zip'):
             if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
-                _unlink_archive(path)
+                _unlink_archive(path, allowed_root)
         _sync_archive_registry(directory)
 
 
 def _sync_archive_registry(directory):
     """Убрать из кэша версии, архивы которых уже отсутствуют на диске."""
     directory = Path(directory).resolve()
+    if not directory.is_dir():
+        return
     existing = {path.name for path in directory.glob('platform-check*.zip')
                 if _CACHE_ARCHIVE.fullmatch(path.name)}
     with _REPORTS_LOCK:
@@ -780,6 +793,10 @@ def _trim_archives(published):
     требовал полной сборки. Вызывается под блокировкой публикации."""
     archives = []
     directory = published.parent
+    allowed_root = directory.parent.parent
+    if not directory_is_safe(directory, allowed_root):
+        logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
+        return
     with _REPORTS_LOCK:
         selected = _SELECTED_ARCHIVES.get(directory.resolve())
     for path in directory.glob('platform-check*.zip'):
@@ -808,17 +825,23 @@ def _trim_archives(published):
             current_selected = _SELECTED_ARCHIVES.get(directory.resolve())
         if path.name == current_selected:
             continue
-        _unlink_archive(path)
+        _unlink_archive(path, allowed_root)
     _sync_archive_registry(directory)
 
 
-def cleanup_report_temps(directory):
+def cleanup_report_temps(directory, allowed_root=None):
     """Удалить временные архивы, оставшиеся после аварийного завершения записи."""
     directory = Path(directory)
+    if not directory.exists():
+        return
+    allowed_root = Path(allowed_root) if allowed_root is not None else directory.parent
+    if not directory_is_safe(directory, allowed_root):
+        logger.warning('Пропускаю очистку временных архивов в небезопасном каталоге %s', directory)
+        return
     try:
         paths = directory.glob('.platform-check-*.zip.*.tmp')
         for path in paths:
-            _unlink_archive(path)
+            _unlink_archive(path, allowed_root)
     except OSError:
         logger.info('Не удалось очистить временные архивы проверки платформы в %s', directory,
                     exc_info=True)

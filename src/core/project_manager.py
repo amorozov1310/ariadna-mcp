@@ -41,9 +41,20 @@ PROJECT_ERROR_CACHE_LIMIT = 128
 BACKGROUND_ERROR_CACHE_LIMIT = 64
 PROJECT_ID_MAX_LENGTH = 64
 _RESERVED_PROJECT_IDS = frozenset({'reports', 'platform-help'})
+_WINDOWS_RESERVED_NAMES = frozenset({
+    'con', 'prn', 'aux', 'nul',
+    *(f'com{i}' for i in range(1, 10)),
+    *(f'lpt{i}' for i in range(1, 10)),
+})
 
 
 def _validate_project_id(project_id: str, *, allow_reserved: bool = False) -> None:
+    if isinstance(project_id, str):
+        # Windows reserves these device names even when followed by an
+        # extension, and ignores trailing dots or spaces when resolving names.
+        windows_name = project_id.rstrip(' .').split('.', 1)[0].casefold()
+        if windows_name in _WINDOWS_RESERVED_NAMES:
+            raise ValueError(f"Project ID '{project_id}' is reserved by Windows.")
     if (not isinstance(project_id, str) or not project_id or
             len(project_id) > PROJECT_ID_MAX_LENGTH or
             not all(c.isalnum() or c in '-_' for c in project_id)):
@@ -309,11 +320,12 @@ class ProjectManager:
         # Завершить атомарное восстановление выгрузок до запуска фоновых потоков.
         for project in self._load_registry().values():
             from .platform_check import cleanup_report_temps, report_directory
-            cleanup_report_temps(report_directory(self._index_path(project.id)))
+            report_dir = report_directory(self._index_path(project.id))
+            cleanup_report_temps(report_dir, report_dir.parent.parent)
             # Удалить незавершённые архивы старой раскладки и старого
             # открытого каталога reports/<id>, оставшихся после обновления.
             legacy_report_dir = self._legacy_report_directory(project.id)
-            cleanup_report_temps(legacy_report_dir)
+            cleanup_report_temps(legacy_report_dir, service_root)
             try:
                 legacy_report_dir.rmdir()
             except OSError:
@@ -321,10 +333,10 @@ class ProjectManager:
             old_index_parent = self._index_path(project.id).parent
             if old_index_parent != self.platform_help.root and old_index_parent != (
                     (self.index_dir or self.data_dir) / 'reports'):
-                cleanup_report_temps(old_index_parent)
+                cleanup_report_temps(old_index_parent, old_index_parent.parent)
             legacy_index_parent = self._index_path(project.id, legacy=True).parent
             if legacy_index_parent != old_index_parent:
-                cleanup_report_temps(legacy_index_parent)
+                cleanup_report_temps(legacy_index_parent, legacy_index_parent.parent)
             for source in project.sources:
                 local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
                 root = self.get_source_xml_path(project.id, source.id) or local_root
@@ -721,13 +733,16 @@ class ProjectManager:
         finally:
             lock.release()
 
-    def delete_project(self, project_id: str):
-        """Delete project and all its data from disk. Во время переиндексации
-        проекта — ReindexInProgressError, ничего не удаляется."""
-        with self._no_reindex(project_id):
-            self._delete_project(project_id)
+    def delete_project(self, project_id: str) -> bool:
+        """Удалить проект и данные; вернуть False, если проект уже отсутствует.
 
-    def _delete_project(self, project_id: str):
+        Во время переиндексации выбрасывается ReindexInProgressError и ничего
+        не удаляется. Повторное удаление отсутствующего проекта безопасно.
+        """
+        with self._no_reindex(project_id):
+            return self._delete_project(project_id)
+
+    def _delete_project(self, project_id: str) -> bool:
         """Порядок важен: реестр → закрытие индекса → файлы.
 
         Пока проект в реестре, любой запрос MCP проходит проверку проекта и
@@ -742,7 +757,7 @@ class ProjectManager:
         Если удалить файлы не удалось (Windows, файл занят), проекта в
         реестре уже нет, а исключение называет путь. Повторный вызов для
         проекта, которого нет в реестре, но чьи каталоги остались, дочищает
-        их; KeyError — только если нет ни записи, ни каталогов."""
+        их. Возвращает False, если проекта и его файлов уже нет, иначе True."""
         _validate_project_id(project_id, allow_reserved=True)
         project_dir = self.projects_dir / project_id
         index_parent = self._index_path(project_id).parent
@@ -769,8 +784,10 @@ class ProjectManager:
                                  f"с каталогом проекта '{conflicting}'. Исправьте projects.json.")
             if registry.pop(project_id, None) is not None:
                 self._save_registry()
-            elif not project_dir.exists() and not index_parent.exists() and not legacy_report_dir.exists():
-                raise KeyError(f"Project '{project_id}' not found")
+            elif not any(path.exists() or path.is_symlink() or
+                         bool(getattr(os.path, 'isjunction', lambda _: False)(path))
+                         for path in (project_dir, index_parent, legacy_report_dir)):
+                return False
 
         with self._db_pins_changed:
             self._db_pins_changed.notify_all()
@@ -786,6 +803,7 @@ class ProjectManager:
         self._forget_project_resources(project_id)
 
         from .platform_check import cleanup_report_temps, forget_report_project, report_directory
+        from .fs_safety import directory_is_safe, is_link_like, remove_path_safely
         report_dir = report_directory(self._index_path(project_id))
         forget_report_project(self._index_path(project_id))
         # Старая раскладка хранила архивы в reports/<id> (а ещё раньше —
@@ -798,7 +816,13 @@ class ProjectManager:
         if old_index_parent not in (index_parent, self.platform_help.root, service_reports_root):
             cleanup_dirs.append(old_index_parent)
         for directory in cleanup_dirs:
-            cleanup_report_temps(directory)
+            if directory == old_index_parent:
+                cleanup_root = self.projects_dir
+            elif directory == index_parent:
+                cleanup_root = current_index_root
+            else:
+                cleanup_root = service_root
+            cleanup_report_temps(directory, cleanup_root)
 
         # Каталоги проекта удаляются рекурсивно только если они строго внутри
         # корня и не являются предком служебного каталога или другого проекта.
@@ -809,10 +833,10 @@ class ProjectManager:
         other_project_paths += [current_index_root / pid for pid in registry]
         roots = {project_dir: self.projects_dir,
                  index_parent: current_index_root,
-                 legacy_report_dir: service_reports_root,
-                 report_dir: report_dir.parent}
+                 legacy_report_dir: service_root,
+                 report_dir: report_dir.parent.parent}
         for path in dict.fromkeys(candidates):
-            if not path.exists():
+            if not path.exists() and not is_link_like(path):
                 continue
             try:
                 root = roots[path]
@@ -827,23 +851,33 @@ class ProjectManager:
                     _is_within(other, path)
                     for other in other_project_paths if other.exists()
                 )
+                if is_link_like(path):
+                    if not remove_path_safely(path, root):
+                        logger.warning("Не удалось безопасно удалить ссылку проекта %s", path)
+                    continue
                 if not _is_within(path, root) or protected:
                     # Для ID, совпадающих со старым общим каталогом справки
                     # или отчётов, удаляем только явно принадлежащие проекту
                     # файлы; содержимое родителя остаётся нетронутым.
                     if path == self.platform_help.root or path == index_parent:
+                        if not directory_is_safe(path, root):
+                            logger.warning("Пропускаю очистку небезопасного каталога %s", path)
+                            continue
                         for pattern in ('index.db', 'index.db-wal', 'index.db-shm',
                                         'index.db-journal', 'platform-check*.zip',
                                         '.platform-check-*.zip.*.tmp'):
                             for owned in path.glob(pattern):
                                 if owned.is_file():
-                                    owned.unlink(missing_ok=True)
+                                    remove_path_safely(owned, path, recursive=False)
                     elif path == legacy_report_dir or path == report_dir:
-                        rmtree_with_retry(path)
+                        if not remove_path_safely(path, root):
+                            logger.warning("Пропускаю небезопасный каталог отчётов %s", path)
                     else:
-                        raise ValueError(f"Безопасно удалить каталог проекта '{project_id}' нельзя: {path}")
+                        if not remove_path_safely(path, root):
+                            logger.warning("Пропускаю небезопасный каталог проекта %s", path)
                 else:
-                    rmtree_with_retry(path)
+                    if not remove_path_safely(path, root):
+                        logger.warning("Пропускаю небезопасный каталог проекта %s", path)
             except OSError as e:
                 logger.error("Проект %s убран из реестра, но каталог %s удалить не удалось: %s. "
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)
@@ -856,6 +890,7 @@ class ProjectManager:
             pass
 
         Database.forget_schema_lock(str(self._index_path(project_id)))
+        return True
 
     # ============================================
     # SOURCE MANAGEMENT
