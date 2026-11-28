@@ -24,11 +24,19 @@ FIXTURES = Path(__file__).parent / 'fixtures'
 HOST = {'Host': '127.0.0.1:19878'}
 
 
-def _verify_during_revoke(data_dir, token, start, done, results):
+def _verify_during_revoke(data_dir, token, start, ready, done, results):
     store = TokenStore(data_dir)
     try:
         start.wait()
-        verified = 0
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if store.verify(token) is not None:
+                break
+        else:
+            results.put(('error', 'не удалось проверить живой токен за 2 с'))
+            return
+        verified = 1
+        ready.set()
         while not done.is_set():
             verified += store.verify(token) is not None
         time.sleep(0.13)  # дольше окна проверки кэша в 100 мс
@@ -38,9 +46,12 @@ def _verify_during_revoke(data_dir, token, start, done, results):
         results.put(('error', repr(exc)))
 
 
-def _revoke_at_start(data_dir, token_id, start, done, results):
+def _revoke_at_start(data_dir, token_id, start, done, results, ready=None):
     try:
         start.wait()
+        if ready is not None and not ready.wait(timeout=3):
+            results.put(('error', 'проверяющий не сообщил о проверке живого токена за 3 с'))
+            return
         TokenStore(data_dir).revoke(token_id)
         results.put(('revoked', True))
     except Exception as exc:
@@ -304,11 +315,11 @@ def test_multiprocess_revoke_and_last_used_persistence_are_serialized(tmp_path):
     store = TokenStore(tmp_path)
     info, token = store.create('Синтетический владелец', 'admin')
     ctx = get_context('spawn')
-    start, done, results = ctx.Event(), ctx.Event(), ctx.Queue()
+    start, ready, done, results = ctx.Event(), ctx.Event(), ctx.Event(), ctx.Queue()
     verifier = ctx.Process(target=_verify_during_revoke,
-                           args=(str(tmp_path), token, start, done, results))
+                           args=(str(tmp_path), token, start, ready, done, results))
     revoker = ctx.Process(target=_revoke_at_start,
-                          args=(str(tmp_path), info.id, start, done, results))
+                          args=(str(tmp_path), info.id, start, done, results, ready))
     processes = (verifier, revoker)
     try:
         for process in processes:
