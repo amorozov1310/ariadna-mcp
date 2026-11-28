@@ -1911,10 +1911,13 @@ def test_legacy_report_tmp_is_removed_on_startup_and_project_deletion(tmp_path):
     old_reports.mkdir(parents=True)
     temp = old_reports / ('.platform-check-' + 'c' * 64 + '.zip.crash.tmp')
     temp.write_text('synthetic source line', encoding='utf-8')
+    finished = old_reports / ('platform-check-' + 'd' * 64 + '.zip')
+    finished.write_bytes(b'synthetic archive')
     try:
         pm.close_all()
         restarted = ProjectManager(str(data_dir), index_dir=str(index_dir))
         assert not temp.exists()
+        assert not finished.exists()
         assert not old_reports.exists()
         old_reports.mkdir(parents=True)
         temp.write_text('synthetic source line', encoding='utf-8')
@@ -1942,7 +1945,7 @@ def test_deleted_help_version_and_project_release_archive_bookkeeping(project, m
     with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
         response = client.post(f'/api/admin/platform-help/{older}/delete')
     assert response.status_code == 200
-    assert older not in platform_check._SELECTED_VERSIONS.values()
+    assert directory not in platform_check._SELECTED_VERSIONS
     assert older not in platform_check._VERSION_ARCHIVES.get(directory, {})
 
     platform_check.select_report_version(db_path, older)

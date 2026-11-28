@@ -328,7 +328,8 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
         for orphan in (*workspace.glob('staging-*'), *workspace.glob('rollback-*')):
             result = remove_path_safely(orphan, workspace.parent)
             if not result:
-                raise OSError(result.reason or f'Не удалось удалить временный каталог {orphan}')
+                logger.warning('Не удалось очистить остаток транзакции %s: %s', orphan, result.reason)
+                return False
         return True
     data = json.loads(journal.read_text("utf-8"))
     backup = Path(data["backup"])
@@ -431,9 +432,12 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
     workspace = Path(workspace) if workspace is not None else root.parent / f".{root.name}-delta-state"
     if not lock_held:
         with transaction_lock(workspace):
-            recover(root, workspace, lock_held=True)
+            if not recover(root, workspace, lock_held=True):
+                raise DeltaError("Не удалось восстановить предыдущую операцию с источником")
             return _apply_locked(root, archive, target_manifest, base_version, current, workspace,
                                  journal_context=journal_context)
+    if not recover(root, workspace, lock_held=True):
+        raise DeltaError("Не удалось восстановить предыдущую операцию с источником")
     return _apply_locked(root, archive, target_manifest, base_version, current, workspace,
                          journal_context=journal_context)
 
@@ -656,9 +660,14 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
         journal_data["committed"] = True
         _atomic_json(journal, journal_data)
         _checkpoint('f')
-        shutil.rmtree(backup, ignore_errors=True)
-        _checkpoint('g')
-        journal.unlink(missing_ok=True)
+        cleanup = remove_path_safely(backup, workspace.parent)
+        if cleanup:
+            _checkpoint('g')
+            journal.unlink(missing_ok=True)
+        else:
+            # Изменения уже зафиксированы. Журнал оставляем, чтобы recover()
+            # повторил очистку занятой резервной копии после освобождения.
+            logger.warning('Не удалось удалить резервную копию %s: %s', backup, cleanup.reason)
     except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
         recover(root, workspace, lock_held=True)
         raise DeltaError("Повреждённый ZIP-архив разницы") from exc
@@ -666,5 +675,7 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
         recover(root, workspace, lock_held=True)
         raise
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        cleanup = remove_path_safely(staging, workspace.parent)
+        if not cleanup:
+            logger.warning('Не удалось удалить временный каталог %s: %s', staging, cleanup.reason)
     return {"applied": len(changed), "deleted": len(removed)}

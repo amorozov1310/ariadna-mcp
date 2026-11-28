@@ -61,6 +61,19 @@ def _belongs_to_protected(path: Path, protected_roots) -> bool:
         return True
 
 
+def _overlaps_protected(path: Path, protected_roots) -> bool:
+    try:
+        resolved = Path(os.path.realpath(path))
+        for root in protected_roots:
+            protected = Path(os.path.realpath(root))
+            if (resolved == protected or resolved.is_relative_to(protected) or
+                    protected.is_relative_to(resolved)):
+                return True
+        return False
+    except (OSError, ValueError):
+        return True
+
+
 def directory_is_safe(directory: Path, allowed_root: Path | None = None, *,
                       protected_roots=()) -> bool:
     """Проверить, что каталог не является ссылкой и расположен в разрешённом проекте."""
@@ -68,11 +81,11 @@ def directory_is_safe(directory: Path, allowed_root: Path | None = None, *,
     if is_link_like(directory) or not directory.is_dir():
         return False
     if allowed_root is None:
-        return not _belongs_to_protected(directory, protected_roots)
+        return not _overlaps_protected(directory, protected_roots)
     allowed_root = Path(allowed_root)
     return (_lexically_within(directory, allowed_root) and
             _resolved_within(directory, allowed_root) and
-            not _belongs_to_protected(directory, protected_roots))
+            not _overlaps_protected(directory, protected_roots))
 
 
 def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True,
@@ -97,7 +110,7 @@ def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True
     if linked:
         # Даже при удалении только самой ссылки запрещаем путь, ведущий в
         # соседний зарегистрированный проект.
-        if _belongs_to_protected(path, protected_roots):
+        if _overlaps_protected(path, protected_roots):
             return RemovalResult(False, 'цель ссылки принадлежит другому проекту')
         try:
             # Удаляется только сама ссылка/reparse point, никогда её цель.
@@ -116,7 +129,7 @@ def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True
     if not _resolved_within(path, allowed_root):
         if path.exists() or is_link_like(path):
             return RemovalResult(False, 'разрешённый путь находится вне корня')
-    if _belongs_to_protected(path, protected_roots):
+    if _overlaps_protected(path, protected_roots):
         return RemovalResult(False, 'путь принадлежит другому проекту')
     try:
         if not path.exists():

@@ -5,6 +5,7 @@
 """
 
 import hashlib
+from contextlib import ExitStack
 import json
 import logging
 import os
@@ -631,6 +632,7 @@ _REPORT_ERRORS = WeakKeyDictionary()
 _CLOSING_DATABASES = WeakSet()
 _RESTORE_LOCKS = WeakValueDictionary()
 _PUBLISH_LOCKS = WeakValueDictionary()
+_LRU_LOCKS = WeakValueDictionary()
 _SELECTED_ARCHIVES = {}
 _SELECTED_VERSIONS = {}
 _VERSION_ARCHIVES = {}
@@ -668,25 +670,52 @@ def _touch_archive(path):
         _ARCHIVE_RECENCY[Path(path).resolve()] = _ARCHIVE_SEQUENCE
 
 
-def forget_report_version(version):
+def forget_report_version(version, allowed_root=None, protected_roots=()):
     """Сбросить ссылки на удалённую версию справки во всех отчётах."""
-    obsolete = []
+    if allowed_root is None:
+        return RemovalResult(False, 'не указан доверенный корень архива')
+    allowed_root = Path(allowed_root).resolve()
+
+    def inside_trusted_root(directory):
+        try:
+            return Path(directory).resolve().is_relative_to(allowed_root)
+        except (OSError, ValueError):
+            return False
+
     with _REPORTS_LOCK:
-        for directory, versions in list(_VERSION_ARCHIVES.items()):
-            filename = versions.pop(version, None)
-            if filename:
-                obsolete.append(directory / filename)
-                _ARCHIVE_RECENCY.pop((directory / filename).resolve(), None)
-            if filename and _SELECTED_ARCHIVES.get(directory) == filename:
-                _SELECTED_ARCHIVES.pop(directory, None)
-            if not versions:
-                _VERSION_ARCHIVES.pop(directory, None)
-        for directory, selected_version in list(_SELECTED_VERSIONS.items()):
-            if selected_version == version:
-                _SELECTED_VERSIONS.pop(directory, None)
-                _SELECTED_ARCHIVES.pop(directory, None)
-    results = [_unlink_archive(path) for path in obsolete]
-    return next((result for result in results if not result), RemovalResult(True))
+        directories = sorted((directory for directory in _VERSION_ARCHIVES
+                              if inside_trusted_root(directory)), key=str)
+        selected_directories = [directory for directory in _SELECTED_VERSIONS
+                                if inside_trusted_root(directory)]
+    directories = sorted(set(directories) | set(selected_directories), key=str)
+    with ExitStack() as locks:
+        for directory in directories:
+            locks.enter_context(_lru_lock(directory))
+        with _REPORTS_LOCK:
+            obsolete = [directory / filename
+                        for directory, versions in _VERSION_ARCHIVES.items()
+                        if inside_trusted_root(directory)
+                        if (filename := versions.get(version))]
+        results = [_unlink_archive(path, allowed_root, protected_roots) for path in obsolete]
+        failed = next((result for result in results if not result), None)
+        if failed is not None:
+            return failed
+        with _REPORTS_LOCK:
+            for directory, versions in list(_VERSION_ARCHIVES.items()):
+                if not inside_trusted_root(directory):
+                    continue
+                filename = versions.pop(version, None)
+                if filename:
+                    _ARCHIVE_RECENCY.pop((directory / filename).resolve(), None)
+                    if _SELECTED_ARCHIVES.get(directory) == filename:
+                        _SELECTED_ARCHIVES.pop(directory, None)
+                if not versions:
+                    _VERSION_ARCHIVES.pop(directory, None)
+            for directory, selected_version in list(_SELECTED_VERSIONS.items()):
+                if inside_trusted_root(directory) and selected_version == version:
+                    _SELECTED_VERSIONS.pop(directory, None)
+                    _SELECTED_ARCHIVES.pop(directory, None)
+    return RemovalResult(True)
 
 
 def forget_report_project(db_path):
@@ -704,13 +733,14 @@ def forget_report_project(db_path):
 def select_report_version(db_path, version):
     """Запомнить выбранную проектом версию и защитить её опубликованный отчёт."""
     directory = _report_directory(db_path).resolve()
-    with _REPORTS_LOCK:
-        _SELECTED_VERSIONS[directory] = version
-        selected = _VERSION_ARCHIVES.get(directory, {}).get(version)
-        if selected:
-            _SELECTED_ARCHIVES[directory] = selected
-        else:
-            _SELECTED_ARCHIVES.pop(directory, None)
+    with _lru_lock(directory):
+        with _REPORTS_LOCK:
+            _SELECTED_VERSIONS[directory] = version
+            selected = _VERSION_ARCHIVES.get(directory, {}).get(version)
+            if selected:
+                _SELECTED_ARCHIVES[directory] = selected
+            else:
+                _SELECTED_ARCHIVES.pop(directory, None)
 
 
 def _record_report_archive(path, version):
@@ -728,14 +758,24 @@ def _publish_lock(directory):
         return _PUBLISH_LOCKS.setdefault(directory, Lock())
 
 
+def _lru_lock(directory):
+    directory = Path(directory).resolve()
+    with _REPORTS_LOCK:
+        return _LRU_LOCKS.setdefault(directory, Lock())
+
+
 def _unlink_archive(path, allowed_root=None, protected_roots=()):
     """Удалить архив; занятый (на Windows его может держать читатель) оставить
     до следующего прохода, не прерывая очистку остальных."""
     try:
         path = Path(path)
+        if not path.exists() and not is_link_like(path):
+            return RemovalResult(True)
         # Для нового пути отчётов trusted root — каталог индексов, а не
         # .ariadna-service: последний может оказаться junction наружу.
-        allowed_root = Path(allowed_root) if allowed_root is not None else path.parents[3]
+        if allowed_root is None:
+            return RemovalResult(False, 'не указан доверенный корень архива')
+        allowed_root = Path(allowed_root)
         if not directory_is_safe(path.parent, allowed_root, protected_roots=protected_roots):
             logger.warning('Пропускаю очистку архива вне безопасного каталога: %s', path)
             return RemovalResult(False, 'каталог архива небезопасен')
@@ -821,8 +861,8 @@ def _trim_archives(published, protected_roots=()):
                 pass
     # Более новые mtime, затем отметка использования/публикации, затем имя.
     archives.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    # Публикуемый и выбранный архив защищены и входят в лимит. Выбранный
-    # может смениться параллельно; перепроверяем непосредственно перед unlink.
+    # Выбор версии и обрезка выполняются под одной блокировкой публикации.
+    # Поэтому выбранный ZIP не может смениться между выбором и удалением.
     selected_is_live = bool(selected and selected != published.name and (directory / selected).is_file())
     keep_count = max(0, _MAX_ARCHIVES - 1 - int(selected_is_live))
     available = [item for item in archives if item[3].name != selected]
@@ -833,31 +873,41 @@ def _trim_archives(published, protected_roots=()):
     for _, _, _, path in archives:
         if path.name in keep:
             continue
-        with _REPORTS_LOCK:
-            current_selected = _SELECTED_ARCHIVES.get(directory.resolve())
-        if path.name == current_selected:
-            continue
         results.append(_unlink_archive(path, allowed_root, protected_roots))
     _sync_archive_registry(directory)
-    return next((result for result in results if not result), RemovalResult(True))
+    failed = next((result for result in results if not result), None)
+    if failed is not None:
+        return failed
+    remaining = [path for path in directory.glob('platform-check*.zip')
+                 if _CACHE_ARCHIVE.fullmatch(path.name)]
+    if len(remaining) > _MAX_ARCHIVES:
+        return RemovalResult(False, 'лимит архивов не соблюдён')
+    if selected and not (directory / selected).is_file():
+        return RemovalResult(False, 'архив выбранной версии отсутствует')
+    return RemovalResult(True)
 
 
-def cleanup_report_temps(directory, allowed_root=None):
+def cleanup_report_temps(directory, allowed_root=None, protected_roots=(), *, include_archives=False):
     """Удалить временные архивы, оставшиеся после аварийного завершения записи."""
     directory = Path(directory)
     if not directory.exists():
         return RemovalResult(True)
-    allowed_root = Path(allowed_root) if allowed_root is not None else directory.parent
-    if not directory_is_safe(directory, allowed_root):
+    if allowed_root is None:
+        return RemovalResult(False, 'не указан доверенный корень архива')
+    allowed_root = Path(allowed_root)
+    if not directory_is_safe(directory, allowed_root, protected_roots=protected_roots):
         logger.warning('Пропускаю очистку временных архивов в небезопасном каталоге %s', directory)
         # Каталог, не принадлежащий проекту (например, внешняя ссылка),
         # намеренно не очищается и не считается частью его файлов.
         return RemovalResult(True)
     results = []
     try:
-        paths = directory.glob('.platform-check-*.zip.*.tmp')
+        paths = list(directory.glob('.platform-check-*.zip.*.tmp'))
+        if include_archives:
+            paths.extend(path for path in directory.glob('platform-check*.zip')
+                         if _CACHE_ARCHIVE.fullmatch(path.name))
         for path in paths:
-            results.append(_unlink_archive(path, allowed_root))
+            results.append(_unlink_archive(path, allowed_root, protected_roots))
     except OSError:
         logger.info('Не удалось очистить временные архивы проверки платформы в %s', directory,
                     exc_info=True)
@@ -1010,6 +1060,12 @@ class _Report:
     def save(self, path, key, before_replace, version=None, protected_roots=()):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Проверка до создания временного ZIP: при отказе в чужом/ссылочном
+            # каталоге не появляется ни временный файл, ни его содержимое.
+            if not directory_is_safe(path.parent, path.parent.parents[2],
+                                     protected_roots=protected_roots):
+                logger.warning('Не публикую архив в небезопасном каталоге: %s', path)
+                return False
             # Временный файл расположен рядом: replace атомарен, а его
             # отдельный суффикс позволяет убрать недописанный файл при старте.
             with NamedTemporaryFile(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp',
@@ -1037,7 +1093,8 @@ class _Report:
                     self.archive_stamp = _stat_signature(path.stat())
                     if version is not None:
                         _record_report_archive(path, version)
-                    trim_result = _trim_archives(path, protected_roots)
+                    with _lru_lock(path.parent):
+                        trim_result = _trim_archives(path, protected_roots)
                     if not trim_result:
                         logger.warning('Не удалось полностью очистить старые архивы в %s: %s',
                                        path.parent, trim_result.reason)
@@ -1183,14 +1240,15 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
     key = _cache_key(engine, index, mode, revision)
     cache_id = db, key
     path = _archive_path(db.db_path, key)
-    with _REPORTS_LOCK:
-        directory = path.parent.resolve()
-        if not warm:
-            _SELECTED_VERSIONS[directory] = index.version
-        if path.is_file():
-            _VERSION_ARCHIVES.setdefault(directory, {})[index.version] = path.name
-            if _SELECTED_VERSIONS.get(directory) == index.version:
-                _SELECTED_ARCHIVES[directory] = path.name
+    with _lru_lock(path.parent):
+        with _REPORTS_LOCK:
+            directory = path.parent.resolve()
+            if not warm:
+                _SELECTED_VERSIONS[directory] = index.version
+            if path.is_file():
+                _VERSION_ARCHIVES.setdefault(directory, {})[index.version] = path.name
+                if _SELECTED_VERSIONS.get(directory) == index.version:
+                    _SELECTED_ARCHIVES[directory] = path.name
     with _REPORTS_LOCK:
         report = _known_report(cache_id, warm=warm)
         if not warm and report is not None and report is not invalid:

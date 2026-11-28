@@ -835,18 +835,19 @@ class Database:
             # маркер и возобновит построение при следующем открытии.
             with open(self.rebuild_marker_path, 'w', encoding='utf-8') as marker:
                 marker.write('Index schema changed; rebuild from XML sources is required.\n')
+            removals = []
             for suffix in ('', '-wal', '-shm'):
                 path = Path(self.db_path + suffix)
-                remove_path_safely(path, path.parent.parent, recursive=False)
-            self.stale_schema_recreated = True
+                removals.append(remove_path_safely(path, path.parent.parent, recursive=False))
+            self.stale_schema_recreated = all(removals)
 
     @property
     def rebuild_required(self) -> bool:
         return os.path.exists(self.rebuild_marker_path)
 
-    def clear_rebuild_marker(self) -> None:
+    def clear_rebuild_marker(self):
         path = Path(self.rebuild_marker_path)
-        remove_path_safely(path, path.parent.parent, recursive=False)
+        return remove_path_safely(path, path.parent.parent, recursive=False)
 
     def init_schema(self):
         with self._schema_lock:
