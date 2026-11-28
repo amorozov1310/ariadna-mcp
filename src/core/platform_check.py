@@ -685,8 +685,8 @@ def forget_report_version(version):
             if selected_version == version:
                 _SELECTED_VERSIONS.pop(directory, None)
                 _SELECTED_ARCHIVES.pop(directory, None)
-    for path in obsolete:
-        _unlink_archive(path)
+    results = [_unlink_archive(path) for path in obsolete]
+    return next((result for result in results if not result), RemovalResult(True))
 
 
 def forget_report_project(db_path):
@@ -754,17 +754,19 @@ def prune_report_archives(db_path, keep=()):
     allowed_root = Path(db_path).parent.parent
     if not directory_is_safe(directory, allowed_root):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
-        return
+        return RemovalResult(False, 'каталог архивов небезопасен')
     keep = {_archive_path(db_path, key).name for key in keep}
     with _publish_lock(directory):
         with _REPORTS_LOCK:
             selected = _SELECTED_ARCHIVES.get(directory.resolve())
         if selected:
             keep.add(selected)
+        results = []
         for path in directory.glob('platform-check*.zip'):
             if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
-                _unlink_archive(path, allowed_root)
+                results.append(_unlink_archive(path, allowed_root))
         _sync_archive_registry(directory)
+        return next((result for result in results if not result), RemovalResult(True))
 
 
 def _sync_archive_registry(directory):
@@ -802,7 +804,7 @@ def _trim_archives(published):
     allowed_root = directory.parents[2]
     if not directory_is_safe(directory, allowed_root):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
-        return
+        return RemovalResult(False, 'каталог архивов небезопасен')
     with _REPORTS_LOCK:
         selected = _SELECTED_ARCHIVES.get(directory.resolve())
     for path in directory.glob('platform-check*.zip'):
@@ -824,6 +826,7 @@ def _trim_archives(published):
     keep = {item[3].name for item in available[:keep_count]}
     if selected:
         keep.add(selected)
+    results = []
     for _, _, _, path in archives:
         if path.name in keep:
             continue
@@ -831,8 +834,9 @@ def _trim_archives(published):
             current_selected = _SELECTED_ARCHIVES.get(directory.resolve())
         if path.name == current_selected:
             continue
-        _unlink_archive(path, allowed_root)
+        results.append(_unlink_archive(path, allowed_root))
     _sync_archive_registry(directory)
+    return next((result for result in results if not result), RemovalResult(True))
 
 
 def cleanup_report_temps(directory, allowed_root=None):
@@ -1023,9 +1027,14 @@ class _Report:
                     self.archive_stamp = _stat_signature(path.stat())
                     if version is not None:
                         _record_report_archive(path, version)
-                    _trim_archives(path)
+                    trim_result = _trim_archives(path)
+                    if not trim_result:
+                        logger.warning('Не удалось полностью очистить старые архивы в %s: %s',
+                                       path.parent, trim_result.reason)
             finally:
-                remove_path_safely(temp, path.parents[3], recursive=False)
+                temp_result = remove_path_safely(temp, path.parents[3], recursive=False)
+                if not temp_result:
+                    raise OSError(temp_result.reason or f'Не удалось удалить временный архив {temp}')
         except OSError:
             logger.warning('Не удалось сохранить кэш диагностики %s', path, exc_info=True)
             return False

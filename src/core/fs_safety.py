@@ -101,7 +101,14 @@ def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True
             return RemovalResult(False, 'цель ссылки принадлежит другому проекту')
         try:
             # Удаляется только сама ссылка/reparse point, никогда её цель.
-            retry_on_permission_error(lambda: os.rmdir(path) if path.is_dir() else path.unlink())
+            def remove_link():
+                if path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():  # junction/reparse point каталога
+                    os.rmdir(path)
+                else:
+                    path.unlink()
+            retry_on_permission_error(remove_link)
             return RemovalResult(True)
         except OSError as exc:
             return RemovalResult(False, str(exc))
