@@ -304,6 +304,18 @@ def test_delta_apply_stops_when_previous_recovery_fails(tmp_path, monkeypatch):
     assert journal.exists() and backup.exists()
 
 
+def test_project_manager_delta_refuses_failed_recovery(tmp_path, monkeypatch):
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('p', 'p')
+    pm.add_source('p', 'main', 'main')
+    monkeypatch.setattr(pm, '_recover_source_delta', lambda *args, **kwargs: False)
+    try:
+        with pytest.raises(source_delta.DeltaError, match='Не удалось восстановить'):
+            pm.apply_source_delta('p', 'main', io.BytesIO(b''), 'base', {'files': {}})
+    finally:
+        pm.close_all()
+
+
 def test_orphan_cleanup_failure_is_reported_without_raising(tmp_path, monkeypatch):
     workspace = tmp_path / 'state'
     (workspace / 'rollback-held').mkdir(parents=True)

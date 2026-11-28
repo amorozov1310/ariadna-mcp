@@ -1267,7 +1267,8 @@ class ProjectManager:
             root = self._source_file_root(project_id, source_id)
             workspace = self._source_delta_workspace(project_id, source_id)
             with source_delta.transaction_lock(workspace):
-                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
+                if not self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True):
+                    raise source_delta.DeltaError("Не удалось восстановить предыдущую операцию с источником")
                 return source_delta.manifest(root, self._source_manifest_cache_path(project_id, source_id))
 
     def apply_source_delta(self, project_id: str, source_id: str, archive: BinaryIO,
@@ -1283,7 +1284,8 @@ class ProjectManager:
             # Восстановить предыдущую транзакцию до вычисления версии, иначе
             # base_version может описать файлы, которые сейчас откатятся.
             with source_delta.transaction_lock(workspace):
-                self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
+                if not self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True):
+                    raise source_delta.DeltaError("Не удалось восстановить предыдущую операцию с источником")
                 cache = self._source_manifest_cache_path(project_id, source_id)
                 current = source_delta.manifest(root, cache)
                 if current['version'] != base_version:
