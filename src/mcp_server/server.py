@@ -134,7 +134,7 @@ def create_mcp_server(pm: ProjectManager) -> 'MCPServer | None':
     mcp = MCPServer("ariadna", title="Ариадна", instructions=INSTRUCTIONS,
                     version=__version__)
     from ..auth import TokenStore
-    tokens = TokenStore(pm.data_dir)
+    tokens = getattr(pm, 'token_store', None) or TokenStore(pm.data_dir)
 
     def _require_admin(ctx, action: str) -> None:
         """Командный сервер (есть токены): действие — только для роли admin.

@@ -221,21 +221,17 @@ def test_mcp_search_lease_survives_pool_eviction_mid_operation(
             search = pool.submit(execute_tool, pm, tool, args)
             assert entered.wait(5)
             p1_db = pm._db_pool['p1']
-            wait_started = threading.Event()
-
-            def start_pressure():
-                wait_started.set()
-                pressure()
-
-            eviction = pool.submit(start_pressure)
-            assert wait_started.wait(2)
-            time.sleep(.05)
-            assert not eviction.done()
+            eviction = pool.submit(pressure)
+            # The pool has a soft limit: when every entry is pinned, it may
+            # temporarily open and retire overflow databases instead of
+            # blocking. Wait for that pressure to finish while the MCP search
+            # still holds its lease, then prove p1 itself was not evicted.
+            eviction.result(timeout=10)
             assert pm._db_pool.get('p1') is p1_db
+            assert not p1_db._retired and p1_db.conn is not None
             release.set()
             result = search.result(timeout=10)
             assert not result.startswith('Error:'), result
-            eviction.result(timeout=10)
     finally:
         release.set()
 

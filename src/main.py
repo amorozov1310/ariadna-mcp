@@ -49,6 +49,16 @@ def _index_dir() -> str | None:
     return os.environ.get('INDEX_DIR') or None
 
 
+def _ensure_token_store(pm):
+    """Общее хранилище для обоих транспортов; совместимость прямых запусков."""
+    from .auth import TokenStore
+    tokens = getattr(pm, 'token_store', None)
+    if tokens is None:
+        tokens = pm.token_store = TokenStore(pm.data_dir)
+        tokens.initialize()
+    return tokens
+
+
 def build_shared_state(data_dir: str):
     """Один ProjectManager на процесс — общий для Web UI и MCP: один реестр
     и один пул индексов. Раньше у каждого сервера (Web UI, MCP SSE и HTTP)
@@ -63,8 +73,11 @@ def build_shared_state(data_dir: str):
     появился бы пустой индекс. Ошибки обслуживания логируются и не мешают
     запуску."""
     from .core.project_manager import ProjectManager
+    from .auth import TokenStore
     Path(data_dir).mkdir(parents=True, exist_ok=True)
     pm = ProjectManager(data_dir, _index_dir())
+    pm.token_store = TokenStore(data_dir)
+    pm.token_store.initialize()
     try:
         pm.migrate_index_dir()
     except Exception:
@@ -84,6 +97,7 @@ def main(*, in_docker: bool = False):
 
     _quiet_proactor_connection_reset()
     pm = build_shared_state(data_dir)
+    _ensure_token_store(pm)
 
     from .license import LicenseStore
     from .security import LOCAL_BIND_NOTICE, is_loopback_address
@@ -125,7 +139,9 @@ def _start_web(pm, port: int, host: str = '127.0.0.1', *,
     try:
         import uvicorn
         from .web import app as web_app
+        _ensure_token_store(pm)
         web_app.set_pm(pm)
+        web_app.set_token_store(pm.token_store)
         web_app.app.state.listen_addr_overridden = listen_addr_overridden
         web_app.app.state.check_local_interface = check_local_interface
         uvicorn.run(
@@ -162,12 +178,12 @@ def _start_mcp_streamable_http(pm, port: int, host: str = '127.0.0.1', *,
             return
 
         import uvicorn
+        from .auth import MCPAuthMiddleware
+        tokens = _ensure_token_store(pm)
         mcp = create_mcp_server(pm)
 
-        from .auth import MCPAuthMiddleware, TokenStore
         from .security import NetworkLicenseMiddleware, mcp_transport_security
         app = mcp.streamable_http_app(host="0.0.0.0", transport_security=mcp_transport_security())
-        tokens = TokenStore(pm.data_dir)
         if tokens.enabled():
             logger.info("Авторизация по токенам включена (%d токенов, лицензия: %s)",
                         len(tokens.list()), tokens.license.state().message)

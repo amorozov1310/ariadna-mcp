@@ -3,9 +3,15 @@
 вход по токену, роль user не управляет проектами, источниками и токенами."""
 
 import json
+import os
 import sys
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from queue import Empty
 from pathlib import Path
+from multiprocessing import Event, Process, Queue, get_context
 
 import pytest
 
@@ -17,6 +23,102 @@ from tests.license_helper import install_team_license
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 HOST = {'Host': '127.0.0.1:19878'}
+
+
+def _verify_during_revoke(data_dir, token, start, ready, done, results):
+    store = TokenStore(data_dir)
+    try:
+        start.wait()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if store.verify(token) is not None:
+                break
+        else:
+            results.put(('error', 'не удалось проверить живой токен за 2 с'))
+            return
+        verified = 1
+        ready.set()
+        while not done.is_set():
+            verified += store.verify(token) is not None
+        time.sleep(0.13)  # дольше окна проверки кэша в 100 мс
+        results.put(('verify_summary', verified))
+        results.put(('final', store.verify(token) is None))
+    except Exception as exc:  # передаём исключения родительскому тесту
+        results.put(('error', repr(exc)))
+
+
+def _revoke_at_start(data_dir, token_id, start, done, results, ready=None):
+    try:
+        start.wait()
+        if ready is not None and not ready.wait(timeout=3):
+            results.put(('error', 'проверяющий не сообщил о проверке живого токена за 3 с'))
+            return
+        TokenStore(data_dir).revoke(token_id)
+        results.put(('revoked', True))
+    except Exception as exc:
+        results.put(('error', repr(exc)))
+    finally:
+        done.set()
+
+
+def _first_verify_many(data_dir, token, start, results):
+    try:
+        store = TokenStore(data_dir)
+        start.wait()
+        results.put(('verified', all(store.verify(token) is not None for _ in range(20))))
+    except Exception as exc:
+        results.put(('error', repr(exc)))
+
+
+def _verify_due_with_write_pause(data_dir, token, write_ready, release_write, results):
+    """Проверка токена с назревшей записью last_used: запись «зависает» уже
+    после взятия блокировок и завершается только по команде теста — отзыв во
+    втором процессе конкурирует именно с этой предстоящей записью."""
+    store = TokenStore(data_dir)
+    try:
+        store.initialize()
+        info = next(iter(store._tokens.values()))
+        store._last_persist[info.id] = 0
+        original_save = store._save
+
+        def pause_before_save(candidate=None):
+            write_ready.set()
+            if not release_write.wait(10):
+                raise TimeoutError('тест не разрешил запись last_used')
+            return original_save(candidate)
+
+        store._save = pause_before_save
+        results.put(('due_verify', store.verify(token) is not None))
+    except Exception as exc:  # передаём исключения родительскому тесту
+        results.put(('error', repr(exc)))
+
+
+def _revoke_when_attempting(data_dir, token_id, attempting, results):
+    try:
+        attempting.set()
+        TokenStore(data_dir).revoke(token_id)
+        results.put(('revoked', True))
+    except Exception as exc:
+        results.put(('error', repr(exc)))
+
+
+def _hold_token_lock(path, entered, release):
+    from src.auth import _token_file_lock
+    with _token_file_lock(Path(path)):
+        entered.set()
+        release.wait(15)
+
+
+def _stop_process(process, timeout=2):
+    """Завершить дочерний процесс и дождаться его даже после таймаута теста."""
+    if process.is_alive():
+        process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout)
+    if process.is_alive() and hasattr(process, 'kill'):
+        process.kill()
+        process.join(timeout)
 
 
 def test_token_store_create_verify_revoke(tmp_path):
@@ -37,6 +139,98 @@ def test_token_store_create_verify_revoke(tmp_path):
     assert not store.enabled() and store.verify(token) is None
 
 
+@pytest.mark.parametrize('token_count', [1, 2])
+def test_failed_revoke_does_not_publish_candidate_state(tmp_path, monkeypatch, token_count):
+    import src.auth as auth
+    store = TokenStore(tmp_path)
+    store.limit = lambda: 2
+    records = [store.create(f'Синтетический {i}', 'admin') for i in range(token_count)]
+    target, token = records[0]
+    disk_before = store.path.read_bytes()
+
+    def fail_replace(*args, **kwargs):
+        raise PermissionError('synthetic replace denied')
+
+    monkeypatch.setattr(auth, 'replace_with_retry', fail_replace)
+    with pytest.raises(PermissionError):
+        store.revoke(target.id)
+
+    assert store.enabled()
+    assert store.verify(token) is not None
+    assert store.path.read_bytes() == disk_before
+    assert {item.id for item in store.list()} == {item.id for item, _ in records}
+
+
+def test_failed_create_does_not_publish_candidate_state(tmp_path, monkeypatch):
+    import src.auth as auth
+    store = TokenStore(tmp_path)
+    initial, token = store.create('Синтетический админ', 'admin')
+    store.limit = lambda: 2
+    disk_before = store.path.read_bytes()
+
+    def fail_replace(*args, **kwargs):
+        raise PermissionError('synthetic replace denied')
+
+    monkeypatch.setattr(auth, 'replace_with_retry', fail_replace)
+    with pytest.raises(PermissionError):
+        store.create('Новый синтетический пользователь')
+
+    assert store.enabled() and store.verify(token) is not None
+    assert store.path.read_bytes() == disk_before
+    assert [item.id for item in store.list()] == [initial.id]
+
+
+def test_revoke_keeps_memory_and_file_consistent_when_os_replace_always_fails(tmp_path, monkeypatch):
+    """os.replace падает на всех попытках: память и файл остаются прежними."""
+    from src.core import fsretry
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    disk_before = store.path.read_bytes()
+    attempts = 0
+
+    def always_fail(src, dst):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(5, 'synthetic replace denied', str(dst))
+
+    monkeypatch.setattr(fsretry.os, 'replace', always_fail)
+    monkeypatch.setattr(fsretry, 'RETRY_DELAY_SEC', 0)
+    with pytest.raises(PermissionError):
+        store.revoke(info.id)
+
+    assert attempts == fsretry.RETRY_ATTEMPTS
+    assert store.path.read_bytes() == disk_before
+    assert [item.id for item in store.list()] == [info.id]
+    assert store.verify(token) is not None
+    assert not list(tmp_path.glob('tokens.json.*.tmp'))
+
+
+def test_revoke_retries_a_temporarily_busy_tokens_file(tmp_path, monkeypatch):
+    """Windows может временно запретить замену занятого tokens.json."""
+    import os
+    from src.core import fsretry
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    real_replace = os.replace
+    attempts = []
+
+    def busy_then_replace(src, dst):
+        attempts.append((Path(src), Path(dst)))
+        if len(attempts) <= 3:
+            raise PermissionError(5, 'synthetic Windows sharing violation', str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fsretry.os, 'replace', busy_then_replace)
+    monkeypatch.setattr(fsretry, 'RETRY_DELAY_SEC', 0)
+    store.revoke(info.id)
+
+    assert len(attempts) == 4
+    assert TokenStore(tmp_path).verify(token) is None
+    assert not list(tmp_path.glob('tokens.json.*.tmp'))
+
+
 def test_revoked_token_marks_do_not_accumulate_and_tokens_stay_revoked(tmp_path):
     store = TokenStore(tmp_path)
     revoked = []
@@ -53,10 +247,412 @@ def test_revoked_token_marks_do_not_accumulate_and_tokens_stay_revoked(tmp_path)
     assert store._last_persist == {}
 
 
+def test_external_revoke_is_seen_when_mtime_is_restored(tmp_path):
+    first = TokenStore(tmp_path)
+    info, token = first.create('Синтетический токен', 'admin')
+    assert first.verify(token) is not None
+
+    second = TokenStore(tmp_path)
+    old_stat = first.path.stat()
+    second.revoke(info.id)
+    os.utime(first.path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+
+    # До исправления первый экземпляр оставался со старым кэшем.
+    assert first.verify(token) is None
+
+
+def test_external_revoke_is_seen_when_mtime_and_size_match(tmp_path):
+    first = TokenStore(tmp_path)
+    info, token = first.create('Синтетический токен', 'admin')
+    assert first.verify(token) is not None
+
+    second = TokenStore(tmp_path)
+    old_stat = first.path.stat()
+    second.revoke(info.id)
+    content = first.path.read_bytes()
+    first.path.write_bytes(content + b' ' * (old_stat.st_size - len(content)))
+    os.utime(first.path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    replaced_stat = first.path.stat()
+    assert replaced_stat.st_size == old_stat.st_size
+    assert replaced_stat.st_mtime_ns == old_stat.st_mtime_ns
+
+    assert first.verify(token) is None
+
+
+def test_token_store_does_not_reload_unchanged_file(tmp_path, monkeypatch):
+    store = TokenStore(tmp_path)
+    _, token = store.create('Синтетический токен', 'admin')
+    assert store.verify(token) is not None
+    reloads = 0
+    original = store.path.read_bytes
+
+    def counted_read(*args, **kwargs):
+        nonlocal reloads
+        reloads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), 'read_bytes', lambda self, *a, **kw:
+                        counted_read(*a, **kw) if self == store.path else original(*a, **kw))
+    for _ in range(10):
+        assert store.verify(token) is not None
+    assert reloads == 0
+
+
+def test_parallel_verify_and_revoke(tmp_path):
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический токен', 'admin')
+    assert store.verify(token) is not None
+
+    def verify_many():
+        return [store.verify(token) for _ in range(200)]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(verify_many)
+        store.revoke(info.id)
+        results = future.result()
+
+    assert any(result is not None for result in results)
+    assert store.verify(token) is None
+
+
 def test_broken_tokens_file_keeps_server_closed(tmp_path):
     (tmp_path / 'tokens.json').write_text('{не json', encoding='utf-8')
     store = TokenStore(tmp_path)
     assert store.enabled() and store.verify('ar_любой') is None
+
+
+@pytest.mark.parametrize('contents', [b'', b'{broken', b'{}', b'[null]', b'[{}]'])
+def test_invalid_token_file_fails_closed(tmp_path, contents):
+    (tmp_path / 'tokens.json').write_bytes(contents)
+    store = TokenStore(tmp_path)
+    assert store.enabled()
+    assert store.verify('ar_synthetic') is None
+
+
+def test_disappeared_token_file_stays_fail_closed_until_restart(tmp_path):
+    store = TokenStore(tmp_path)
+    _, token = store.create('Синтетический владелец', 'admin')
+    assert store.verify(token) is not None
+    store.path.unlink()
+    assert store.enabled() and store.verify(token) is None
+
+
+def test_permission_error_during_token_check_fails_closed_without_raising(tmp_path, monkeypatch):
+    store = TokenStore(tmp_path)
+    _, token = store.create('Синтетический владелец', 'admin')
+    original = Path.stat
+
+    def denied(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError('synthetic denied')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'stat', denied)
+    assert store.enabled() and store.verify(token) is None
+
+
+def test_transient_windows_read_sharing_error_retries_before_failing_closed(tmp_path, monkeypatch):
+    store = TokenStore(tmp_path)
+    _, token = store.create('synthetic admin', 'admin')
+    original = Path.read_bytes
+    attempts = 0
+
+    def briefly_denied(path, *args, **kwargs):
+        nonlocal attempts
+        if path == store.path:
+            attempts += 1
+            if attempts <= 2:
+                raise PermissionError(13, 'synthetic Windows sharing violation', str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_bytes', briefly_denied)
+    assert store.verify(token) is not None
+    assert attempts == 3
+
+
+def test_multiprocess_revoke_and_last_used_persistence_are_serialized(tmp_path):
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический владелец', 'admin')
+    ctx = get_context('spawn')
+    start, ready, done, results = ctx.Event(), ctx.Event(), ctx.Event(), ctx.Queue()
+    verifier = ctx.Process(target=_verify_during_revoke,
+                           args=(str(tmp_path), token, start, ready, done, results))
+    revoker = ctx.Process(target=_revoke_at_start,
+                          args=(str(tmp_path), info.id, start, done, results, ready))
+    processes = (verifier, revoker)
+    try:
+        for process in processes:
+            process.start()
+        start.set()
+        # Читаем очередь параллельно с ожиданием: дочерние Queue feeder threads
+        # не должны зависнуть, если тест завершается по таймауту.
+        deadline = time.monotonic() + 15
+        messages = []
+        while time.monotonic() < deadline and any(p.is_alive() for p in processes):
+            try:
+                messages.append(results.get(timeout=0.05))
+            except Empty:
+                pass
+        for process in processes:
+            process.join(max(0, deadline - time.monotonic()))
+        if any(process.is_alive() for process in processes):
+            pytest.fail('процесс verify/revoke завис')
+        while True:
+            try:
+                messages.append(results.get_nowait())
+            except Empty:
+                break
+        assert verifier.exitcode == revoker.exitcode == 0
+        assert not [m for m in messages if m[0] == 'error'], messages
+        assert any(m[0] == 'verify_summary' and m[1] > 0 for m in messages), messages
+        assert ('revoked', True) in messages
+        assert ('final', True) in messages
+        assert TokenStore(tmp_path).verify(token) is None
+        assert not list(tmp_path.glob('tokens.json.*.tmp'))
+    finally:
+        start.set()
+        for process in processes:
+            _stop_process(process)
+            if process.pid is not None:
+                process.close()
+        results.close()
+        results.join_thread()
+
+
+def test_due_last_used_write_serializes_with_multiprocess_revoke(tmp_path):
+    """Отзыв конкурирует с ещё не записанным last_used: запись не теряет
+    отзыв — на диске остаётся пустой список, проверка после отзыва — None."""
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический владелец', 'admin')
+    ctx = get_context('spawn')
+    write_ready, release_write, attempting = ctx.Event(), ctx.Event(), ctx.Event()
+    results = ctx.Queue()
+    verifier = ctx.Process(target=_verify_due_with_write_pause,
+                           args=(str(tmp_path), token, write_ready, release_write, results))
+    revoker = None
+    try:
+        verifier.start()
+        assert write_ready.wait(10), 'запись last_used не дошла до сохранения'
+        revoker = ctx.Process(target=_revoke_when_attempting,
+                              args=(str(tmp_path), info.id, attempting, results))
+        revoker.start()
+        assert attempting.wait(10), 'отзывающий процесс не запустился'
+        # Даём отзывающему дойти до файловой блокировки, пока проверяющий ещё
+        # держит её, и только затем разрешаем запись last_used.
+        time.sleep(0.05)
+        release_write.set()
+        deadline = time.monotonic() + 15
+        for process in (verifier, revoker):
+            process.join(max(0, deadline - time.monotonic()))
+        if any(process.is_alive() for process in (verifier, revoker)):
+            pytest.fail('процесс due verify/revoke завис')
+        messages = []
+        while True:
+            try:
+                messages.append(results.get_nowait())
+            except Empty:
+                break
+        assert verifier.exitcode == revoker.exitcode == 0
+        assert not [message for message in messages if message[0] == 'error'], messages
+        assert ('due_verify', True) in messages
+        assert ('revoked', True) in messages
+        # Повреждённый файл тоже даёт None на verify — проверяем именно
+        # содержимое: отзыв обязан оставить пустой список.
+        assert json.loads((tmp_path / 'tokens.json').read_text(encoding='utf-8')) == []
+        assert TokenStore(tmp_path).verify(token) is None
+        assert not list(tmp_path.glob('tokens.json.*.tmp'))
+    finally:
+        release_write.set()
+        for process in (verifier, revoker):
+            if process is not None:
+                _stop_process(process)
+                if process.pid is not None:
+                    process.close()
+        results.close()
+        results.join_thread()
+
+
+def test_permission_retry_releases_both_locks_before_sleep(tmp_path, monkeypatch):
+    """Пока verify() паузит между попытками чтения после PermissionError,
+    другой поток берёт обе блокировки за миллисекунды — пауза не должна
+    удерживать ни self._lock, ни межпроцессную блокировку."""
+    import src.auth as auth
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    store._last_persist[info.id] = 0
+    original_read = Path.read_bytes
+    original_sleep = time.sleep
+    read_attempts = 0
+    retry_sleep_entered = threading.Event()
+    verifier_context = threading.local()
+
+    def denied_once(path, *args, **kwargs):
+        nonlocal read_attempts
+        if path == store.path:
+            read_attempts += 1
+            if read_attempts == 1:
+                raise PermissionError(13, 'synthetic sharing violation', str(path))
+        return original_read(path, *args, **kwargs)
+
+    def observed_sleep(delay):
+        if getattr(verifier_context, 'active', False):
+            retry_sleep_entered.set()
+        return original_sleep(delay)
+
+    monkeypatch.setattr(Path, 'read_bytes', denied_once)
+    monkeypatch.setattr(auth.time, 'sleep', observed_sleep)
+    # Длинная пауза и просторный бюджет: если блокировки удерживаются во время
+    # сна, писатель ждёт не менее 0.2 с — предел в 0.08 с это поймает.
+    monkeypatch.setattr(auth, '_TOKEN_READ_RETRY_DELAY_SEC', 0.2)
+    monkeypatch.setattr(auth, '_TOKEN_READ_RETRY_BUDGET_SEC', 0.5, raising=False)
+
+    def verify():
+        verifier_context.active = True
+        return store.verify(token)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(verify)
+        assert retry_sleep_entered.wait(2), 'verify не вошёл в паузу между попытками'
+        started = time.monotonic()
+        store.revoke(info.id)
+        writer_elapsed = time.monotonic() - started
+        assert writer_elapsed < 0.08, f'писатель ждал {writer_elapsed:.3f} с во время паузы verify'
+        assert future.result(timeout=2) is None
+    assert read_attempts >= 2
+    assert json.loads((tmp_path / 'tokens.json').read_text(encoding='utf-8')) == []
+
+
+def test_persistent_permission_error_stops_after_bounded_retries(tmp_path, monkeypatch):
+    """Постоянный PermissionError чтения — ровно пять попыток и отказ."""
+    import src.auth as auth
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    store._last_persist[info.id] = 0
+    original = store.path.read_bytes()
+    original_read = Path.read_bytes
+    attempts = 0
+
+    def always_denied(path, *args, **kwargs):
+        nonlocal attempts
+        if path == store.path:
+            attempts += 1
+            raise PermissionError(13, 'synthetic persistent sharing violation',
+                                  str(store.path))
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_bytes', always_denied)
+    assert store.verify(token) is None
+    assert attempts == auth._TOKEN_READ_RETRIES
+    assert store._broken and store._tokens == {} and store._by_hash == {}
+    assert original == original_read(store.path)
+
+
+def test_multiprocess_first_verify_uses_unique_temp_files(tmp_path):
+    _, token = TokenStore(tmp_path).create('Синтетический владелец', 'admin')
+    ctx = get_context('spawn')
+    start, results = ctx.Event(), ctx.Queue()
+    workers = [ctx.Process(target=_first_verify_many,
+                           args=(str(tmp_path), token, start, results)) for _ in range(2)]
+    try:
+        for worker in workers:
+            worker.start()
+        start.set()
+        deadline = time.monotonic() + 15
+        messages = []
+        while time.monotonic() < deadline and any(w.is_alive() for w in workers):
+            try:
+                messages.append(results.get(timeout=0.05))
+            except Empty:
+                pass
+        for worker in workers:
+            worker.join(max(0, deadline - time.monotonic()))
+        if any(worker.is_alive() for worker in workers):
+            pytest.fail('процесс verify завис')
+        while True:
+            try:
+                messages.append(results.get_nowait())
+            except Empty:
+                break
+        assert all(worker.exitcode == 0 for worker in workers)
+        assert messages.count(('verified', True)) == 2
+        assert not [message for message in messages if message[0] == 'error'], messages
+        assert not list(tmp_path.glob('tokens.json.*.tmp'))
+    finally:
+        for worker in workers:
+            _stop_process(worker)
+            if worker.pid is not None:
+                worker.close()
+        results.close()
+        results.join_thread()
+
+
+def test_interprocess_lock_skips_last_used_without_waiting_but_rejects_writes(tmp_path):
+    from src.auth import _TOKEN_LOCK_TIMEOUT_SEC
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический владелец', 'admin')
+    store._last_persist[info.id] = 0
+    ctx = get_context('spawn')
+    entered, release = ctx.Event(), ctx.Event()
+    holder = ctx.Process(target=_hold_token_lock,
+                         args=(str(store.path), entered, release))
+    holder.start()
+    holder_exitcode = None
+    try:
+        assert entered.wait(10), 'процесс не захватил блокировку'
+        started = time.monotonic()
+        verified = store.verify(token)
+        assert verified is not None and verified.id == info.id
+        assert time.monotonic() - started < 0.1
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            store.revoke(info.id)
+        assert time.monotonic() - started < _TOKEN_LOCK_TIMEOUT_SEC + 1
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            store.create('Новый синтетический владелец')
+        assert time.monotonic() - started < _TOKEN_LOCK_TIMEOUT_SEC + 1
+        assert store.verify(token) is not None
+    finally:
+        release.set()
+        _stop_process(holder)
+        holder_exitcode = holder.exitcode
+        if holder.pid is not None:
+            holder.close()
+    assert holder_exitcode == 0
+
+    # Проверяющий процесс мог закэшировать токен до отзыва. После завершённого
+    # отзыва проверка обязана перечитать файл и отказать.
+    ctx = get_context('spawn')
+    start, done, results = ctx.Event(), ctx.Event(), ctx.Queue()
+    revoker = ctx.Process(target=_revoke_at_start,
+                          args=(str(tmp_path), info.id, start, done, results))
+    revoker.start()
+    start.set()
+    revoker_exitcode = None
+    try:
+        revoker.join(10)
+        if revoker.is_alive():
+            pytest.fail('процесс отзыва завис')
+    finally:
+        _stop_process(revoker)
+        revoker_exitcode = revoker.exitcode
+        if revoker.pid is not None:
+            revoker.close()
+    messages = []
+    while True:
+        try:
+            messages.append(results.get(timeout=0.1))
+        except Empty:
+            break
+    assert revoker_exitcode == 0
+    assert ('revoked', True) in messages
+    assert store.verify(token) is None
+    results.close()
+    results.join_thread()
 
 
 def test_cli_create_and_list(tmp_path, capsys):

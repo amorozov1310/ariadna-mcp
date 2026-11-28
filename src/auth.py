@@ -33,8 +33,10 @@ import logging
 import os
 import secrets
 import sys
+import tempfile
 import threading
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -48,6 +50,99 @@ FILENAME = 'tokens.json'
 TOKEN_PREFIX = 'ar_'
 # last_used пишется на диск не чаще раза в столько секунд на токен.
 _LAST_USED_PERSIST_SEC = 300
+# Защита от совпадения всех полей stat: читаем маленький файл не чаще раза в 100 мс.
+_TOKEN_HASH_CHECK_NS = 100_000_000
+_TOKEN_LOCK_TIMEOUT_SEC = 2.0
+_TOKEN_LOCK_POLL_SEC = 0.025
+_TOKEN_READ_RETRIES = 5
+_TOKEN_READ_RETRY_DELAY_SEC = 0.01
+# Суммарный бюджет пауз между повторными попытками чтения: по монотонным
+# часам, а не как сумма задержек, — чтобы даже сбои планировщика не
+# задерживали другие потоки и процессы дольше этого времени.
+_TOKEN_READ_RETRY_BUDGET_SEC = 0.1
+
+
+class _TokenFileLock:
+    """Межпроцессная блокировка рядом с tokens.json (Windows и POSIX).
+
+    В отличие от простого контекстного менеджера, блокировку можно отпустить
+    и взять заново (release/acquire): повторные попытки чтения файла
+    освобождают её на время паузы, чтобы другой писатель не ждал. При
+    wait=False повторный acquire так же не ждёт чужую блокировку."""
+
+    def __init__(self, path: Path, *, wait: bool = True):
+        self._path = path
+        self._wait = wait
+        self._stream = None
+
+    def acquire(self) -> None:
+        lock_path = self._path.with_name(self._path.name + '.lock')
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        stream = lock_path.open('a+b')
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b'0')
+                    stream.flush()
+                stream.seek(0)
+                deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
+                while True:
+                    try:
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if not self._wait or time.monotonic() >= deadline:
+                            raise TimeoutError(f'не удалось заблокировать файл токенов за '
+                                                f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
+                        time.sleep(_TOKEN_LOCK_POLL_SEC)
+            else:
+                import fcntl
+                deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
+                while True:
+                    try:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if not self._wait or time.monotonic() >= deadline:
+                            raise TimeoutError(f'не удалось заблокировать файл токенов за '
+                                                f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
+                        time.sleep(_TOKEN_LOCK_POLL_SEC)
+        except BaseException:
+            stream.close()
+            raise
+        self._stream = stream
+
+    def release(self) -> None:
+        stream = self._stream
+        self._stream = None
+        if stream is None:
+            return
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
+
+    def __enter__(self) -> '_TokenFileLock':
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        self.release()
+        return False
+
+
+def _token_file_lock(path: Path, *, wait: bool = True) -> _TokenFileLock:
+    """Межпроцессная блокировка рядом с tokens.json (Windows и POSIX)."""
+    return _TokenFileLock(path, wait=wait)
 
 
 @dataclass
@@ -71,43 +166,159 @@ class TokenStore:
     def __init__(self, data_dir: str | Path):
         self.path = Path(data_dir) / FILENAME
         self._lock = threading.Lock()
-        self._mtime = None
+        self._file_signature = None
+        self._content_hash = None
+        self._last_hash_check_ns = 0
         self._tokens: dict[str, TokenInfo] = {}       # id -> info
         self._by_hash: dict[str, TokenInfo] = {}
         self._last_persist: dict[str, float] = {}
+        self._broken = False
+        self._has_seen_file = False
+        self._ever_enabled = False
         self.license = LicenseStore(data_dir)
 
+    def initialize(self) -> None:
+        """Проверить файл при старте процесса, до запуска серверов."""
+        with self._lock:
+            self._reload(force=True)
+
     # ------------------------------------------------------------ чтение
-    def _reload(self) -> None:
-        try:
-            mtime = self.path.stat().st_mtime_ns
-        except FileNotFoundError:
-            mtime = None
-        if mtime == self._mtime:
-            return
-        tokens: dict[str, TokenInfo] = {}
-        if mtime is not None:
-            try:
-                raw = json.loads(self.path.read_text(encoding='utf-8') or '[]')
-                for item in raw:
-                    info = TokenInfo(**{k: item.get(k, '') for k in TokenInfo.__dataclass_fields__})
-                    if info.role in ROLES and info.hash:
-                        tokens[info.id] = info
-            except (OSError, ValueError, TypeError) as e:
-                # Повреждённый файл не должен открыть сервер: токены есть, но
-                # не читаются — авторизация остаётся включённой, вход только
-                # после исправления файла.
-                logger.error('Токены: не прочитан %s (%s) — доступ закрыт', self.path, e)
-                self._tokens, self._by_hash, self._mtime = {}, {}, mtime
-                self._last_persist.clear()
-                self._broken = True
+    def _reload(self, *, force: bool = False,
+                file_lock: _TokenFileLock | None = None) -> None:
+        """Перечитать файл токенов, повторяя при краткой ошибке чтения Windows.
+
+        Вызывается под self._lock (и, если передан file_lock, под файловой
+        блокировкой). Пауза между попытками выполняется вне обеих блокировок —
+        другой писатель в это время работает, — а повтор начинается с их
+        повторного взятия. Суммарная пауза ограничена бюджетом
+        _TOKEN_READ_RETRY_BUDGET_SEC по монотонным часам; после
+        _TOKEN_READ_RETRIES неудачных попыток доступ закрывается (fail-closed).
+        """
+        deadline = time.monotonic() + _TOKEN_READ_RETRY_BUDGET_SEC
+        for attempt in range(_TOKEN_READ_RETRIES):
+            status, error = self._read_once(force=force or attempt > 0)
+            if status != 'retry':
                 return
+            if attempt + 1 >= _TOKEN_READ_RETRIES:
+                self._fail_closed(f'не удалось прочитать файл токенов: {error}')
+                return
+            # Пауза без блокировок; повтор — с их новым взятием. Порядок
+            # обратный взятию, чтобы не ждать чужую блокировку, держа свою.
+            self._lock.release()
+            try:
+                if file_lock is not None:
+                    file_lock.release()
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(_TOKEN_READ_RETRY_DELAY_SEC * (attempt + 1),
+                                       remaining))
+                finally:
+                    if file_lock is not None:
+                        file_lock.acquire()
+            finally:
+                self._lock.acquire()
+
+    def _read_once(self, *, force: bool) -> tuple[str, OSError | None]:
+        """Одна попытка перечитать файл.
+
+        Возвращает ('ok', None) — состояние обновлено (или доступ закрыт), —
+        либо ('retry', exc) при краткой ошибке чтения Windows, когда стоит
+        повторить попытку с паузой. Вызывается под self._lock."""
+        try:
+            stat = self.path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
+                         getattr(stat, 'st_ctime_ns', None))
+        except FileNotFoundError:
+            if self._has_seen_file or self._ever_enabled:
+                self._fail_closed('файл токенов исчез после запуска')
+            else:
+                self._tokens, self._by_hash = {}, {}
+                self._broken = False
+                self._remember_file(None, None)
+            return 'ok', None
+        except OSError as e:
+            self._fail_closed(f'не удалось проверить файл токенов: {e}')
+            return 'ok', None
+
+        now_ns = time.monotonic_ns()
+        if (not force and signature == self._file_signature
+                and now_ns - self._last_hash_check_ns < _TOKEN_HASH_CHECK_NS):
+            return 'ok', None
+
+        # Сверяем подпись до и после чтения: если файл сменился посреди чтения,
+        # повторяем попытку, чтобы хэш и кэш относились к одному содержимому.
+        for _ in range(_TOKEN_READ_RETRIES):
+            try:
+                content = self.path.read_bytes()
+                after = self.path.stat()
+            except PermissionError as e:
+                # Windows can briefly deny a read while another process replaces
+                # tokens.json. Retry only this transient sharing error; persistent
+                # access failures still fail closed after the retries are spent.
+                return 'retry', e
+            except OSError as e:
+                self._fail_closed(f'не удалось прочитать файл токенов: {e}')
+                return 'ok', None
+            after_signature = (after.st_mtime_ns, after.st_size, after.st_ino,
+                               getattr(after, 'st_ctime_ns', None))
+            if after_signature == signature:
+                break
+            signature = after_signature
+        else:
+            self._fail_closed('файл токенов постоянно меняется при чтении')
+            return 'ok', None
+
+        content_hash = hashlib.sha256(content).hexdigest()
+        self._last_hash_check_ns = now_ns
+        if signature == self._file_signature and content_hash == self._content_hash:
+            return 'ok', None
+        try:
+            if not content:
+                raise ValueError('пустой файл')
+            raw = json.loads(content.decode('utf-8'))
+            if not isinstance(raw, list):
+                raise ValueError('ожидался список токенов')
+            tokens: dict[str, TokenInfo] = {}
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise ValueError('запись токена должна быть объектом')
+                values = {k: item.get(k, '') for k in TokenInfo.__dataclass_fields__}
+                if (not all(isinstance(v, str) for v in values.values())
+                        or not values['id'] or values['role'] not in ROLES
+                        or len(values['hash']) != 64
+                        or any(c not in '0123456789abcdef' for c in values['hash'])):
+                    raise ValueError('некорректная запись токена')
+                info = TokenInfo(**values)
+                if info.id in tokens or info.hash in {t.hash for t in tokens.values()}:
+                    raise ValueError('повторяется id или хэш токена')
+                tokens[info.id] = info
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as e:
+            self._fail_closed(f'повреждён файл токенов: {e}', signature, content_hash)
+            return 'ok', None
+
+        self._has_seen_file = True
+        self._ever_enabled = self._ever_enabled or bool(tokens)
         self._broken = False
         self._tokens = tokens
         self._by_hash = {t.hash: t for t in tokens.values()}
         self._last_persist = {token_id: ts for token_id, ts in self._last_persist.items()
                               if token_id in tokens}
-        self._mtime = mtime
+        self._remember_file(signature, content_hash)
+        return 'ok', None
+
+    def _fail_closed(self, reason: str, signature=None, content_hash=None) -> None:
+        logger.warning('Токены: %s (%s) — доступ закрыт', self.path, reason)
+        self._tokens, self._by_hash = {}, {}
+        self._last_persist.clear()
+        self._broken = True
+        self._has_seen_file = True
+        self._remember_file(signature, content_hash)
+
+    def _remember_file(self, signature, content_hash) -> None:
+        self._file_signature = signature
+        self._content_hash = content_hash
+        self._last_hash_check_ns = time.monotonic_ns()
 
     def enabled(self) -> bool:
         """Авторизация включена: есть хотя бы один токен (или файл токенов
@@ -151,25 +362,75 @@ class TokenStore:
             info = self._by_hash.get(_hash(token.strip()))
             if info is None:
                 return None
-            now = datetime.now()
-            info.last_used = now.isoformat(timespec='seconds')
-            ts = now.timestamp()
-            if ts - self._last_persist.get(info.id, 0) > _LAST_USED_PERSIST_SEC:
-                self._last_persist[info.id] = ts
-                self._save()
-            return info
+            ts = time.time()
+            if ts - self._last_persist.get(info.id, 0) <= _LAST_USED_PERSIST_SEC:
+                return info
+            token_id = info.id
+        try:
+            # Обновление last_used — best effort. Не задерживаем запрос, если
+            # другой процесс сейчас меняет токены; на время пауз между
+            # попытками чтения блокировки отпускаются.
+            with _token_file_lock(self.path, wait=False) as file_lock:
+                with self._lock:
+                    self._reload(force=True, file_lock=file_lock)
+                    info = self._by_hash.get(_hash(token.strip()))
+                    if info is None:
+                        return None
+                    now = datetime.now()
+                    candidate = {key: replace(value) for key, value in self._tokens.items()}
+                    updated = replace(candidate[info.id],
+                                      last_used=now.isoformat(timespec='seconds'))
+                    candidate[info.id] = updated
+                    self._save(candidate)
+                    self._publish(candidate)
+                    self._last_persist[info.id] = now.timestamp()
+                    return updated
+        except TimeoutError as e:
+            # Даже если запись пропущена из-за занятой блокировки, решение
+            # принимается по повторно сверенной версии файла.
+            logger.debug('Токены: пропущено обновление last_used для %s (%s)', token_id, e)
+        except OSError as e:
+            # last_used — только статистика; ошибка записи не отменяет вход.
+            logger.warning('Токены: не удалось обновить last_used для %s (%s)', token_id, e)
+        with self._lock:
+            self._reload(force=True)
+            return self._by_hash.get(_hash(token.strip()))
 
     # ------------------------------------------------------------ запись
-    def _save(self) -> None:
+    def _save(self, tokens: dict[str, TokenInfo] | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix('.json.tmp')
-        tmp.write_text(json.dumps([asdict(t) for t in self._tokens.values()],
-                                  ensure_ascii=False, indent=2), encoding='utf-8')
-        replace_with_retry(tmp, self.path)     # Windows: файл занят антивирусом
+        tokens = self._tokens if tokens is None else tokens
+        content = json.dumps([asdict(t) for t in tokens.values()],
+                             ensure_ascii=False, indent=2).encode('utf-8')
+        fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + '.', suffix='.tmp',
+                                        dir=self.path.parent)
         try:
-            self._mtime = self.path.stat().st_mtime_ns
-        except FileNotFoundError:
-            self._mtime = None
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(content)
+                stream.flush()
+            replace_with_retry(tmp_name, self.path)  # повтор при краткой блокировке Windows
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+        stat = self.path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
+                     getattr(stat, 'st_ctime_ns', None))
+        # Хэш соответствует именно сериализованным в памяти токенам. Если
+        # внешний писатель успел заменить файл, следующая сверка обнаружит
+        # несовпадение его содержимого с этим хэшем.
+        content_hash = hashlib.sha256(content).hexdigest()
+        self._remember_file(signature, content_hash)
+        self._has_seen_file = True
+        self._ever_enabled = self._ever_enabled or bool(tokens)
+
+    def _publish(self, tokens: dict[str, TokenInfo]) -> None:
+        """Опубликовать только после успешной атомарной записи файла."""
+        self._tokens = tokens
+        self._by_hash = {t.hash: t for t in tokens.values()}
+        self._last_persist = {token_id: ts for token_id, ts in self._last_persist.items()
+                              if token_id in tokens}
 
     def create(self, name: str, role: str = 'user') -> tuple[TokenInfo, str]:
         """Новый токен: (запись, сам токен — показать один раз)."""
@@ -179,35 +440,41 @@ class TokenStore:
         if role not in ROLES:
             raise ValueError(f'Роль — одна из: {", ".join(ROLES)}')
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
-        with self._lock:
-            self._reload()
-            if getattr(self, '_broken', False):
-                raise ValueError(f'Файл токенов {self.path} повреждён — исправьте или удалите его')
-            limit = self.limit()
-            if len(self._tokens) >= limit:
-                state = self.license.state()
-                raise ValueError(
-                    'Без лицензии командного режима — один токен (закрыть свой сервер). '
-                    'Чтобы выдать токены команде, установите ключ на странице «Лицензия».'
-                    if not state.valid else
-                    f'Лицензия «{state.info.owner}» — на {limit} токенов, все заняты: '
-                    f'отзовите ненужный или расширьте лицензию.')
-            info = TokenInfo(id=secrets.token_hex(4), name=name, role=role, hash=_hash(token),
-                             created_at=datetime.now().isoformat(timespec='seconds'))
-            self._tokens[info.id] = info
-            self._by_hash[info.hash] = info
-            self._save()
+        with _token_file_lock(self.path) as file_lock:
+            with self._lock:
+                self._reload(force=True, file_lock=file_lock)
+                if self._broken:
+                    raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
+                limit = self.limit()
+                if len(self._tokens) >= limit:
+                    state = self.license.state()
+                    raise ValueError(
+                        'Без лицензии командного режима — один токен (закрыть свой сервер). '
+                        'Чтобы выдать токены команде, установите ключ на странице «Лицензия».'
+                        if not state.valid else
+                        f'Лицензия «{state.info.owner}» — на {limit} токенов, все заняты: '
+                        f'отзовите ненужный или расширьте лицензию.')
+                info = TokenInfo(id=secrets.token_hex(4), name=name, role=role, hash=_hash(token),
+                                 created_at=datetime.now().isoformat(timespec='seconds'))
+                candidate = {key: replace(value) for key, value in self._tokens.items()}
+                candidate[info.id] = info
+                self._save(candidate)
+                self._publish(candidate)
         return info, token
 
     def revoke(self, token_id: str) -> TokenInfo:
-        with self._lock:
-            self._reload()
-            info = self._tokens.pop(token_id, None)
-            if info is None:
-                raise KeyError(token_id)
-            self._by_hash.pop(info.hash, None)
-            self._last_persist.pop(token_id, None)
-            self._save()
+        with _token_file_lock(self.path) as file_lock:
+            with self._lock:
+                self._reload(force=True, file_lock=file_lock)
+                if self._broken:
+                    raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
+                info = self._tokens.get(token_id)
+                if info is None:
+                    raise KeyError(token_id)
+                candidate = {key: replace(value) for key, value in self._tokens.items()
+                             if key != token_id}
+                self._save(candidate)
+                self._publish(candidate)
         return info
 
 
