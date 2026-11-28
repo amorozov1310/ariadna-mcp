@@ -1,6 +1,6 @@
 """Tests for ProjectManager."""
 
-import sys, os, shutil, json
+import sys, os, shutil, json, subprocess, time
 from threading import Event, Thread
 from pathlib import Path
 import pytest
@@ -188,6 +188,51 @@ def test_registration_waits_until_project_file_cleanup_finishes(tmp_path, monkey
     assert pm.get_project('race').name == 'New'
     assert project_dir.is_dir()
     pm.close_all()
+
+
+def test_other_process_registration_waits_for_project_deletion(tmp_path, monkeypatch):
+    from src.core import project_manager as project_manager_module
+
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('candidate', 'Candidate')
+    candidate_dir = pm.projects_dir / 'candidate'
+    entered_delete, finish_delete = Event(), Event()
+    original = project_manager_module.remove_path_safely
+
+    def paused(path, *args, **kwargs):
+        if Path(path) == candidate_dir and kwargs.get('recursive', True):
+            entered_delete.set()
+            assert finish_delete.wait(10)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(project_manager_module, 'remove_path_safely', paused)
+    deleting = Thread(target=pm.delete_project, args=('candidate',))
+    deleting.start()
+    child = None
+    try:
+        assert entered_delete.wait(5)
+        code = ("from src.core.project_manager import ProjectManager; "
+                "pm=ProjectManager(r'" + str(tmp_path) + "'); "
+                "pm.create_project('foreign', 'Foreign'); print('registered', flush=True); "
+                "pm.close_all()")
+        child = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        time.sleep(0.3)
+        assert child.poll() is None
+        finish_delete.set()
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 0, stderr
+        assert 'registered' in stdout
+        deleting.join(10)
+        assert not deleting.is_alive()
+        assert [project.id for project in pm.list_projects()] == ['foreign']
+    finally:
+        finish_delete.set()
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
+        deleting.join(10)
+        pm.close_all()
 
 
 def test_source_ids_are_safe_and_casefold_unique(tmp_path):
