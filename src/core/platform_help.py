@@ -76,7 +76,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .code_fingerprints import bundled_fingerprints
-from .fsretry import replace_with_retry, retry_on_permission_error
+from .fsretry import replace_with_retry
+from .fs_safety import remove_path_safely
 from .metadata_model import OBJECT_TYPE_MAP
 
 logger = logging.getLogger('ariadna')
@@ -1261,10 +1262,11 @@ class PlatformHelpStore:
             if version in self._building:
                 raise ValueError(f'справка {version} сейчас строится')
             existed = path.is_file()
-            retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+            trusted_root = self.root.parent.parent
+            remove_path_safely(path, trusted_root, recursive=False)
             self._errors.pop(version, None)
             if path.parent.is_dir() and not any(path.parent.iterdir()):
-                path.parent.rmdir()
+                remove_path_safely(path.parent, trusted_root, recursive=False)
             return existed
 
     def _skip_auto_build(self, version: str, previous: dict | None) -> bool:

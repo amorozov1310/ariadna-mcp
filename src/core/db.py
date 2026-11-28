@@ -12,6 +12,9 @@ import zlib
 from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime
+from pathlib import Path
+
+from .fs_safety import remove_path_safely
 
 READER_IDLE_SEC = float(os.environ.get('ARIADNA_READER_IDLE_SEC', '60'))
 
@@ -833,9 +836,8 @@ class Database:
             with open(self.rebuild_marker_path, 'w', encoding='utf-8') as marker:
                 marker.write('Index schema changed; rebuild from XML sources is required.\n')
             for suffix in ('', '-wal', '-shm'):
-                path = self.db_path + suffix
-                if os.path.exists(path):
-                    os.remove(path)
+                path = Path(self.db_path + suffix)
+                remove_path_safely(path, path.parent.parent, recursive=False)
             self.stale_schema_recreated = True
 
     @property
@@ -843,10 +845,8 @@ class Database:
         return os.path.exists(self.rebuild_marker_path)
 
     def clear_rebuild_marker(self) -> None:
-        try:
-            os.remove(self.rebuild_marker_path)
-        except FileNotFoundError:
-            pass
+        path = Path(self.rebuild_marker_path)
+        remove_path_safely(path, path.parent.parent, recursive=False)
 
     def init_schema(self):
         with self._schema_lock:

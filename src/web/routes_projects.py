@@ -41,7 +41,7 @@ def _back(project_id: str, next_url: str = '') -> str:
 
 @router.post("/api/projects")
 async def project_create(
-    project_id: str = Form(...),
+    project_id: str = Form(''),
     name: str = Form(...),
     description: str = Form(''),
 ):
@@ -343,6 +343,8 @@ async def delete_project(project_id: str):
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except ProjectFilesNotRemovedError as e:
         raise HTTPException(500, f"Не удалось удалить проект до конца: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     except KeyError as e:
         raise HTTPException(404, str(e))
     if not deleted:
@@ -359,6 +361,8 @@ async def delete_project_post(project_id: str):
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except ProjectFilesNotRemovedError as e:
         raise HTTPException(500, f"Не удалось удалить проект до конца: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     except KeyError as e:
         raise HTTPException(404, str(e))
     return RedirectResponse("/", status_code=303)

@@ -1,18 +1,31 @@
 """Безопасное удаление файлов и каталогов в пределах разрешённого корня."""
 
 import os
+import stat
 from pathlib import Path
 
 from .fsretry import retry_on_permission_error, rmtree_with_retry
 
 
 def _is_junction(path: Path) -> bool:
-    checker = getattr(os.path, 'isjunction', None)
-    return bool(checker and checker(path))
+    """Определить junction/reparse point одинаково в Python 3.11 и новее."""
+    try:
+        info = os.lstat(path)
+        attrs = info.st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    if not attrs & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400) or not stat.S_ISDIR(info.st_mode):
+        return False
+    # Directory symlinks are reparse points too. Only mount-point tags are
+    # junctions and require rmdir; without the tag, retain the 3.11-compatible
+    # directory-reparse fallback.
+    tag = getattr(info, 'st_reparse_tag', None)
+    mount_point = getattr(stat, 'IO_REPARSE_TAG_MOUNT_POINT', 0xA0000003)
+    return tag == mount_point if tag is not None else True
 
 
 def is_link_like(path: Path) -> bool:
-    """True для symlink и Windows junction (если поддерживается Python)."""
+    """True для symlink, junction и других reparse points, включая Python 3.11."""
     return path.is_symlink() or _is_junction(path)
 
 
@@ -46,6 +59,10 @@ def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True
     """Удалить объект внутри корня; внешнюю ссылку удалить только как ссылку.
 
     Возвращает False, если путь отсутствует или его расположение небезопасно.
+
+    Проверка пути и последующее удаление не атомарны. Процесс с правом менять
+    каталоги может подменить компонент между ними (TOCTOU); защита рассчитана
+    на недоверенные ссылки в дереве, а не на гонку с враждебным процессом.
     """
     path, allowed_root = Path(path), Path(allowed_root)
     if not _lexically_within(path, allowed_root):
@@ -72,9 +89,10 @@ def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True
     if not path.exists():
         return True
     if path.is_dir():
-        if not recursive:
-            return False
-        rmtree_with_retry(path)
+        if recursive:
+            rmtree_with_retry(path)
+        else:
+            retry_on_permission_error(lambda: path.rmdir())
     else:
         retry_on_permission_error(lambda: path.unlink(missing_ok=True))
     return True

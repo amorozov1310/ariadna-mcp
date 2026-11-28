@@ -152,12 +152,24 @@ def test_project_ids_are_casefold_unique_and_bounded(tmp_path):
 @pytest.mark.parametrize('project_id', [
     'CON', 'prn', 'AUX', 'nul', 'com1', 'COM9', 'lpt1', 'LPT9',
     'con.txt', 'NUL.log', 'com1.anything', 'lpt9.', 'AUX ',
+    'COM¹', 'COM²', 'COM³', 'LPT¹', 'LPT²', 'LPT³',
+    'com¹.txt', 'LPT².log', 'COM³.', 'lpt¹ ',
 ])
 def test_windows_reserved_project_ids_are_rejected(tmp_path, project_id):
     pm = ProjectManager(str(tmp_path))
     try:
         with pytest.raises(ValueError, match='reserved by Windows'):
             pm.create_project(project_id, project_id)
+    finally:
+        pm.close_all()
+
+
+@pytest.mark.parametrize('project_id', ['COM0', 'LPT0', 'COM10', 'LPT10', 'COM⁴', 'LPT⁴'])
+def test_non_reserved_windows_device_name_edges_remain_valid(tmp_path, project_id):
+    pm = ProjectManager(str(tmp_path))
+    try:
+        pm.create_project(project_id, project_id)
+        assert pm.delete_project(project_id) is True
     finally:
         pm.close_all()
 
@@ -174,6 +186,38 @@ def test_web_rejects_windows_reserved_project_id_as_bad_request(tmp_path, monkey
             'project_id': 'NUL', 'name': 'Reserved', 'description': ''})
         assert response.status_code == 400
         assert 'reserved by Windows' in response.json()['detail']
+    finally:
+        pm.close_all()
+
+
+def test_web_returns_clear_400_for_empty_project_id(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    pm = ProjectManager(str(tmp_path))
+    monkeypatch.setattr(app_module, '_pm', pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        response = client.post('/api/projects', data={'project_id': '', 'name': 'Empty'})
+        assert response.status_code == 400
+        assert 'Invalid project_id' in response.json()['detail']
+    finally:
+        pm.close_all()
+
+
+@pytest.mark.parametrize('project_id', ['NUL', 'COM1.', 'PROGRA~1'])
+@pytest.mark.parametrize('method', ['delete', 'post'])
+def test_web_project_deletion_id_validation_is_400(tmp_path, monkeypatch, project_id, method):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    pm = ProjectManager(str(tmp_path))
+    monkeypatch.setattr(app_module, '_pm', pm)
+    try:
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        response = getattr(client, method)(f'/api/projects/{project_id}' + ('/delete' if method == 'post' else ''))
+        assert response.status_code == 400
+        assert 'Invalid project_id' in response.json()['detail'] or 'reserved by Windows' in response.json()['detail']
     finally:
         pm.close_all()
 

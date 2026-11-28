@@ -26,6 +26,7 @@ from . import parser_fingerprint
 from .archives import extract_archive
 from .db import Database, IndexRemovedError, READER_IDLE_SEC
 from .fsretry import replace_with_retry, rmtree_with_retry
+from .fs_safety import is_link_like, remove_path_safely
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
 from . import source_delta
@@ -45,6 +46,8 @@ _WINDOWS_RESERVED_NAMES = frozenset({
     'con', 'prn', 'aux', 'nul',
     *(f'com{i}' for i in range(1, 10)),
     *(f'lpt{i}' for i in range(1, 10)),
+    *(f'com{i}' for i in ('¹', '²', '³')),
+    *(f'lpt{i}' for i in ('¹', '²', '³')),
 })
 
 
@@ -321,22 +324,22 @@ class ProjectManager:
         for project in self._load_registry().values():
             from .platform_check import cleanup_report_temps, report_directory
             report_dir = report_directory(self._index_path(project.id))
-            cleanup_report_temps(report_dir, report_dir.parent.parent)
+            cleanup_report_temps(report_dir, self.index_dir or self.projects_dir)
             # Удалить незавершённые архивы старой раскладки и старого
             # открытого каталога reports/<id>, оставшихся после обновления.
             legacy_report_dir = self._legacy_report_directory(project.id)
             cleanup_report_temps(legacy_report_dir, service_root)
             try:
-                legacy_report_dir.rmdir()
+                remove_path_safely(legacy_report_dir, service_root, recursive=False)
             except OSError:
                 pass
             old_index_parent = self._index_path(project.id).parent
             if old_index_parent != self.platform_help.root and old_index_parent != (
                     (self.index_dir or self.data_dir) / 'reports'):
-                cleanup_report_temps(old_index_parent, old_index_parent.parent)
+                cleanup_report_temps(old_index_parent, self.index_dir or self.projects_dir)
             legacy_index_parent = self._index_path(project.id, legacy=True).parent
             if legacy_index_parent != old_index_parent:
-                cleanup_report_temps(legacy_index_parent, legacy_index_parent.parent)
+                cleanup_report_temps(legacy_index_parent, self.projects_dir)
             for source in project.sources:
                 local_root = self.projects_dir / project.id / 'sources' / source.id / 'xml'
                 root = self.get_source_xml_path(project.id, source.id) or local_root
@@ -349,7 +352,7 @@ class ProjectManager:
         if not any(project.id.casefold() == 'reports'
                    for project in self._load_registry().values()):
             try:
-                old_reports_root.rmdir()
+                remove_path_safely(old_reports_root, service_root, recursive=False)
             except OSError:
                 pass
 
@@ -765,6 +768,7 @@ class ProjectManager:
         legacy_report_dir = self._legacy_report_directory(project_id)
         service_root = self.index_dir or self.data_dir
         service_reports_root = service_root / 'reports'
+        report_dir = current_index_root / '.ariadna-service' / 'reports' / project_id
         project_index_path = _resolved_path(index_parent)
         with self._registry_lock():
             registry = self._load_registry()
@@ -784,9 +788,9 @@ class ProjectManager:
                                  f"с каталогом проекта '{conflicting}'. Исправьте projects.json.")
             if registry.pop(project_id, None) is not None:
                 self._save_registry()
-            elif not any(path.exists() or path.is_symlink() or
-                         bool(getattr(os.path, 'isjunction', lambda _: False)(path))
-                         for path in (project_dir, index_parent, legacy_report_dir)):
+            elif not any(path.exists() or is_link_like(path)
+                         for path in (project_dir, index_parent, legacy_report_dir,
+                                      report_dir)):
                 return False
 
         with self._db_pins_changed:
@@ -803,8 +807,7 @@ class ProjectManager:
         self._forget_project_resources(project_id)
 
         from .platform_check import cleanup_report_temps, forget_report_project, report_directory
-        from .fs_safety import directory_is_safe, is_link_like, remove_path_safely
-        report_dir = report_directory(self._index_path(project_id))
+        from .fs_safety import directory_is_safe
         forget_report_project(self._index_path(project_id))
         # Старая раскладка хранила архивы в reports/<id> (а ещё раньше —
         # рядом с index.db). Удаляем незаконченные файлы и готовые архивы в
@@ -834,7 +837,7 @@ class ProjectManager:
         roots = {project_dir: self.projects_dir,
                  index_parent: current_index_root,
                  legacy_report_dir: service_root,
-                 report_dir: report_dir.parent.parent}
+                 report_dir: current_index_root}
         for path in dict.fromkeys(candidates):
             if not path.exists() and not is_link_like(path):
                 continue
@@ -885,7 +888,7 @@ class ProjectManager:
 
         # Удалить пустую старую общую папку после очистки последнего проекта.
         try:
-            service_reports_root.rmdir()
+            remove_path_safely(service_reports_root, service_root, recursive=False)
         except OSError:
             pass
 

@@ -733,7 +733,9 @@ def _unlink_archive(path, allowed_root=None):
     до следующего прохода, не прерывая очистку остальных."""
     try:
         path = Path(path)
-        allowed_root = Path(allowed_root) if allowed_root is not None else path.parent.parent.parent
+        # Для нового пути отчётов trusted root — каталог индексов, а не
+        # .ariadna-service: последний может оказаться junction наружу.
+        allowed_root = Path(allowed_root) if allowed_root is not None else path.parents[3]
         if not directory_is_safe(path.parent, allowed_root):
             logger.warning('Пропускаю очистку архива вне безопасного каталога: %s', path)
             return
@@ -746,7 +748,7 @@ def _unlink_archive(path, allowed_root=None):
 def prune_report_archives(db_path, keep=()):
     """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
     directory = _report_directory(db_path)
-    allowed_root = directory.parent.parent
+    allowed_root = Path(db_path).parent.parent
     if not directory_is_safe(directory, allowed_root):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
         return
@@ -1014,7 +1016,7 @@ class _Report:
                         _record_report_archive(path, version)
                     _trim_archives(path)
             finally:
-                temp.unlink(missing_ok=True)
+                remove_path_safely(temp, path.parents[3], recursive=False)
         except OSError:
             logger.warning('Не удалось сохранить кэш диагностики %s', path, exc_info=True)
             return False

@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from src.core import project_manager as pm_module
+from src.core.fs_safety import is_link_like
 from src.core.project_manager import ProjectFilesNotRemovedError, ProjectManager
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -90,6 +91,37 @@ def test_failed_file_removal_reports_path_and_retry_cleans_up(monkeypatch):
             pm.close_all()
 
 
+def test_retry_after_report_archive_removal_failure_cleans_unregistered_project(monkeypatch, tmp_path):
+    data_dir = tmp_path / 'data'
+    pm = ProjectManager(str(data_dir))
+    pm.create_project('p', 'p')
+    from src.core.platform_check import report_directory
+    report_dir = report_directory(pm._index_path('p'))
+    report_dir.mkdir(parents=True)
+    archive = report_dir / 'platform-check.zip'
+    archive.write_bytes(b'archive')
+    real_remove = pm_module.remove_path_safely
+    fail_once = {True}
+
+    def busy_report(path, *args, **kwargs):
+        if Path(path) == report_dir and fail_once:
+            fail_once.clear()
+            raise PermissionError(13, 'файл занят другим процессом', str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(pm_module, 'remove_path_safely', busy_report)
+    try:
+        with pytest.raises(ProjectFilesNotRemovedError):
+            pm.delete_project('p')
+        assert 'p' not in [project.id for project in pm.list_projects()]
+        assert archive.exists()
+        assert pm.delete_project('p') is True
+        assert not report_dir.exists()
+        assert not archive.exists()
+    finally:
+        pm.close_all()
+
+
 def test_web_ui_reports_failed_removal_as_500(monkeypatch):
     from fastapi.testclient import TestClient
     from src.web import app as app_module
@@ -131,7 +163,9 @@ def test_delete_does_not_follow_project_symlink(tmp_path):
         try:
             project_dir.symlink_to(outside, target_is_directory=True)
         except (OSError, NotImplementedError) as exc:
-            pytest.skip(f'directory symlinks are unavailable: {exc}')
+            if os.name not in {'nt', 'posix'}:
+                pytest.skip(f'directory symlinks are unsupported: {exc}')
+            pytest.fail(f'directory symlink creation failed on supported platform: {exc}')
 
         assert pm.delete_project('p') is True
         assert not project_dir.is_symlink()
@@ -160,7 +194,9 @@ def test_startup_report_temp_cleanup_does_not_follow_symlink(tmp_path):
     try:
         report_dir.symlink_to(outside, target_is_directory=True)
     except (OSError, NotImplementedError) as exc:
-        pytest.skip(f'directory symlinks are unavailable: {exc}')
+        if os.name not in {'nt', 'posix'}:
+            pytest.skip(f'directory symlinks are unsupported: {exc}')
+        pytest.fail(f'directory symlink creation failed on supported platform: {exc}')
 
     restarted = ProjectManager(str(data_dir))
     try:
@@ -194,7 +230,9 @@ def test_delete_skips_report_path_resolved_outside_service_root(tmp_path):
     try:
         report_dir.parent.symlink_to(outside_reports, target_is_directory=True)
     except (OSError, NotImplementedError) as exc:
-        pytest.skip(f'directory symlinks are unavailable: {exc}')
+        if os.name not in {'nt', 'posix'}:
+            pytest.skip(f'directory symlinks are unsupported: {exc}')
+        pytest.fail(f'directory symlink creation failed on supported platform: {exc}')
 
     restarted = ProjectManager(str(data_dir))
     try:
@@ -241,9 +279,9 @@ def test_delete_does_not_follow_project_junction(tmp_path):
         result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(project_dir), str(outside)],
                                 capture_output=True, text=True)
         if result.returncode:
-            pytest.skip(f'junction creation is unavailable: {result.stderr or result.stdout}')
+            pytest.fail(f'junction creation failed on Windows: {result.stderr or result.stdout}')
 
-        assert os.path.isjunction(project_dir)
+        assert is_link_like(project_dir)
         assert pm.delete_project('p') is True
         assert not os.path.lexists(project_dir)
         assert sorted(p.name for p in outside.iterdir()) == [
@@ -344,6 +382,36 @@ def test_get_db_for_unregistered_project_creates_nothing():
             assert not pm._index_path('нет-такого').exists()
         finally:
             pm.close_all()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows junction regression')
+def test_service_directory_junction_never_expands_trusted_root(tmp_path):
+    import subprocess
+
+    data_dir = tmp_path / 'data'
+    pm = ProjectManager(str(data_dir))
+    pm.create_project('p', 'p')
+    service_dir = pm._index_path('p').parent.parent / '.ariadna-service'
+    pm.close_all()
+
+    outside_service = tmp_path / 'outside-service'
+    outside_report = outside_service / 'reports' / 'p'
+    outside_report.mkdir(parents=True)
+    archive = outside_report / 'platform-check.zip'
+    archive.write_bytes(b'keep')
+    service_dir.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(service_dir), str(outside_service)],
+                            capture_output=True, text=True)
+    if result.returncode:
+        pytest.fail(f'junction creation failed on Windows: {result.stderr or result.stdout}')
+
+    restarted = ProjectManager(str(data_dir))
+    try:
+        assert restarted.delete_project('p') is True
+        assert archive.read_bytes() == b'keep'
+        assert is_link_like(service_dir)
+    finally:
+        restarted.close_all()
 
 
 @pytest.mark.parametrize('how', ['close', 'retire'])
