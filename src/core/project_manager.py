@@ -947,7 +947,8 @@ class ProjectManager:
 
         # Extract XML archive (проверка путей и пределов — src/core/archives.py)
         if xml_archive is not None:
-            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
+            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml',
+                            allowed_root=self.projects_dir / project_id)
             xml_path = f'sources/{source_id}/xml'
         elif (source_dir / 'xml').exists():
             xml_path = f'sources/{source_id}/xml'
@@ -1023,7 +1024,8 @@ class ProjectManager:
         if xml_archive is not None:
             # Старый xml/ заменяется целиком (без остатков прежних файлов) и
             # только после успешной проверки и распаковки нового архива.
-            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml')
+            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml',
+                            allowed_root=self.projects_dir / project_id)
             changes['xml_path'] = f'sources/{source_id}/xml'
             self._source_manifest_cache_path(project_id, source_id).unlink(missing_ok=True)
 
@@ -1105,7 +1107,11 @@ class ProjectManager:
             with source_delta.transaction_lock(workspace):
                 self._recover_source_delta(project_id, source_id, root, workspace, lock_held=True)
                 self._remove_source(project_id, source_id)
-                self._source_manifest_cache_path(project_id, source_id).unlink(missing_ok=True)
+                cache = self._source_manifest_cache_path(project_id, source_id)
+                result = remove_path_safely(cache, self.projects_dir / project_id, recursive=False)
+                if not result:
+                    logger.warning('Кэш манифеста источника %s/%s не удалён: %s',
+                                   project_id, source_id, result.reason)
             try:
                 workspace.rmdir()
             except OSError:
@@ -1730,6 +1736,16 @@ class ProjectManager:
         version = self.get_project(project_id).platform_version if project_id else ''
         return version or self.platform_help.newest()
 
+    def platform_report_roots(self, project_id: str) -> tuple[Path, ...]:
+        """Каталоги других зарегистрированных проектов — защита очистки архивов
+        отчётов. Общий корень индексов объединяет проекты, и без этого списка
+        ссылка между каталогами двух проектов внутри корня не распознаётся."""
+        current_index_root = self.index_dir or self.projects_dir
+        with self._registry_lock():
+            registry = self._load_registry()
+        return tuple(path for pid in registry if pid != project_id
+                     for path in (self.projects_dir / pid, current_index_root / pid))
+
     def sync_platform_help(self) -> None:
         """Запустить поиск и построение справки установленной платформы."""
         sync = partial(self.platform_help.sync_installed, default_search_roots(), background=False)
@@ -1784,7 +1800,8 @@ class ProjectManager:
                         engine = self.get_search(project.id)
                         try:
                             warm_ready_report(engine, index, self.platform_mode(project.id), project.id,
-                                              project_pin=self.project_pin)
+                                              project_pin=self.project_pin,
+                                              protected_roots=self.platform_report_roots(project.id))
                         finally:
                             engine.db.close_thread_reader()
                 except KeyError:
@@ -2542,7 +2559,8 @@ class ProjectManager:
                         try:
                             with engine.db.read_lease():
                                 key = warm_report(engine, index, self.platform_mode(project_id),
-                                                  ready_at, warmed_key)
+                                                  ready_at, warmed_key,
+                                                  protected_roots=self.platform_report_roots(project_id))
                         finally:
                             engine.db.close_thread_reader()
                     if key is None or key == warmed_key:
@@ -2556,7 +2574,8 @@ class ProjectManager:
                     break
 
             try:
-                prune_report_archives(db.db_path, keep=warmed_keys)
+                prune_report_archives(db.db_path, keep=warmed_keys,
+                                      protected_roots=self.platform_report_roots(project_id))
             except OSError:
                 logger.exception('Проект %s: не удалось удалить архивы предыдущего индекса', project_id)
 
@@ -2575,7 +2594,8 @@ class ProjectManager:
                 if index is not None:
                     with self.project_pin(project_id):
                         warm_ready_report(self.get_search(project_id), index, self.platform_mode(project_id),
-                                          project_id, warmed_key, project_pin=self.project_pin)
+                                          project_id, warmed_key, project_pin=self.project_pin,
+                                          protected_roots=self.platform_report_roots(project_id))
             except FileNotFoundError:
                 pass  # Удаление справки запускает свой прогрев после смены версии.
             except Exception:

@@ -278,6 +278,54 @@ def test_recover_cleans_staging_and_created_empty_directories(tmp_path):
     assert not (root / "new-parent").exists()
 
 
+def test_recover_reports_failure_when_committed_backup_is_held(tmp_path, monkeypatch):
+    """Удерживаемый файл резервной копии завершённой транзакции: recover()
+    не сообщает об успехе, журнал остаётся, повтор дочищает."""
+    import shutil
+
+    from src.core import fsretry
+
+    root = tmp_path / "xml"
+    root.mkdir()
+    workspace = tmp_path / "state"
+    workspace.mkdir()
+    backup = workspace / "rollback"
+    backup.mkdir()
+    held = backup / "held.xml"
+    held.write_bytes(b"x")
+    journal = source_delta._journal_path(workspace)
+    source_delta._atomic_json(journal, {
+        "backup": str(backup), "staging": None, "old": [], "new": [],
+        "created_dirs": [], "removed_dirs": [], "committed": True,
+    })
+    # Повторы лишь задержат тот же отказ; оставляем сам отказ.
+    monkeypatch.setattr(fsretry, 'retry_on_permission_error', lambda fn: fn())
+    real_rmtree = shutil.rmtree
+    if os.name == "nt":
+        handle = held.open("r+b")  # без FILE_SHARE_DELETE — удаление падает
+    else:
+
+        def busy(path, *args, **kwargs):
+            if Path(path) == backup:
+                raise PermissionError(13, 'held', str(path))
+            return real_rmtree(path, *args, **kwargs)
+
+        handle = None
+        monkeypatch.setattr(shutil, 'rmtree', busy)
+    try:
+        assert source_delta.recover(root, workspace) is False
+        assert journal.exists()
+        assert held.exists()
+    finally:
+        if handle is not None:
+            handle.close()
+        else:
+            monkeypatch.setattr(shutil, 'rmtree', real_rmtree)
+    assert source_delta.recover(root, workspace) is True
+    assert not backup.exists()
+    assert not journal.exists()
+
+
 def test_directory_case_rename_uses_target_spelling(tmp_path):
     root = tmp_path / "xml"
     old_path = root / "OldParent" / "Nested" / "file.xml"

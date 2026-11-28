@@ -2112,3 +2112,67 @@ def test_busy_archive_does_not_stop_pruning(project, monkeypatch):
     platform_check.prune_report_archives(pm._index_path('demo'))
     assert busy.exists()
     assert not any(path.exists() for path in stale[1:])
+
+
+def test_prune_and_trim_respect_other_projects_inside_common_root(tmp_path):
+    """Два проекта в общем корне индексов: очистка архивов одного не трогает
+    файлы внутри каталога другого, даже когда ссылка в середине пути ведёт
+    каталог отчётов первого внутрь каталога второго."""
+    import subprocess
+
+    data, index = tmp_path / 'data', tmp_path / 'index'
+    index.mkdir(parents=True)
+    pm = ProjectManager(str(data), str(index))
+    try:
+        pm.create_project('a', 'a')
+        pm.create_project('b', 'b')
+        # Файл-жертва лежит в дереве проекта b; ссылка .ariadna-service в
+        # общем корне направляет каталог отчётов проекта a внутрь каталога b.
+        victim_dir = index / 'b' / '.ariadna-service' / 'reports' / 'a'
+        victim_dir.mkdir(parents=True)
+        victim = victim_dir / 'platform-check.zip'
+        victim.write_bytes(b'keep')
+        b_service = index / 'b' / '.ariadna-service'
+        service_link = index / '.ariadna-service'
+        if os.name == 'nt':
+            result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(service_link), str(b_service)],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                pytest.fail(f'junction creation failed on Windows: {result.stderr or result.stdout}')
+        else:
+            service_link.symlink_to(b_service, target_is_directory=True)
+        db_a = pm._index_path('a')
+        roots = pm.platform_report_roots('a')
+        # Без защищённых корней ссылка в середине пути не распознаётся и
+        # очистка проекта a удаляет файл внутри каталога проекта b.
+        assert platform_check.prune_report_archives(db_a)
+        assert not victim.exists()
+        victim.write_bytes(b'keep')
+        prune = platform_check.prune_report_archives(db_a, protected_roots=roots)
+        assert not prune and prune.reason == 'каталог архивов небезопасен'
+        assert victim.exists()
+        published = platform_check._archive_path(db_a, 'a' * 64)
+        trim = platform_check._trim_archives(published, protected_roots=roots)
+        assert not trim
+        assert victim.exists()
+    finally:
+        pm.close_all()
+
+
+def test_save_checks_directory_before_replacing_archive(project, monkeypatch):
+    """Отказ проверки каталога при публикации: прежний ZIP остаётся на месте,
+    а save() не сообщает об успехе."""
+    from array import array
+
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    path = _report_archive(pm)
+    before = path.read_bytes()
+    monkeypatch.setattr(platform_check, 'directory_is_safe', lambda *args, **kwargs: False)
+    report = platform_check._Report()
+    report.count = 0
+    report.starts = []
+    report.positions = {level: array('I') for level in platform_check.LEVELS}
+    report.blocks = []
+    assert report.save(path, 'key', before_replace=lambda: None) is False
+    assert path.read_bytes() == before

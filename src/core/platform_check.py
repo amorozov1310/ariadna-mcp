@@ -728,7 +728,7 @@ def _publish_lock(directory):
         return _PUBLISH_LOCKS.setdefault(directory, Lock())
 
 
-def _unlink_archive(path, allowed_root=None):
+def _unlink_archive(path, allowed_root=None, protected_roots=()):
     """Удалить архив; занятый (на Windows его может держать читатель) оставить
     до следующего прохода, не прерывая очистку остальных."""
     try:
@@ -736,23 +736,26 @@ def _unlink_archive(path, allowed_root=None):
         # Для нового пути отчётов trusted root — каталог индексов, а не
         # .ariadna-service: последний может оказаться junction наружу.
         allowed_root = Path(allowed_root) if allowed_root is not None else path.parents[3]
-        if not directory_is_safe(path.parent, allowed_root):
+        if not directory_is_safe(path.parent, allowed_root, protected_roots=protected_roots):
             logger.warning('Пропускаю очистку архива вне безопасного каталога: %s', path)
             return RemovalResult(False, 'каталог архива небезопасен')
-        if not remove_path_safely(path, allowed_root, recursive=False):
-            logger.warning('Пропускаю очистку архива вне разрешённого корня: %s', path)
-            return RemovalResult(False, 'архив вне разрешённого корня или не удалён')
+        result = remove_path_safely(path, allowed_root, recursive=False,
+                                    protected_roots=protected_roots)
+        if not result:
+            # Причина отказа доходит до ответа без подмены.
+            logger.warning('Пропускаю очистку архива: %s: %s', path, getattr(result, 'reason', None))
+            return RemovalResult(False, getattr(result, 'reason', None))
         return RemovalResult(True)
     except OSError:
         logger.info('Архив проверки платформы занят и не удалён: %s', path.name)
         return RemovalResult(False, 'архив занят')
 
 
-def prune_report_archives(db_path, keep=()):
+def prune_report_archives(db_path, keep=(), protected_roots=()):
     """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
     directory = _report_directory(db_path)
     allowed_root = Path(db_path).parent.parent
-    if not directory_is_safe(directory, allowed_root):
+    if not directory_is_safe(directory, allowed_root, protected_roots=protected_roots):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
         return RemovalResult(False, 'каталог архивов небезопасен')
     keep = {_archive_path(db_path, key).name for key in keep}
@@ -764,7 +767,7 @@ def prune_report_archives(db_path, keep=()):
         results = []
         for path in directory.glob('platform-check*.zip'):
             if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
-                results.append(_unlink_archive(path, allowed_root))
+                results.append(_unlink_archive(path, allowed_root, protected_roots))
         _sync_archive_registry(directory)
         return next((result for result in results if not result), RemovalResult(True))
 
@@ -791,7 +794,7 @@ def _sync_archive_registry(directory):
                 _ARCHIVE_RECENCY.pop(path, None)
 
 
-def _trim_archives(published):
+def _trim_archives(published, protected_roots=()):
     """После публикации оставить выбранную версию и самые свежие архивы в пределах лимита.
 
     Каждая смена справки (в том числе повторная загрузка той же версии) даёт
@@ -802,7 +805,7 @@ def _trim_archives(published):
     directory = published.parent
     # Корень индексов, а не промежуточный .ariadna-service.
     allowed_root = directory.parents[2]
-    if not directory_is_safe(directory, allowed_root):
+    if not directory_is_safe(directory, allowed_root, protected_roots=protected_roots):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
         return RemovalResult(False, 'каталог архивов небезопасен')
     with _REPORTS_LOCK:
@@ -834,7 +837,7 @@ def _trim_archives(published):
             current_selected = _SELECTED_ARCHIVES.get(directory.resolve())
         if path.name == current_selected:
             continue
-        results.append(_unlink_archive(path, allowed_root))
+        results.append(_unlink_archive(path, allowed_root, protected_roots))
     _sync_archive_registry(directory)
     return next((result for result in results if not result), RemovalResult(True))
 
@@ -1004,7 +1007,7 @@ class _Report:
         except (OSError, BadZipFile, KeyError, ValueError, TypeError, RuntimeError, zlib.error):
             logger.warning('Не удалось прочитать кэш диагностики %s', path, exc_info=True)
 
-    def save(self, path, key, before_replace, version=None):
+    def save(self, path, key, before_replace, version=None, protected_roots=()):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             # Временный файл расположен рядом: replace атомарен, а его
@@ -1022,12 +1025,19 @@ class _Report:
                         archive.writestr(f'blocks/{i}', block)
                 # Очистка при reindex ждёт замену файлов прошлого индекса.
                 with _publish_lock(path.parent):
+                    # Проверить каталог до замены ZIP: при отказе прежний архив
+                    # остаётся нетронутым, а save() не сообщает об успехе.
+                    # Тот же корень индексов, что в _trim_archives.
+                    if not directory_is_safe(path.parent, path.parent.parents[2],
+                                             protected_roots=protected_roots):
+                        logger.warning('Не публикую архив в небезопасном каталоге: %s', path)
+                        return False
                     before_replace()
                     replace_with_retry(temp, path)
                     self.archive_stamp = _stat_signature(path.stat())
                     if version is not None:
                         _record_report_archive(path, version)
-                    trim_result = _trim_archives(path)
+                    trim_result = _trim_archives(path, protected_roots)
                     if not trim_result:
                         logger.warning('Не удалось полностью очистить старые архивы в %s: %s',
                                        path.parent, trim_result.reason)
@@ -1167,7 +1177,7 @@ def _check_revision(engine, conn, index, mode, key, project_id):
 
 
 def _request_report(engine, index, mode, revision, project_id, *, warm=False, invalid=None,
-                    project_pin=None):
+                    project_pin=None, protected_roots=()):
     db = engine.db
     conn = db.read_conn()
     key = _cache_key(engine, index, mode, revision)
@@ -1222,7 +1232,8 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
                 report = _Report()
                 report._build(engine, reader, index, mode)
             if revision[1] == 'ready':
-                report.save(path, key, before_replace=verify, version=index.version)
+                report.save(path, key, before_replace=verify, version=index.version,
+                            protected_roots=protected_roots)
             verify()
             with _REPORTS_LOCK:
                 _remember(cache_id, report)
@@ -1271,7 +1282,7 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
     raise ReportUnavailable('Отчёт готовится. Повторите вызов через минуту-две.')
 
 
-def warm_report(engine, index, mode, ready_at, warmed_key=None):
+def warm_report(engine, index, mode, ready_at, warmed_key=None, protected_roots=()):
     """Подготовить снимок для состояния, которое reindex опубликует последним."""
     conn = engine.db.read_conn()
     if index_uses_old_parser(conn) or not conn.execute(
@@ -1290,11 +1301,12 @@ def warm_report(engine, index, mode, ready_at, warmed_key=None):
             raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
     if report.save(_archive_path(engine.db.db_path, key), key, before_replace=verify,
-                   version=index.version):
+                   version=index.version, protected_roots=protected_roots):
         return key
 
 
-def warm_ready_report(engine, index, mode, project_id, warmed_key=None, *, project_pin=None):
+def warm_ready_report(engine, index, mode, project_id, warmed_key=None, *, project_pin=None,
+                      protected_roots=()):
     conn = engine.db.read_conn()
     try:
         revision = check_index(conn, project_id)
@@ -1303,21 +1315,21 @@ def warm_ready_report(engine, index, mode, project_id, warmed_key=None, *, proje
             if warmed_key is not None and warmed_key == _cache_key(engine, index, mode, revision):
                 return
             _request_report(engine, index, mode, revision, project_id, warm=True,
-                            project_pin=project_pin)
+                            project_pin=project_pin, protected_roots=protected_roots)
     except ReportUnavailable:
         pass  # Уже готовится либо сообщение будет выдано при запросе отчёта.
 
 
 def check_calls(engine, index, mode, source_id, limit, offset, levels, project_id, revision, *,
-                project_pin=None):
+                project_pin=None, protected_roots=()):
     """Страница замечаний и счётчики всего снимка в устойчивом порядке исходников."""
     key, report = _request_report(engine, index, mode, revision, project_id,
-                                  project_pin=project_pin)
+                                  project_pin=project_pin, protected_roots=protected_roots)
     try:
         page = report.page(source_id, limit, offset, levels)
     except (IndexError, ValueError, zlib.error):
         key, report = _request_report(engine, index, mode, revision, project_id, invalid=report,
-                                      project_pin=project_pin)
+                                      project_pin=project_pin, protected_roots=protected_roots)
         page = report.page(source_id, limit, offset, levels)
     conn = engine.db.read_conn()
     _check_revision(engine, conn, index, mode, key, project_id)

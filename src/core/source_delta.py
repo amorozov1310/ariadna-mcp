@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -21,6 +22,8 @@ MAX_ENTRIES = 250_000
 MAX_PATH = 1024
 MAX_UNPACKED = 32 * 1024**3
 SUSPICIOUS_DELETE_FLOOR = 1000
+
+logger = logging.getLogger('ariadna')
 
 
 def _checkpoint(_name: str) -> None:
@@ -331,9 +334,15 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
     backup = Path(data["backup"])
     staging = Path(data["staging"]) if data.get("staging") else None
     if data.get("committed"):
-        shutil.rmtree(backup, ignore_errors=True)
+        results = [remove_path_safely(backup, workspace.parent)]
         if staging is not None:
-            shutil.rmtree(staging, ignore_errors=True)
+            results.append(remove_path_safely(staging, workspace.parent))
+        failed = [result for result in results if not result]
+        if failed:
+            # Журнал остаётся: повторный recover дочистит, когда файл отпустят.
+            logger.warning('Не удалось дочистить резервную копию %s: %s',
+                           backup, failed[0].reason)
+            return False
         journal.unlink(missing_ok=True)
         return True
     old_by_fold = {rel.casefold(): rel for rel in data.get("old", [])}
@@ -394,9 +403,16 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
                 directory.rmdir()
             except OSError:
                 pass
-    shutil.rmtree(backup, ignore_errors=True)
+    results = [remove_path_safely(backup, workspace.parent)]
     if staging is not None:
-        shutil.rmtree(staging, ignore_errors=True)
+        results.append(remove_path_safely(staging, workspace.parent))
+    failed = [result for result in results if not result]
+    if failed:
+        # Откат выполнен, но временные каталоги остались: журнал сохраняем,
+        # чтобы повторный recover довёл очистку до конца.
+        logger.warning('Не удалось дочистить временные каталоги транзакции %s: %s',
+                       workspace, failed[0].reason)
+        return False
     for rel in sorted(data.get("removed_dirs", []), key=lambda p: p.count("/")):
         root.joinpath(*PurePosixPath(rel).parts).mkdir(parents=True, exist_ok=True)
     if data.get("root_created"):

@@ -177,17 +177,63 @@ def test_web_api_does_not_report_delete_success_when_helper_returns_false(monkey
             pm.close_all()
 
 
-def test_empty_project_ids_on_both_delete_routes_are_bad_request():
+@pytest.mark.parametrize('method, path', [
+    ('delete', '/api/projects/'),
+    ('delete', '/api/projects//'),
+    ('post', '/api/projects//delete'),
+    ('post', '/api/projects//delete/'),
+])
+def test_empty_project_ids_on_both_delete_routes_are_bad_request(method, path):
+    """Матрица пустого ID: со слэшем и без, JSON и форма — всегда 400 с
+    объяснением, без 307-редиректа (405/404)."""
     from fastapi.testclient import TestClient
     from src.web import app as app_module
     client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'},
                         follow_redirects=False)
-    json_response = client.delete('/api/projects/')
-    form_response = client.post('/api/projects//delete')
-    assert json_response.status_code == 400
-    assert 'ID проекта' in json_response.json()['detail']
-    assert form_response.status_code == 400
-    assert 'ID проекта' in form_response.json()['detail']
+    response = getattr(client, method)(path)
+    assert response.status_code == 400
+    assert 'location' not in response.headers
+    assert 'ID проекта' in response.json()['detail']
+
+
+def test_injected_removal_reason_reaches_delete_responses(monkeypatch, tmp_path):
+    """Причина отказа общего helper'а доходит до ответа без подмены — и для
+    JSON API, и для формы, и для каталога проекта."""
+    from fastapi.testclient import TestClient
+    from src.core import fs_safety, platform_check
+    from src.web import app as app_module
+
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p', 'p')
+    pm.create_project('q', 'q')
+    temp_archive = pm._index_path('p').parent / '.platform-check-x.zip.1.tmp'
+    temp_archive.write_bytes(b'tmp')
+    project_dir_q = pm.projects_dir / 'q'
+    monkeypatch.setattr(app_module, '_pm', pm)
+    real_remove = fs_safety.remove_path_safely
+
+    def injected(path, *args, **kwargs):
+        if Path(path) in (temp_archive, project_dir_q):
+            return fs_safety.RemovalResult(False, 'INJECTED_BUSY')
+        return real_remove(path, *args, **kwargs)
+
+    # Временный архив чистит platform_check, каталог проекта — project_manager:
+    # отказ должен дойти от обеих точек.
+    monkeypatch.setattr(platform_check, 'remove_path_safely', injected)
+    monkeypatch.setattr(pm_module, 'remove_path_safely', injected)
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+    try:
+        for method, url in (('delete', '/api/projects/p'), ('post', '/api/projects/p/delete')):
+            response = getattr(client, method)(url)
+            assert response.status_code == 500, response.text
+            assert 'INJECTED_BUSY' in response.json()['detail']
+        assert temp_archive.exists()
+        response = client.delete('/api/projects/q')
+        assert response.status_code == 500, response.text
+        assert 'INJECTED_BUSY' in response.json()['detail']
+        assert project_dir_q.exists()
+    finally:
+        pm.close_all()
 
 
 def test_delete_does_not_follow_project_symlink(tmp_path):
