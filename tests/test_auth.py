@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty
@@ -65,6 +66,38 @@ def _first_verify_many(data_dir, token, start, results):
         store = TokenStore(data_dir)
         start.wait()
         results.put(('verified', all(store.verify(token) is not None for _ in range(20))))
+    except Exception as exc:
+        results.put(('error', repr(exc)))
+
+
+def _verify_due_with_write_pause(data_dir, token, write_ready, release_write, results):
+    """Проверка токена с назревшей записью last_used: запись «зависает» уже
+    после взятия блокировок и завершается только по команде теста — отзыв во
+    втором процессе конкурирует именно с этой предстоящей записью."""
+    store = TokenStore(data_dir)
+    try:
+        store.initialize()
+        info = next(iter(store._tokens.values()))
+        store._last_persist[info.id] = 0
+        original_save = store._save
+
+        def pause_before_save(candidate=None):
+            write_ready.set()
+            if not release_write.wait(10):
+                raise TimeoutError('тест не разрешил запись last_used')
+            return original_save(candidate)
+
+        store._save = pause_before_save
+        results.put(('due_verify', store.verify(token) is not None))
+    except Exception as exc:  # передаём исключения родительскому тесту
+        results.put(('error', repr(exc)))
+
+
+def _revoke_when_attempting(data_dir, token_id, attempting, results):
+    try:
+        attempting.set()
+        TokenStore(data_dir).revoke(token_id)
+        results.put(('revoked', True))
     except Exception as exc:
         results.put(('error', repr(exc)))
 
@@ -145,6 +178,32 @@ def test_failed_create_does_not_publish_candidate_state(tmp_path, monkeypatch):
     assert store.enabled() and store.verify(token) is not None
     assert store.path.read_bytes() == disk_before
     assert [item.id for item in store.list()] == [initial.id]
+
+
+def test_revoke_keeps_memory_and_file_consistent_when_os_replace_always_fails(tmp_path, monkeypatch):
+    """os.replace падает на всех попытках: память и файл остаются прежними."""
+    from src.core import fsretry
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    disk_before = store.path.read_bytes()
+    attempts = 0
+
+    def always_fail(src, dst):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(5, 'synthetic replace denied', str(dst))
+
+    monkeypatch.setattr(fsretry.os, 'replace', always_fail)
+    monkeypatch.setattr(fsretry, 'RETRY_DELAY_SEC', 0)
+    with pytest.raises(PermissionError):
+        store.revoke(info.id)
+
+    assert attempts == fsretry.RETRY_ATTEMPTS
+    assert store.path.read_bytes() == disk_before
+    assert [item.id for item in store.list()] == [info.id]
+    assert store.verify(token) is not None
+    assert not list(tmp_path.glob('tokens.json.*.tmp'))
 
 
 def test_revoke_retries_a_temporarily_busy_tokens_file(tmp_path, monkeypatch):
@@ -358,6 +417,136 @@ def test_multiprocess_revoke_and_last_used_persistence_are_serialized(tmp_path):
                 process.close()
         results.close()
         results.join_thread()
+
+
+def test_due_last_used_write_serializes_with_multiprocess_revoke(tmp_path):
+    """Отзыв конкурирует с ещё не записанным last_used: запись не теряет
+    отзыв — на диске остаётся пустой список, проверка после отзыва — None."""
+    store = TokenStore(tmp_path)
+    info, token = store.create('Синтетический владелец', 'admin')
+    ctx = get_context('spawn')
+    write_ready, release_write, attempting = ctx.Event(), ctx.Event(), ctx.Event()
+    results = ctx.Queue()
+    verifier = ctx.Process(target=_verify_due_with_write_pause,
+                           args=(str(tmp_path), token, write_ready, release_write, results))
+    revoker = None
+    try:
+        verifier.start()
+        assert write_ready.wait(10), 'запись last_used не дошла до сохранения'
+        revoker = ctx.Process(target=_revoke_when_attempting,
+                              args=(str(tmp_path), info.id, attempting, results))
+        revoker.start()
+        assert attempting.wait(10), 'отзывающий процесс не запустился'
+        # Даём отзывающему дойти до файловой блокировки, пока проверяющий ещё
+        # держит её, и только затем разрешаем запись last_used.
+        time.sleep(0.05)
+        release_write.set()
+        deadline = time.monotonic() + 15
+        for process in (verifier, revoker):
+            process.join(max(0, deadline - time.monotonic()))
+        if any(process.is_alive() for process in (verifier, revoker)):
+            pytest.fail('процесс due verify/revoke завис')
+        messages = []
+        while True:
+            try:
+                messages.append(results.get_nowait())
+            except Empty:
+                break
+        assert verifier.exitcode == revoker.exitcode == 0
+        assert not [message for message in messages if message[0] == 'error'], messages
+        assert ('due_verify', True) in messages
+        assert ('revoked', True) in messages
+        # Повреждённый файл тоже даёт None на verify — проверяем именно
+        # содержимое: отзыв обязан оставить пустой список.
+        assert json.loads((tmp_path / 'tokens.json').read_text(encoding='utf-8')) == []
+        assert TokenStore(tmp_path).verify(token) is None
+        assert not list(tmp_path.glob('tokens.json.*.tmp'))
+    finally:
+        release_write.set()
+        for process in (verifier, revoker):
+            if process is not None:
+                _stop_process(process)
+                if process.pid is not None:
+                    process.close()
+        results.close()
+        results.join_thread()
+
+
+def test_permission_retry_releases_both_locks_before_sleep(tmp_path, monkeypatch):
+    """Пока verify() паузит между попытками чтения после PermissionError,
+    другой поток берёт обе блокировки за миллисекунды — пауза не должна
+    удерживать ни self._lock, ни межпроцессную блокировку."""
+    import src.auth as auth
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    store._last_persist[info.id] = 0
+    original_read = Path.read_bytes
+    original_sleep = time.sleep
+    read_attempts = 0
+    retry_sleep_entered = threading.Event()
+    verifier_context = threading.local()
+
+    def denied_once(path, *args, **kwargs):
+        nonlocal read_attempts
+        if path == store.path:
+            read_attempts += 1
+            if read_attempts == 1:
+                raise PermissionError(13, 'synthetic sharing violation', str(path))
+        return original_read(path, *args, **kwargs)
+
+    def observed_sleep(delay):
+        if getattr(verifier_context, 'active', False):
+            retry_sleep_entered.set()
+        return original_sleep(delay)
+
+    monkeypatch.setattr(Path, 'read_bytes', denied_once)
+    monkeypatch.setattr(auth.time, 'sleep', observed_sleep)
+    # Длинная пауза и просторный бюджет: если блокировки удерживаются во время
+    # сна, писатель ждёт не менее 0.2 с — предел в 0.08 с это поймает.
+    monkeypatch.setattr(auth, '_TOKEN_READ_RETRY_DELAY_SEC', 0.2)
+    monkeypatch.setattr(auth, '_TOKEN_READ_RETRY_BUDGET_SEC', 0.5, raising=False)
+
+    def verify():
+        verifier_context.active = True
+        return store.verify(token)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(verify)
+        assert retry_sleep_entered.wait(2), 'verify не вошёл в паузу между попытками'
+        started = time.monotonic()
+        store.revoke(info.id)
+        writer_elapsed = time.monotonic() - started
+        assert writer_elapsed < 0.08, f'писатель ждал {writer_elapsed:.3f} с во время паузы verify'
+        assert future.result(timeout=2) is None
+    assert read_attempts >= 2
+    assert json.loads((tmp_path / 'tokens.json').read_text(encoding='utf-8')) == []
+
+
+def test_persistent_permission_error_stops_after_bounded_retries(tmp_path, monkeypatch):
+    """Постоянный PermissionError чтения — ровно пять попыток и отказ."""
+    import src.auth as auth
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    store._last_persist[info.id] = 0
+    original = store.path.read_bytes()
+    original_read = Path.read_bytes
+    attempts = 0
+
+    def always_denied(path, *args, **kwargs):
+        nonlocal attempts
+        if path == store.path:
+            attempts += 1
+            raise PermissionError(13, 'synthetic persistent sharing violation',
+                                  str(store.path))
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_bytes', always_denied)
+    assert store.verify(token) is None
+    assert attempts == auth._TOKEN_READ_RETRIES
+    assert store._broken and store._tokens == {} and store._by_hash == {}
+    assert original == original_read(store.path)
 
 
 def test_multiprocess_first_verify_uses_unique_temp_files(tmp_path):

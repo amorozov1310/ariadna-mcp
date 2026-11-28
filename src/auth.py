@@ -36,7 +36,6 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -57,53 +56,93 @@ _TOKEN_LOCK_TIMEOUT_SEC = 2.0
 _TOKEN_LOCK_POLL_SEC = 0.025
 _TOKEN_READ_RETRIES = 5
 _TOKEN_READ_RETRY_DELAY_SEC = 0.01
+# Суммарный бюджет пауз между повторными попытками чтения: по монотонным
+# часам, а не как сумма задержек, — чтобы даже сбои планировщика не
+# задерживали другие потоки и процессы дольше этого времени.
+_TOKEN_READ_RETRY_BUDGET_SEC = 0.1
 
 
-@contextmanager
-def _token_file_lock(path: Path, *, wait: bool = True):
-    """Межпроцессная блокировка рядом с tokens.json (Windows и POSIX)."""
-    lock_path = path.with_name(path.name + '.lock')
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open('a+b') as stream:
-        if os.name == 'nt':
-            import msvcrt
-            stream.seek(0, os.SEEK_END)
-            if stream.tell() == 0:
-                stream.write(b'0')
-                stream.flush()
-            stream.seek(0)
-            deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
-            while True:
-                try:
-                    stream.seek(0)
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    if not wait or time.monotonic() >= deadline:
-                        raise TimeoutError(f'не удалось заблокировать файл токенов за '
-                                            f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
-                    time.sleep(_TOKEN_LOCK_POLL_SEC)
-            try:
-                yield
-            finally:
+class _TokenFileLock:
+    """Межпроцессная блокировка рядом с tokens.json (Windows и POSIX).
+
+    В отличие от простого контекстного менеджера, блокировку можно отпустить
+    и взять заново (release/acquire): повторные попытки чтения файла
+    освобождают её на время паузы, чтобы другой писатель не ждал. При
+    wait=False повторный acquire так же не ждёт чужую блокировку."""
+
+    def __init__(self, path: Path, *, wait: bool = True):
+        self._path = path
+        self._wait = wait
+        self._stream = None
+
+    def acquire(self) -> None:
+        lock_path = self._path.with_name(self._path.name + '.lock')
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        stream = lock_path.open('a+b')
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b'0')
+                    stream.flush()
+                stream.seek(0)
+                deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
+                while True:
+                    try:
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if not self._wait or time.monotonic() >= deadline:
+                            raise TimeoutError(f'не удалось заблокировать файл токенов за '
+                                                f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
+                        time.sleep(_TOKEN_LOCK_POLL_SEC)
+            else:
+                import fcntl
+                deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
+                while True:
+                    try:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if not self._wait or time.monotonic() >= deadline:
+                            raise TimeoutError(f'не удалось заблокировать файл токенов за '
+                                                f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
+                        time.sleep(_TOKEN_LOCK_POLL_SEC)
+        except BaseException:
+            stream.close()
+            raise
+        self._stream = stream
+
+    def release(self) -> None:
+        stream = self._stream
+        self._stream = None
+        if stream is None:
+            return
+        try:
+            if os.name == 'nt':
+                import msvcrt
                 stream.seek(0)
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            deadline = time.monotonic() + _TOKEN_LOCK_TIMEOUT_SEC
-            while True:
-                try:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if not wait or time.monotonic() >= deadline:
-                        raise TimeoutError(f'не удалось заблокировать файл токенов за '
-                                            f'{_TOKEN_LOCK_TIMEOUT_SEC:g} с')
-                    time.sleep(_TOKEN_LOCK_POLL_SEC)
-            try:
-                yield
-            finally:
+            else:
+                import fcntl
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
+
+    def __enter__(self) -> '_TokenFileLock':
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        self.release()
+        return False
+
+
+def _token_file_lock(path: Path, *, wait: bool = True) -> _TokenFileLock:
+    """Межпроцессная блокировка рядом с tokens.json (Windows и POSIX)."""
+    return _TokenFileLock(path, wait=wait)
 
 
 @dataclass
@@ -144,7 +183,48 @@ class TokenStore:
             self._reload(force=True)
 
     # ------------------------------------------------------------ чтение
-    def _reload(self, *, force: bool = False) -> None:
+    def _reload(self, *, force: bool = False,
+                file_lock: _TokenFileLock | None = None) -> None:
+        """Перечитать файл токенов, повторяя при краткой ошибке чтения Windows.
+
+        Вызывается под self._lock (и, если передан file_lock, под файловой
+        блокировкой). Пауза между попытками выполняется вне обеих блокировок —
+        другой писатель в это время работает, — а повтор начинается с их
+        повторного взятия. Суммарная пауза ограничена бюджетом
+        _TOKEN_READ_RETRY_BUDGET_SEC по монотонным часам; после
+        _TOKEN_READ_RETRIES неудачных попыток доступ закрывается (fail-closed).
+        """
+        deadline = time.monotonic() + _TOKEN_READ_RETRY_BUDGET_SEC
+        for attempt in range(_TOKEN_READ_RETRIES):
+            status, error = self._read_once(force=force or attempt > 0)
+            if status != 'retry':
+                return
+            if attempt + 1 >= _TOKEN_READ_RETRIES:
+                self._fail_closed(f'не удалось прочитать файл токенов: {error}')
+                return
+            # Пауза без блокировок; повтор — с их новым взятием. Порядок
+            # обратный взятию, чтобы не ждать чужую блокировку, держа свою.
+            self._lock.release()
+            try:
+                if file_lock is not None:
+                    file_lock.release()
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(_TOKEN_READ_RETRY_DELAY_SEC * (attempt + 1),
+                                       remaining))
+                finally:
+                    if file_lock is not None:
+                        file_lock.acquire()
+            finally:
+                self._lock.acquire()
+
+    def _read_once(self, *, force: bool) -> tuple[str, OSError | None]:
+        """Одна попытка перечитать файл.
+
+        Возвращает ('ok', None) — состояние обновлено (или доступ закрыт), —
+        либо ('retry', exc) при краткой ошибке чтения Windows, когда стоит
+        повторить попытку с паузой. Вызывается под self._lock."""
         try:
             stat = self.path.stat()
             signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino,
@@ -156,34 +236,30 @@ class TokenStore:
                 self._tokens, self._by_hash = {}, {}
                 self._broken = False
                 self._remember_file(None, None)
-            return
+            return 'ok', None
         except OSError as e:
             self._fail_closed(f'не удалось проверить файл токенов: {e}')
-            return
+            return 'ok', None
 
         now_ns = time.monotonic_ns()
         if (not force and signature == self._file_signature
                 and now_ns - self._last_hash_check_ns < _TOKEN_HASH_CHECK_NS):
-            return
+            return 'ok', None
 
         # Сверяем подпись до и после чтения: если файл сменился посреди чтения,
         # повторяем попытку, чтобы хэш и кэш относились к одному содержимому.
-        for attempt in range(_TOKEN_READ_RETRIES):
+        for _ in range(_TOKEN_READ_RETRIES):
             try:
                 content = self.path.read_bytes()
                 after = self.path.stat()
             except PermissionError as e:
                 # Windows can briefly deny a read while another process replaces
                 # tokens.json. Retry only this transient sharing error; persistent
-                # access failures still fail closed below.
-                if attempt + 1 < _TOKEN_READ_RETRIES:
-                    time.sleep(_TOKEN_READ_RETRY_DELAY_SEC * (attempt + 1))
-                    continue
-                self._fail_closed(f'не удалось прочитать файл токенов: {e}')
-                return
+                # access failures still fail closed after the retries are spent.
+                return 'retry', e
             except OSError as e:
                 self._fail_closed(f'не удалось прочитать файл токенов: {e}')
-                return
+                return 'ok', None
             after_signature = (after.st_mtime_ns, after.st_size, after.st_ino,
                                getattr(after, 'st_ctime_ns', None))
             if after_signature == signature:
@@ -191,12 +267,12 @@ class TokenStore:
             signature = after_signature
         else:
             self._fail_closed('файл токенов постоянно меняется при чтении')
-            return
+            return 'ok', None
 
         content_hash = hashlib.sha256(content).hexdigest()
         self._last_hash_check_ns = now_ns
         if signature == self._file_signature and content_hash == self._content_hash:
-            return
+            return 'ok', None
         try:
             if not content:
                 raise ValueError('пустой файл')
@@ -219,7 +295,7 @@ class TokenStore:
                 tokens[info.id] = info
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as e:
             self._fail_closed(f'повреждён файл токенов: {e}', signature, content_hash)
-            return
+            return 'ok', None
 
         self._has_seen_file = True
         self._ever_enabled = self._ever_enabled or bool(tokens)
@@ -229,6 +305,7 @@ class TokenStore:
         self._last_persist = {token_id: ts for token_id, ts in self._last_persist.items()
                               if token_id in tokens}
         self._remember_file(signature, content_hash)
+        return 'ok', None
 
     def _fail_closed(self, reason: str, signature=None, content_hash=None) -> None:
         logger.warning('Токены: %s (%s) — доступ закрыт', self.path, reason)
@@ -291,10 +368,11 @@ class TokenStore:
             token_id = info.id
         try:
             # Обновление last_used — best effort. Не задерживаем запрос, если
-            # другой процесс сейчас меняет токены.
-            with _token_file_lock(self.path, wait=False):
+            # другой процесс сейчас меняет токены; на время пауз между
+            # попытками чтения блокировки отпускаются.
+            with _token_file_lock(self.path, wait=False) as file_lock:
                 with self._lock:
-                    self._reload(force=True)
+                    self._reload(force=True, file_lock=file_lock)
                     info = self._by_hash.get(_hash(token.strip()))
                     if info is None:
                         return None
@@ -362,9 +440,9 @@ class TokenStore:
         if role not in ROLES:
             raise ValueError(f'Роль — одна из: {", ".join(ROLES)}')
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
-        with _token_file_lock(self.path):
+        with _token_file_lock(self.path) as file_lock:
             with self._lock:
-                self._reload(force=True)
+                self._reload(force=True, file_lock=file_lock)
                 if self._broken:
                     raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
                 limit = self.limit()
@@ -385,9 +463,9 @@ class TokenStore:
         return info, token
 
     def revoke(self, token_id: str) -> TokenInfo:
-        with _token_file_lock(self.path):
+        with _token_file_lock(self.path) as file_lock:
             with self._lock:
-                self._reload(force=True)
+                self._reload(force=True, file_lock=file_lock)
                 if self._broken:
                     raise ValueError(f'Файл токенов {self.path} повреждён — исправьте его')
                 info = self._tokens.get(token_id)
