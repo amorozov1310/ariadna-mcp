@@ -28,9 +28,11 @@ def _verify_during_revoke(data_dir, token, start, done, results):
     store = TokenStore(data_dir)
     try:
         start.wait()
+        verified = 0
         while not done.is_set():
-            results.put(('verify', store.verify(token) is not None))
+            verified += store.verify(token) is not None
         time.sleep(0.13)  # дольше окна проверки кэша в 100 мс
+        results.put(('verify_summary', verified))
         results.put(('final', store.verify(token) is None))
     except Exception as exc:  # передаём исключения родительскому тесту
         results.put(('error', repr(exc)))
@@ -61,6 +63,18 @@ def _hold_token_lock(path, entered, release):
     with _token_file_lock(Path(path)):
         entered.set()
         release.wait(15)
+
+
+def _stop_process(process, timeout=2):
+    """Завершить дочерний процесс и дождаться его даже после таймаута теста."""
+    if process.is_alive():
+        process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout)
+    if process.is_alive() and hasattr(process, 'kill'):
+        process.kill()
+        process.join(timeout)
 
 
 def test_token_store_create_verify_revoke(tmp_path):
@@ -120,6 +134,31 @@ def test_failed_create_does_not_publish_candidate_state(tmp_path, monkeypatch):
     assert store.enabled() and store.verify(token) is not None
     assert store.path.read_bytes() == disk_before
     assert [item.id for item in store.list()] == [initial.id]
+
+
+def test_revoke_retries_a_temporarily_busy_tokens_file(tmp_path, monkeypatch):
+    """Windows может временно запретить замену занятого tokens.json."""
+    import os
+    from src.core import fsretry
+
+    store = TokenStore(tmp_path)
+    info, token = store.create('synthetic admin', 'admin')
+    real_replace = os.replace
+    attempts = []
+
+    def busy_then_replace(src, dst):
+        attempts.append((Path(src), Path(dst)))
+        if len(attempts) <= 3:
+            raise PermissionError(5, 'synthetic Windows sharing violation', str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fsretry.os, 'replace', busy_then_replace)
+    monkeypatch.setattr(fsretry, 'RETRY_DELAY_SEC', 0)
+    store.revoke(info.id)
+
+    assert len(attempts) == 4
+    assert TokenStore(tmp_path).verify(token) is None
+    assert not list(tmp_path.glob('tokens.json.*.tmp'))
 
 
 def test_revoked_token_marks_do_not_accumulate_and_tokens_stay_revoked(tmp_path):
@@ -242,6 +281,25 @@ def test_permission_error_during_token_check_fails_closed_without_raising(tmp_pa
     assert store.enabled() and store.verify(token) is None
 
 
+def test_transient_windows_read_sharing_error_retries_before_failing_closed(tmp_path, monkeypatch):
+    store = TokenStore(tmp_path)
+    _, token = store.create('synthetic admin', 'admin')
+    original = Path.read_bytes
+    attempts = 0
+
+    def briefly_denied(path, *args, **kwargs):
+        nonlocal attempts
+        if path == store.path:
+            attempts += 1
+            if attempts <= 2:
+                raise PermissionError(13, 'synthetic Windows sharing violation', str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_bytes', briefly_denied)
+    assert store.verify(token) is not None
+    assert attempts == 3
+
+
 def test_multiprocess_revoke_and_last_used_persistence_are_serialized(tmp_path):
     store = TokenStore(tmp_path)
     info, token = store.create('Синтетический владелец', 'admin')
@@ -251,31 +309,44 @@ def test_multiprocess_revoke_and_last_used_persistence_are_serialized(tmp_path):
                            args=(str(tmp_path), token, start, done, results))
     revoker = ctx.Process(target=_revoke_at_start,
                           args=(str(tmp_path), info.id, start, done, results))
-    verifier.start()
-    revoker.start()
-    start.set()
-    verifier.join(15)
-    revoker.join(15)
-    if verifier.is_alive():
-        verifier.terminate()
-        verifier.join()
-        pytest.fail('процесс verify завис')
-    if revoker.is_alive():
-        revoker.terminate()
-        revoker.join()
-        pytest.fail('процесс revoke завис')
-    messages = []
-    while True:
-        try:
-            messages.append(results.get(timeout=0.1))
-        except Empty:
-            break
-    assert verifier.exitcode == revoker.exitcode == 0
-    assert not [m for m in messages if m[0] == 'error'], messages
-    assert ('revoked', True) in messages
-    assert ('final', True) in messages
-    assert TokenStore(tmp_path).verify(token) is None
-    assert not list(tmp_path.glob('tokens.json.*.tmp'))
+    processes = (verifier, revoker)
+    try:
+        for process in processes:
+            process.start()
+        start.set()
+        # Читаем очередь параллельно с ожиданием: дочерние Queue feeder threads
+        # не должны зависнуть, если тест завершается по таймауту.
+        deadline = time.monotonic() + 15
+        messages = []
+        while time.monotonic() < deadline and any(p.is_alive() for p in processes):
+            try:
+                messages.append(results.get(timeout=0.05))
+            except Empty:
+                pass
+        for process in processes:
+            process.join(max(0, deadline - time.monotonic()))
+        if any(process.is_alive() for process in processes):
+            pytest.fail('процесс verify/revoke завис')
+        while True:
+            try:
+                messages.append(results.get_nowait())
+            except Empty:
+                break
+        assert verifier.exitcode == revoker.exitcode == 0
+        assert not [m for m in messages if m[0] == 'error'], messages
+        assert any(m[0] == 'verify_summary' and m[1] > 0 for m in messages), messages
+        assert ('revoked', True) in messages
+        assert ('final', True) in messages
+        assert TokenStore(tmp_path).verify(token) is None
+        assert not list(tmp_path.glob('tokens.json.*.tmp'))
+    finally:
+        start.set()
+        for process in processes:
+            _stop_process(process)
+            if process.pid is not None:
+                process.close()
+        results.close()
+        results.join_thread()
 
 
 def test_multiprocess_first_verify_uses_unique_temp_files(tmp_path):
@@ -284,25 +355,37 @@ def test_multiprocess_first_verify_uses_unique_temp_files(tmp_path):
     start, results = ctx.Event(), ctx.Queue()
     workers = [ctx.Process(target=_first_verify_many,
                            args=(str(tmp_path), token, start, results)) for _ in range(2)]
-    for worker in workers:
-        worker.start()
-    start.set()
-    for worker in workers:
-        worker.join(15)
-        if worker.is_alive():
-            worker.terminate()
-            worker.join()
+    try:
+        for worker in workers:
+            worker.start()
+        start.set()
+        deadline = time.monotonic() + 15
+        messages = []
+        while time.monotonic() < deadline and any(w.is_alive() for w in workers):
+            try:
+                messages.append(results.get(timeout=0.05))
+            except Empty:
+                pass
+        for worker in workers:
+            worker.join(max(0, deadline - time.monotonic()))
+        if any(worker.is_alive() for worker in workers):
             pytest.fail('процесс verify завис')
-    messages = []
-    while True:
-        try:
-            messages.append(results.get(timeout=0.1))
-        except Empty:
-            break
-    assert all(worker.exitcode == 0 for worker in workers)
-    assert messages.count(('verified', True)) == 2
-    assert not [message for message in messages if message[0] == 'error'], messages
-    assert not list(tmp_path.glob('tokens.json.*.tmp'))
+        while True:
+            try:
+                messages.append(results.get_nowait())
+            except Empty:
+                break
+        assert all(worker.exitcode == 0 for worker in workers)
+        assert messages.count(('verified', True)) == 2
+        assert not [message for message in messages if message[0] == 'error'], messages
+        assert not list(tmp_path.glob('tokens.json.*.tmp'))
+    finally:
+        for worker in workers:
+            _stop_process(worker)
+            if worker.pid is not None:
+                worker.close()
+        results.close()
+        results.join_thread()
 
 
 def test_interprocess_lock_skips_last_used_without_waiting_but_rejects_writes(tmp_path):
@@ -315,6 +398,7 @@ def test_interprocess_lock_skips_last_used_without_waiting_but_rejects_writes(tm
     holder = ctx.Process(target=_hold_token_lock,
                          args=(str(store.path), entered, release))
     holder.start()
+    holder_exitcode = None
     try:
         assert entered.wait(10), 'процесс не захватил блокировку'
         started = time.monotonic()
@@ -334,11 +418,11 @@ def test_interprocess_lock_skips_last_used_without_waiting_but_rejects_writes(tm
         assert store.verify(token) is not None
     finally:
         release.set()
-        holder.join(10)
-        if holder.is_alive():
-            holder.terminate()
-            holder.join()
-    assert holder.exitcode == 0
+        _stop_process(holder)
+        holder_exitcode = holder.exitcode
+        if holder.pid is not None:
+            holder.close()
+    assert holder_exitcode == 0
 
     # Проверяющий процесс мог закэшировать токен до отзыва. После завершённого
     # отзыва проверка обязана перечитать файл и отказать.
@@ -348,20 +432,27 @@ def test_interprocess_lock_skips_last_used_without_waiting_but_rejects_writes(tm
                           args=(str(tmp_path), info.id, start, done, results))
     revoker.start()
     start.set()
-    revoker.join(10)
-    if revoker.is_alive():
-        revoker.terminate()
-        revoker.join()
-        pytest.fail('процесс отзыва завис')
+    revoker_exitcode = None
+    try:
+        revoker.join(10)
+        if revoker.is_alive():
+            pytest.fail('процесс отзыва завис')
+    finally:
+        _stop_process(revoker)
+        revoker_exitcode = revoker.exitcode
+        if revoker.pid is not None:
+            revoker.close()
     messages = []
     while True:
         try:
             messages.append(results.get(timeout=0.1))
         except Empty:
             break
-    assert revoker.exitcode == 0
+    assert revoker_exitcode == 0
     assert ('revoked', True) in messages
     assert store.verify(token) is None
+    results.close()
+    results.join_thread()
 
 
 def test_cli_create_and_list(tmp_path, capsys):

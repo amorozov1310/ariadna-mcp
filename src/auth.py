@@ -55,6 +55,8 @@ _LAST_USED_PERSIST_SEC = 300
 _TOKEN_HASH_CHECK_NS = 100_000_000
 _TOKEN_LOCK_TIMEOUT_SEC = 2.0
 _TOKEN_LOCK_POLL_SEC = 0.025
+_TOKEN_READ_RETRIES = 5
+_TOKEN_READ_RETRY_DELAY_SEC = 0.01
 
 
 @contextmanager
@@ -166,10 +168,19 @@ class TokenStore:
 
         # Сверяем подпись до и после чтения: если файл сменился посреди чтения,
         # повторяем попытку, чтобы хэш и кэш относились к одному содержимому.
-        for _ in range(3):
+        for attempt in range(_TOKEN_READ_RETRIES):
             try:
                 content = self.path.read_bytes()
                 after = self.path.stat()
+            except PermissionError as e:
+                # Windows can briefly deny a read while another process replaces
+                # tokens.json. Retry only this transient sharing error; persistent
+                # access failures still fail closed below.
+                if attempt + 1 < _TOKEN_READ_RETRIES:
+                    time.sleep(_TOKEN_READ_RETRY_DELAY_SEC * (attempt + 1))
+                    continue
+                self._fail_closed(f'не удалось прочитать файл токенов: {e}')
+                return
             except OSError as e:
                 self._fail_closed(f'не удалось прочитать файл токенов: {e}')
                 return
