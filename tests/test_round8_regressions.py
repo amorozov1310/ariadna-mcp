@@ -240,15 +240,15 @@ def test_help_migration_does_not_overwrite_or_resurrect_copied_files(tmp_path):
 def test_delete_finalization_preserves_another_process_pending_id(tmp_path, monkeypatch):
     pm = ProjectManager(str(tmp_path))
     pm.create_project('remove-me', 'remove-me')
-    real = pm._forget_project_resources
+    real = Database.forget_schema_lock
 
-    def external_writer(project_id):
+    def external_writer(index_path):
         data = json.loads(pm.registry_path.read_text(encoding='utf-8'))
         data['pending_deletions'] = ['remove-me', 'latest']
         pm._write_registry_file(data)
-        return real(project_id)
+        return real(index_path)
 
-    monkeypatch.setattr(pm, '_forget_project_resources', external_writer)
+    monkeypatch.setattr(Database, 'forget_schema_lock', staticmethod(external_writer))
     try:
         assert pm.delete_project('remove-me') is True
         data = json.loads(pm.registry_path.read_text(encoding='utf-8'))

@@ -105,7 +105,9 @@ def test_protected_roots_cover_legacy_service_project_ids(tmp_path):
         pm.list_projects()
         roots = pm._protected_project_roots()
         assert pm.projects_dir / 'Reports' in roots
-        assert index_dir / 'Reports' / 'index.db' in roots
+        # Сравниваем строку: WindowsPath считает Reports и reports равными,
+        # хотя на Linux это разные физические каталоги.
+        assert str(index_dir / 'Reports' / 'index.db') in {str(root) for root in roots}
         assert index_dir / 'reports' not in roots
         assert pm.projects_dir / 'platform-help' in roots
         assert index_dir / 'platform-help' in roots
