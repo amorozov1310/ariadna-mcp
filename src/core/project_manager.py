@@ -370,7 +370,10 @@ class ProjectManager:
         self._source_reservations: set[tuple[str, str]] = set()
         # Завершить атомарное восстановление выгрузок до запуска фоновых потоков.
         startup_projects = self._load_registry()
+        from .platform_check import select_report_version
         for project in startup_projects.values():
+            if project.platform_version:
+                select_report_version(self._index_path(project.id), project.platform_version)
             startup_protected = self._protected_project_roots(exclude=project.id)
             from .platform_check import cleanup_report_temps, report_directory
             report_dir = report_directory(self._index_path(project.id))
@@ -3111,9 +3114,7 @@ class ProjectManager:
                         project.status = 'error'
                         self._set_index_error(project_id, 'Не удалось завершить фоновую переиндексацию')
                         self._save_project_to_disk(project_id, project)
-                        db = self._db_pool.get(project_id)
-                        if db is not None and db.conn is not None:
-                            db.update_state(status='error', progress_phase='')
+                        self.get_db(project_id).update_state(status='error', progress_phase='')
                 except Exception:
                     logger.exception("Не удалось завершить статус фоновой переиндексации %s", project_id)
                 logger.exception("Фоновая переиндексация проекта %s (источник %s) упала",

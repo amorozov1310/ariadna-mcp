@@ -2302,3 +2302,24 @@ def test_report_worker_acquires_project_pin_before_reports_lock(project, monkeyp
     finally:
         _join_workers(_report_workers(pm))
         engine.db.close_thread_reader()
+
+
+def test_selected_report_version_is_restored_from_registry_on_startup(tmp_path):
+    pm = ProjectManager(str(tmp_path), index_dir=str(tmp_path / 'index'))
+    pm.create_project('demo', 'Demo')
+    pm.update_project('demo', platform_version=VERSION)
+    directory = platform_check.report_directory(pm._index_path('demo'))
+    directory.mkdir(parents=True, exist_ok=True)
+    archive = directory / ('platform-check-' + 'b' * 64 + '.zip')
+    with ZipFile(archive, 'w') as zipped:
+        zipped.writestr('report.json', json.dumps(['key', 0, [], VERSION]))
+    pm.close_all()
+
+    restarted = ProjectManager(str(tmp_path), index_dir=str(tmp_path / 'index'))
+    resolved = directory.resolve()
+    try:
+        assert platform_check._SELECTED_VERSIONS[resolved] == VERSION
+        assert platform_check._SELECTED_ARCHIVES[resolved] == archive.name
+    finally:
+        platform_check.forget_report_project(restarted._index_path('demo'))
+        restarted.close_all()

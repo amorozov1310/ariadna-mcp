@@ -97,15 +97,15 @@ def test_protected_roots_cover_legacy_service_project_ids(tmp_path):
     try:
         project = pm.create_project('demo', 'Demo')
         projects = {}
-        for project_id in ('reports', 'platform-help'):
+        for project_id in ('Reports', 'platform-help'):
             projects[project_id] = {**pm._project_to_dict(project),
                                     'id': project_id, 'name': project_id}
         pm.registry_path.write_text(json.dumps({'projects': projects}), encoding='utf-8')
         pm._registry = None
         pm.list_projects()
         roots = pm._protected_project_roots()
-        assert pm.projects_dir / 'reports' in roots
-        assert index_dir / 'reports' / 'index.db' in roots
+        assert pm.projects_dir / 'Reports' in roots
+        assert index_dir / 'Reports' / 'index.db' in roots
         assert index_dir / 'reports' not in roots
         assert pm.projects_dir / 'platform-help' in roots
         assert index_dir / 'platform-help' in roots
@@ -257,6 +257,73 @@ def test_async_reindex_refuses_failed_source_recovery(tmp_path, monkeypatch):
     result = pm.reindex_async('demo', source_id='main')
     assert result['status'] == 'error'
     assert pm.get_project('demo').status == 'empty'
+    pm.close_all()
+
+
+def test_async_worker_marks_terminal_status_if_recovery_changes_after_start(tmp_path, monkeypatch):
+    from src.core import source_delta
+
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('demo', 'Demo')
+    pm.add_source('demo', 'main', 'Main')
+    calls = 0
+
+    def recover(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return calls == 1
+
+    monkeypatch.setattr(source_delta, 'recover', recover)
+    assert pm.reindex_async('demo', source_id='main')['status'] == 'started'
+    worker = next(iter(pm._reindexing))
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert pm.get_project('demo').status == 'error'
+    db = pm.get_db('demo')
+    assert db.read_conn().execute('SELECT status FROM index_state').fetchone()[0] == 'error'
+    assert calls == 2
+    pm.close_all()
+
+
+def test_source_id_is_reserved_while_archive_is_extracting(tmp_path, monkeypatch):
+    from src.core import project_manager as project_manager_module
+
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('demo', 'Demo')
+    entered, release = Event(), Event()
+    calls = []
+    errors = []
+
+    def extract(_archive, _filename, destination, **_kwargs):
+        calls.append(destination)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        Path(destination).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(project_manager_module, 'extract_archive', extract)
+
+    def add_first():
+        try:
+            pm.add_source('demo', 'Main', 'Main', xml_archive=object(),
+                          xml_archive_filename='main.zip')
+        except Exception as exc:
+            errors.append(exc)
+
+    adding = Thread(target=add_first)
+    adding.start()
+    assert entered.wait(5)
+    try:
+        with pytest.raises(ValueError, match='уже добавляется'):
+            pm.add_source('demo', 'main', 'Duplicate', xml_archive=object(),
+                          xml_archive_filename='duplicate.zip')
+        assert len(calls) == 1
+    finally:
+        release.set()
+        adding.join(5)
+    assert not adding.is_alive()
+    assert not errors
+    assert [source.id for source in pm.get_project('demo').sources] == ['Main']
     pm.close_all()
 
 
