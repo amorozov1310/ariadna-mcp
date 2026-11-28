@@ -41,14 +41,14 @@ def _back(project_id: str, next_url: str = '') -> str:
 
 @router.post("/api/projects")
 async def project_create(
-    project_id: str = Form(...),
+    project_id: str = Form(''),
     name: str = Form(...),
     description: str = Form(''),
 ):
     pm = get_pm()
     try:
         pm.create_project(project_id, name, description)
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
     return RedirectResponse(f"/projects/{project_id}", status_code=303)
 
@@ -338,25 +338,57 @@ async def remove_source(project_id: str, source_id: str, next: str = Form('')):
 async def delete_project(project_id: str):
     pm = get_pm()
     try:
-        await run_in_threadpool(pm.delete_project, project_id)
+        deleted = await run_in_threadpool(pm.delete_project, project_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except ProjectFilesNotRemovedError as e:
         raise HTTPException(500, f"Не удалось удалить проект до конца: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if not deleted:
+        return JSONResponse({"status": "not_found", "project_id": project_id}, status_code=404)
     return JSONResponse({"status": "deleted", "project_id": project_id})
+
+
+@router.delete("/api/projects/")
+async def delete_project_without_id():
+    """Не позволять пустому ID пройти через slash redirect до 405."""
+    raise HTTPException(400, "Не указан ID проекта для удаления.")
+
+
+@router.delete("/api/projects//")
+async def delete_project_without_id_trailing_slash():
+    """Пустой ID с завершающим слэшем: та же ошибка, без 307-редиректа."""
+    raise HTTPException(400, "Не указан ID проекта для удаления.")
 
 
 @router.post("/api/projects/{project_id}/delete")
 async def delete_project_post(project_id: str):
     pm = get_pm()
     try:
-        await run_in_threadpool(pm.delete_project, project_id)
+        deleted = await run_in_threadpool(pm.delete_project, project_id)
     except ReindexInProgressError as e:
         raise HTTPException(409, f"Нельзя удалить проект: {e}")
     except ProjectFilesNotRemovedError as e:
         raise HTTPException(500, f"Не удалось удалить проект до конца: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if not deleted:
+        raise HTTPException(404, f"Проект «{project_id}» не найден")
     return RedirectResponse("/", status_code=303)
+
+
+@router.post("/api/projects//delete")
+async def delete_project_post_without_id():
+    """Вернуть понятную ошибку для формы с пустым сегментом ID."""
+    raise HTTPException(400, "Не указан ID проекта для удаления.")
+
+
+@router.post("/api/projects//delete/")
+async def delete_project_post_without_id_trailing_slash():
+    """Форма с пустым ID и завершающим слэшем: та же ошибка, без 307-редиректа."""
+    raise HTTPException(400, "Не указан ID проекта для удаления.")

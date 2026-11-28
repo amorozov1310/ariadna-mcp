@@ -12,6 +12,9 @@ import zlib
 from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime
+from pathlib import Path
+
+from .fs_safety import remove_path_safely
 
 READER_IDLE_SEC = float(os.environ.get('ARIADNA_READER_IDLE_SEC', '60'))
 
@@ -543,6 +546,7 @@ class Database:
         # True, если connect() удалил индекс со старой схемой. ProjectManager
         # пересобирает его из XML, чтобы не показывать пустую БД.
         self.stale_schema_recreated = False
+        self.stale_schema_removal_failed = False
         self.conn: sqlite3.Connection | None = None  # the single writer
         self._local = threading.local()               # per-thread readers (Этап 4/D7)
         # Все выданные читающие соединения — чтобы close() закрыл и те, что
@@ -601,6 +605,8 @@ class Database:
     def connect(self) -> sqlite3.Connection:
         with self._schema_lock:
             self._recreate_if_stale_schema()
+            if self.stale_schema_removal_failed:
+                raise RuntimeError(f"Не удалось удалить устаревший индекс {self.db_path}; переиндексация остановлена")
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
             self.conn = self._open_with_retry()
             self._file_id = self._current_file_id()
@@ -810,6 +816,7 @@ class Database:
         Проверка таблицы module_text распознаёт индексы, построенные без
         исходного текста модулей.
         """
+        self.stale_schema_removal_failed = False
         if self.db_path in (':memory:', '') or not os.path.exists(self.db_path):
             return
         try:
@@ -832,21 +839,20 @@ class Database:
             # маркер и возобновит построение при следующем открытии.
             with open(self.rebuild_marker_path, 'w', encoding='utf-8') as marker:
                 marker.write('Index schema changed; rebuild from XML sources is required.\n')
+            removals = []
             for suffix in ('', '-wal', '-shm'):
-                path = self.db_path + suffix
-                if os.path.exists(path):
-                    os.remove(path)
-            self.stale_schema_recreated = True
+                path = Path(self.db_path + suffix)
+                removals.append(remove_path_safely(path, path.parent.parent, recursive=False))
+            self.stale_schema_recreated = all(removals)
+            self.stale_schema_removal_failed = not self.stale_schema_recreated
 
     @property
     def rebuild_required(self) -> bool:
         return os.path.exists(self.rebuild_marker_path)
 
-    def clear_rebuild_marker(self) -> None:
-        try:
-            os.remove(self.rebuild_marker_path)
-        except FileNotFoundError:
-            pass
+    def clear_rebuild_marker(self):
+        path = Path(self.rebuild_marker_path)
+        return remove_path_safely(path, path.parent.parent, recursive=False)
 
     def init_schema(self):
         with self._schema_lock:

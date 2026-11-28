@@ -46,7 +46,7 @@
 из оглавления, английское — из имени страницы (ENDOFPERIOD, KeyWordsDISTINCT).
 
 Индекс — отдельная SQLite на версию (не в индексе проекта):
-<каталог индексов>/platform-help/<версия>/help.db. Пересобирается при смене
+<каталог индексов>/.ariadna-service/platform-help/<версия>/help.db. Пересобирается при смене
 отпечатка разборщика (хеш этого файла) — как parser_fingerprint у кода.
 """
 
@@ -76,7 +76,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .code_fingerprints import bundled_fingerprints
-from .fsretry import replace_with_retry, retry_on_permission_error
+from .fsretry import replace_with_retry
+from .fs_safety import remove_path_safely
 from .metadata_model import OBJECT_TYPE_MAP
 
 logger = logging.getLogger('ariadna')
@@ -1261,10 +1262,13 @@ class PlatformHelpStore:
             if version in self._building:
                 raise ValueError(f'справка {version} сейчас строится')
             existed = path.is_file()
-            retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+            trusted_root = self.root.parent.parent
+            result = remove_path_safely(path, trusted_root, recursive=False)
+            if not result:
+                raise OSError(result.reason or f'не удалось удалить справку {version}')
             self._errors.pop(version, None)
             if path.parent.is_dir() and not any(path.parent.iterdir()):
-                path.parent.rmdir()
+                remove_path_safely(path.parent, trusted_root, recursive=False)
             return existed
 
     def _skip_auto_build(self, version: str, previous: dict | None) -> bool:

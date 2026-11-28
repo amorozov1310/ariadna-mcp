@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import shutil
 import struct
 import time
@@ -69,7 +70,7 @@ def _report_archive(pm, version=None):
     index = pm.platform_help.get(version or pm.platform_help_version('demo'))
     revision = platform_check._index_revision(engine.db.read_conn())
     key = platform_check._cache_key(engine, index, pm.platform_mode('demo'), revision)
-    return pm._index_path('demo').with_name(f'platform-check-{key}.zip')
+    return platform_check._archive_path(pm._index_path('demo'), key)
 
 
 def _assert_persisted_report(pm, version):
@@ -162,7 +163,7 @@ def test_help_upload_warms_reports_for_sixteen_projects_during_pool_churn(tmp_pa
         from src.core.platform_check import wait_report_jobs
         wait_report_jobs(list(pm._db_pool.values()))
 
-        archives = {project_id: list(pm._index_path(project_id).parent.glob('platform-check-*.zip'))
+        archives = {project_id: list(platform_check.report_directory(pm._index_path(project_id)).glob('platform-check-*.zip'))
                     for project_id in project_ids}
         assert all(archives.values()), {pid: len(paths) for pid, paths in archives.items()}
         for project_id in project_ids:
@@ -1008,16 +1009,86 @@ def test_legacy_shared_archive_is_ignored_and_removed_on_reindex(project):
     pm, _ = project
     assert 'НесуществующийВызов()' in _ready_check(pm)
     old = _report_archive(pm)
-    legacy = old.with_name('platform-check.zip')
-    old.rename(legacy)
+    legacy = pm._legacy_report_directory('demo') / 'platform-check.zip'
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    old.replace(legacy)
     pm.close_all()
 
     assert 'Отчёт готовится' in execute_tool(pm, 'check_platform_calls', {})
     _join_workers(_report_workers(pm))
-    assert old.is_file()
     pm.reindex('demo')
-    assert not legacy.exists() and not old.exists()
+    assert not legacy.exists()
     _assert_persisted_report(pm, VERSION)
+
+
+def test_reindex_cleans_archives_from_current_and_legacy_locations(tmp_path):
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    try:
+        _index_fixture(pm, 'demo')
+        locations = (
+            pm._index_path('demo').parent / 'platform-check.zip',
+            pm._index_path('demo', legacy=True).parent / 'platform-check.zip',
+            pm._legacy_report_directory('demo') / 'platform-check.zip',
+        )
+        for path in locations:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'synthetic old report')
+        pm.reindex('demo')
+        assert all(not path.exists() for path in locations)
+    finally:
+        pm.close_all()
+
+
+def test_report_version_mapping_is_recovered_after_process_restart(tmp_path):
+    report_dir = tmp_path / 'demo'
+    report_dir.mkdir()
+    archive_path = report_dir / ('platform-check-' + 'c' * 64 + '.zip')
+    with ZipFile(archive_path, 'w') as archive:
+        archive.writestr('report.json', json.dumps(['key', 0, [], '8.3.27.99']))
+    result = platform_check.forget_report_version(
+        '8.3.27.99', allowed_root=tmp_path, protected_roots=(report_dir,))
+    assert result
+    assert not archive_path.exists()
+
+
+def test_cleanup_report_temps_reports_enumeration_failure(tmp_path, monkeypatch):
+    directory = tmp_path / '.ariadna-service' / 'reports' / 'demo'
+    directory.mkdir(parents=True)
+    original = Path.iterdir
+
+    def denied(path):
+        if path == directory:
+            raise PermissionError('enumeration denied')
+        return original(path)
+
+    monkeypatch.setattr(Path, 'iterdir', denied)
+    result = platform_check.cleanup_report_temps(directory, tmp_path)
+    assert not result
+
+
+def test_report_save_returns_failure_when_archive_trim_fails(tmp_path, monkeypatch):
+    directory = tmp_path / '.ariadna-service' / 'reports' / 'demo'
+    directory.mkdir(parents=True)
+    report = platform_check._Report()
+    report.count, report.starts, report.positions, report.blocks = 0, [], {}, {}
+    monkeypatch.setattr(platform_check, '_trim_archives',
+                        lambda *_args, **_kwargs: platform_check.RemovalResult(False, 'held'))
+    path = directory / ('platform-check-' + 'd' * 64 + '.zip')
+    assert report.save(path, 'key', lambda: None, version='8.3.27.1',
+                       allowed_root=tmp_path) is False
+    assert path.is_file()
+
+
+def test_report_save_does_not_create_directory_when_creation_is_refused(tmp_path, monkeypatch):
+    directory = tmp_path / 'projects' / 'demo' / '.ariadna-service' / 'reports' / 'demo'
+    report = platform_check._Report()
+    monkeypatch.setattr(platform_check, 'directory_creation_is_safe',
+                        lambda *_args, **_kwargs: False)
+    path = directory / ('platform-check-' + 'e' * 64 + '.zip')
+    assert report.save(path, 'key', lambda: None,
+                       allowed_root=tmp_path / 'projects') is False
+    assert not directory.exists()
 
 
 def test_reindex_archive_wins_over_ongoing_background_publication(project, monkeypatch):
@@ -1791,7 +1862,7 @@ def test_explicit_help_version_with_unknown_project(project):
 
 
 def _archives(pm):
-    return sorted(pm._index_path('demo').parent.glob('platform-check*.zip'))
+    return sorted(platform_check.report_directory(pm._index_path('demo')).glob('platform-check*.zip'))
 
 
 def test_repeated_help_uploads_keep_bounded_archives(project, monkeypatch):
@@ -1806,14 +1877,298 @@ def test_repeated_help_uploads_keep_bounded_archives(project, monkeypatch):
     archives = _archives(pm)
     assert 0 < len(archives) <= platform_check._MAX_ARCHIVES
     assert _report_archive(pm) in archives
+
+
+def test_archive_trim_stays_bounded_when_all_mtimes_match(project):
+    pm, _ = project
+    db_path = pm._index_path('demo')
+    directory = platform_check.report_directory(db_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    same_time = 1_700_000_000
+    selected = directory / ('platform-check-' + '0' * 64 + '.zip')
+    selected.write_bytes(b'selected')
+    platform_check._record_report_archive(selected, 'selected')
+    platform_check.select_report_version(db_path, 'selected')
+
+    for number in range(240):
+        published = directory / f'platform-check-{number + 1:064x}.zip'
+        published.write_bytes(b'report')
+        platform_check._record_report_archive(published, f'version-{number}')
+        for archive in directory.glob('platform-check-*.zip'):
+            os.utime(archive, (same_time, same_time))
+        platform_check._trim_archives(published, allowed_root=db_path.parent.parent)
+
+    archives = list(directory.glob('platform-check-*.zip'))
+    assert len(archives) <= platform_check._MAX_ARCHIVES
+    assert selected in archives
+    assert all(filename in {path.name for path in archives}
+               for filename in platform_check._VERSION_ARCHIVES[directory.resolve()].values())
+
+
+def test_project_report_namespace_does_not_collide_with_service_directories(tmp_path):
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    pm.platform_help.build_from_bytes(VERSION, context_book())
+    try:
+        for project_id in ('PLATFORM-HELP', 'Reports'):
+            with pytest.raises(ValueError, match='reserved'):
+                pm.create_project(project_id, project_id)
+        for project_id in ('ordinary',):
+            pm.create_project(project_id, project_id)
+            report_dir = platform_check.report_directory(pm._index_path(project_id))
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / ('platform-check-' + 'b' * 64 + '.zip')).write_bytes(b'report')
+            pm.delete_project(project_id)
+            assert not list(report_dir.glob('platform-check*.zip'))
+            assert not report_dir.exists()
+        assert pm.platform_help.path(VERSION).is_file()
+    finally:
+        pm.close_all()
+
+
+def test_reports_id_cannot_delete_other_projects_reports(tmp_path):
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    try:
+        for project_id in ('alpha', 'beta'):
+            pm.create_project(project_id, project_id)
+            report_dir = platform_check.report_directory(pm._index_path(project_id))
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / ('platform-check-' + 'a' * 64 + '.zip')).write_bytes(b'archive')
+        legacy = index_dir / 'reports' / 'alpha'
+        legacy.mkdir(parents=True)
+        (legacy / ('.platform-check-' + 'b' * 64 + '.zip.crash.tmp')).write_bytes(b'incomplete')
+        # Simulate a pre-upgrade registry entry for the formerly colliding ID.
+        projects = json.loads(pm.registry_path.read_text(encoding='utf-8'))
+        projects['projects']['reports'] = {
+            'id': 'reports', 'name': 'reports', 'description': '',
+            'created_at': '2026-01-01T00:00:00', 'status': 'empty',
+            'sources': [], 'index_stats': {}, 'base_project': None,
+            'release_project': None, 'platform_version': None,
+        }
+        pm.registry_path.write_text(json.dumps(projects), encoding='utf-8')
+        pm._registry = None
+        pm._load_registry()
+
+        restarted = ProjectManager(str(data_dir), index_dir=str(index_dir))
+        assert not list(legacy.glob('*.tmp'))
+        restarted.close_all()
+        pm.delete_project('reports')
+        for project_id in ('alpha', 'beta'):
+            assert next(platform_check.report_directory(pm._index_path(project_id)).glob('*.zip')).exists()
+    finally:
+        pm.close_all()
+
+
+def test_long_project_id_returns_http_400(tmp_path, monkeypatch):
+    pm = ProjectManager(str(tmp_path))
+    monkeypatch.setattr(web, '_pm', pm)
+    try:
+        with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+            response = client.post('/api/projects', data={'project_id': 'x' * 256,
+                                                           'name': 'long'})
+        assert response.status_code == 400
+        assert 'up to 64' in response.text
+    finally:
+        pm.close_all()
+
+
+def test_legacy_report_tmp_is_removed_on_startup_and_project_deletion(tmp_path):
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    pm.create_project('legacy', 'legacy')
+    old_reports = index_dir / 'reports' / 'legacy'
+    old_reports.mkdir(parents=True)
+    temp = old_reports / ('.platform-check-' + 'c' * 64 + '.zip.crash.tmp')
+    temp.write_text('synthetic source line', encoding='utf-8')
+    finished = old_reports / ('platform-check-' + 'd' * 64 + '.zip')
+    finished.write_bytes(b'synthetic archive')
+    try:
+        pm.close_all()
+        restarted = ProjectManager(str(data_dir), index_dir=str(index_dir))
+        assert not temp.exists()
+        assert not finished.exists()
+        assert not old_reports.exists()
+        old_reports.mkdir(parents=True)
+        temp.write_text('synthetic source line', encoding='utf-8')
+        restarted.delete_project('legacy')
+        assert not list(data_dir.rglob('*legacy*'))
+        assert not old_reports.exists()
+        restarted.close_all()
+    finally:
+        pm.close_all()
+
+
+def test_deleted_help_version_and_project_release_archive_bookkeeping(project, monkeypatch):
+    pm, _ = project
+    older = '8.3.9.1'
+    pm.platform_help.build_from_bytes(older, context_book(older))
+    db_path = pm._index_path('demo')
+    directory = platform_check.report_directory(db_path).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    archived = directory / ('platform-check-' + 'c' * 64 + '.zip')
+    archived.write_bytes(b'old report')
+    platform_check._record_report_archive(archived, older)
+    platform_check.select_report_version(db_path, older)
+    monkeypatch.setattr(pm, 'warm_platform_checks', lambda *args, **kwargs: None)
+    monkeypatch.setattr(web, '_pm', pm)
+    with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
+        response = client.post(f'/api/admin/platform-help/{older}/delete')
+    assert response.status_code == 200
+    assert directory not in platform_check._SELECTED_VERSIONS
+    assert older not in platform_check._VERSION_ARCHIVES.get(directory, {})
+
+    platform_check.select_report_version(db_path, older)
+    pm.delete_project('demo')
+    assert directory not in platform_check._SELECTED_VERSIONS
+    assert directory not in platform_check._SELECTED_ARCHIVES
+    assert directory not in platform_check._VERSION_ARCHIVES
+    assert not archived.exists()
+
+
+def test_selected_report_archive_is_recent_for_lru_pruning(project):
+    pm, _ = project
     assert 'НесуществующийВызов()' in _ready_check(pm)
+    selected = _report_archive(pm)
+    old = time.time() - 3600
+    os.utime(selected, (old, old))
+
+    # Выбор того же отчёта из памяти обязан обновить использование архива.
+    assert 'НесуществующийВызов()' in execute_tool(pm, 'check_platform_calls', {})
+    assert selected.stat().st_mtime > old
+
+    directory = selected.parent
+    published = directory / ('platform-check-' + 'f' * 64 + '.zip')
+    published.write_bytes(b'new')
+    for number in range(3):
+        path = directory / f'platform-check-{number:064x}.zip'
+        path.write_bytes(b'old')
+        os.utime(path, (old + number, old + number))
+    platform_check._trim_archives(published, allowed_root=pm._index_path('demo').parent.parent)
+    assert selected.exists()
+
+
+def test_late_help_reports_keep_archive_for_selected_version(project, monkeypatch):
+    pm, _ = project
+    versions = ('8.3.23.1', '8.3.24.1', '8.3.25.1', '8.3.26.1')
+    for version in versions:
+        pm.platform_help.build_from_bytes(version, context_book(version))
+
+    pm.update_project('demo', platform_version=versions[0])
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    selected_archive = _report_archive(pm)
+
+    entered = Barrier(4)
+    release = Event()
+    original_build = platform_check._Report._build
+
+    def delayed_build(report, engine, conn, index, mode):
+        if index.version in versions[1:]:
+            entered.wait(timeout=5)
+            assert release.wait(timeout=5)
+        return original_build(report, engine, conn, index, mode)
+
+    monkeypatch.setattr(platform_check._Report, '_build', delayed_build)
+    try:
+        engine = pm.get_search('demo')
+        revision = platform_check._index_revision(engine.db.read_conn())
+        for version in versions[1:]:
+            pm.update_project('demo', platform_version=version)
+            index = pm.platform_help.get(version)
+            with pytest.raises(platform_check.ReportUnavailable, match='готовится'):
+                platform_check._request_report(engine, index, pm.platform_mode('demo'),
+                                               revision, 'demo', warm=True)
+
+        entered.wait(timeout=5)
+        pm.update_project('demo', platform_version=versions[0])
+        result = execute_tool(pm, 'check_platform_calls', {})
+        assert 'НесуществующийВызов()' in result
+        assert selected_archive.exists()
+    finally:
+        release.set()
+
+    _join_workers(_report_workers(pm))
+    assert selected_archive.exists()
+    platform_check._REPORTS.clear()
+    assert 'НесуществующийВызов()' in execute_tool(pm, 'check_platform_calls', {})
+
+
+def test_startup_removes_incomplete_report_archives(project):
+    pm, _ = project
+    temp = platform_check.report_directory(pm._index_path('demo')) / ('.platform-check-' + 'a' * 64 + '.zip.crash.tmp')
+    temp.parent.mkdir(parents=True, exist_ok=True)
+    temp.write_bytes(b'incomplete')
+    restarted = ProjectManager(str(pm.data_dir))
+    assert not temp.exists()
+    restarted.close_all()
+
+
+def test_project_deletion_waits_for_report_archive_writer(project, monkeypatch):
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    cache = _report_archive(pm)
+    cache.unlink()
+    publishing, release = Event(), Event()
+    replace = platform_check.replace_with_retry
+
+    def delay_replace(temp, path):
+        publishing.set()
+        assert release.wait(timeout=10)
+        replace(temp, path)
+
+    monkeypatch.setattr(platform_check, 'replace_with_retry', delay_replace)
+    pm.warm_platform_checks(project_id='demo')
+    assert publishing.wait(timeout=5)
+    writer, = _report_workers(pm)
+    project_dir = pm.projects_dir / 'demo'
+    index_dir = pm._index_path('demo').parent
+    with ThreadPoolExecutor(1) as pool:
+        deleting = pool.submit(pm.delete_project, 'demo')
+        try:
+            time.sleep(0.05)
+            assert not deleting.done()
+        finally:
+            release.set()
+        deleting.result(timeout=5)
+    writer.join(timeout=5)
+    assert not writer.is_alive()
+    assert not project_dir.exists() and not index_dir.exists()
+
+
+def test_platform_warm_requests_coalesce_to_latest_project_version(project, monkeypatch):
+    pm, _ = project
+    newest = '8.3.28.1'
+    pm.update_project('demo', platform_version=VERSION)
+    pm.platform_help.build_from_bytes(newest, context_book(newest))
+    entered, release = Event(), Event()
+    warmed = []
+
+    def track(engine, index, mode, project_id, *args, **kwargs):
+        warmed.append(index.version)
+        if len(warmed) == 1:
+            entered.set()
+            assert release.wait(timeout=10)
+
+    monkeypatch.setattr(platform_check, 'warm_ready_report', track)
+    pm.warm_platform_checks(project_id='demo')
+    try:
+        assert entered.wait(timeout=5)
+        pm.update_project('demo', platform_version=newest)
+        for _ in range(8):
+            pm.warm_platform_checks(project_id='demo')
+        coordinators = [t for t in running_threads() if t.name.startswith('platform-check-warm-')]
+        assert len(coordinators) == 1
+    finally:
+        release.set()
+    _join_workers([t for t in running_threads() if t.name.startswith('platform-check-warm-')])
+    assert warmed == [VERSION, newest]
 
 
 def test_busy_archive_does_not_stop_pruning(project, monkeypatch):
     """Занятый архив (Windows держит открытый файл) не прерывает удаление остальных."""
     pm, _ = project
     assert 'НесуществующийВызов()' in _ready_check(pm)
-    directory = pm._index_path('demo').parent
+    directory = platform_check.report_directory(pm._index_path('demo'))
     stale = [directory / f'platform-check-{str(i) * 64}.zip' for i in range(1, 4)]
     for path in stale:
         path.write_bytes(b'old')
@@ -1830,3 +2185,141 @@ def test_busy_archive_does_not_stop_pruning(project, monkeypatch):
     platform_check.prune_report_archives(pm._index_path('demo'))
     assert busy.exists()
     assert not any(path.exists() for path in stale[1:])
+
+
+def test_prune_and_trim_respect_other_projects_inside_common_root(tmp_path):
+    """Два проекта в общем корне индексов: очистка архивов одного не трогает
+    файлы внутри каталога другого, даже когда ссылка в середине пути ведёт
+    каталог отчётов первого внутрь каталога второго."""
+    import subprocess
+
+    data, index = tmp_path / 'data', tmp_path / 'index'
+    index.mkdir(parents=True)
+    pm = ProjectManager(str(data), str(index))
+    try:
+        pm.create_project('a', 'a')
+        pm.create_project('b', 'b')
+        # Файл-жертва лежит в дереве проекта b; ссылка .ariadna-service в
+        # общем корне направляет каталог отчётов проекта a внутрь каталога b.
+        victim_dir = index / 'b' / '.ariadna-service' / 'reports' / 'a'
+        victim_dir.mkdir(parents=True)
+        victim = victim_dir / 'platform-check.zip'
+        victim.write_bytes(b'keep')
+        b_service = index / 'b' / '.ariadna-service'
+        service_link = index / '.ariadna-service'
+        if os.name == 'nt':
+            result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(service_link), str(b_service)],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                pytest.fail(f'junction creation failed on Windows: {result.stderr or result.stdout}')
+        else:
+            service_link.symlink_to(b_service, target_is_directory=True)
+        db_a = pm._index_path('a')
+        roots = pm.platform_report_roots('a')
+        # Без защищённых корней ссылка в середине пути не распознаётся и
+        # очистка проекта a удаляет файл внутри каталога проекта b.
+        assert platform_check.prune_report_archives(db_a)
+        assert not victim.exists()
+        victim.write_bytes(b'keep')
+        prune = platform_check.prune_report_archives(db_a, protected_roots=roots)
+        assert not prune and prune.reason == 'каталог архивов небезопасен'
+        assert victim.exists()
+        published = platform_check._archive_path(db_a, 'a' * 64)
+        trim = platform_check._trim_archives(published, allowed_root=index,
+                                             protected_roots=roots)
+        assert not trim
+        assert victim.exists()
+    finally:
+        pm.close_all()
+
+
+def test_save_checks_directory_before_replacing_archive(project, monkeypatch):
+    """Отказ проверки каталога при публикации: прежний ZIP остаётся на месте,
+    а save() не сообщает об успехе."""
+    from array import array
+
+    pm, _ = project
+    assert 'НесуществующийВызов()' in _ready_check(pm)
+    path = _report_archive(pm)
+    before = path.read_bytes()
+    monkeypatch.setattr(platform_check, 'directory_is_safe', lambda *args, **kwargs: False)
+    report = platform_check._Report()
+    report.count = 0
+    report.starts = []
+    report.positions = {level: array('I') for level in platform_check.LEVELS}
+    report.blocks = []
+    assert report.save(path, 'key', before_replace=lambda: None,
+                       allowed_root=pm._index_path('demo').parent.parent) is False
+    assert path.read_bytes() == before
+
+
+def test_report_worker_acquires_project_pin_before_reports_lock(project, monkeypatch):
+    """Захват отчётного mutex не должен предшествовать чтению реестра в pin."""
+    from threading import Lock, get_ident
+
+    pm, _ = project
+    _join_workers(_report_workers(pm))
+    engine = pm.get_search('demo')
+    index = pm.platform_help.get(pm.platform_help_version('demo'))
+    conn = engine.db.read_conn()
+    revision = platform_check.check_index(conn, 'demo')
+
+    class ObservedLock:
+        def __init__(self):
+            self.lock = Lock()
+            self.owner = None
+
+        def __enter__(self):
+            self.lock.acquire()
+            self.owner = get_ident()
+
+        def __exit__(self, *_args):
+            self.owner = None
+            self.lock.release()
+
+    observed = ObservedLock()
+
+    class Pin:
+        def __enter__(self):
+            assert observed.owner != get_ident()
+
+        def __exit__(self, *_args):
+            pass
+
+    def pin(_project_id):
+        return Pin()
+
+    monkeypatch.setattr(platform_check, '_REPORTS_LOCK', observed)
+    key = platform_check._cache_key(engine, index, pm.platform_mode('demo'), revision)
+    cache_id = (engine.db, key)
+    platform_check._REPORTS.pop(cache_id, None)
+    archive = platform_check._archive_path(engine.db.db_path, key)
+    archive.unlink(missing_ok=True)
+    try:
+        with pytest.raises(platform_check.ReportUnavailable):
+            platform_check._request_report(
+                engine, index, pm.platform_mode('demo'), revision, 'demo', project_pin=pin)
+    finally:
+        _join_workers(_report_workers(pm))
+        engine.db.close_thread_reader()
+
+
+def test_selected_report_version_is_restored_from_registry_on_startup(tmp_path):
+    pm = ProjectManager(str(tmp_path), index_dir=str(tmp_path / 'index'))
+    pm.create_project('demo', 'Demo')
+    pm.update_project('demo', platform_version=VERSION)
+    directory = platform_check.report_directory(pm._index_path('demo'))
+    directory.mkdir(parents=True, exist_ok=True)
+    archive = directory / ('platform-check-' + 'b' * 64 + '.zip')
+    with ZipFile(archive, 'w') as zipped:
+        zipped.writestr('report.json', json.dumps(['key', 0, [], VERSION]))
+    pm.close_all()
+
+    restarted = ProjectManager(str(tmp_path), index_dir=str(tmp_path / 'index'))
+    resolved = directory.resolve()
+    try:
+        assert platform_check._SELECTED_VERSIONS[resolved] == VERSION
+        assert platform_check._SELECTED_ARCHIVES[resolved] == archive.name
+    finally:
+        platform_check.forget_report_project(restarted._index_path('demo'))
+        restarted.close_all()

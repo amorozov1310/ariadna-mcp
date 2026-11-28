@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -11,14 +12,19 @@ import tempfile
 import time
 import zipfile
 import contextlib
+from fnmatch import fnmatchcase
 import zlib
 from pathlib import Path, PurePosixPath
+
+from .fs_safety import remove_path_safely
 from typing import BinaryIO
 
 MAX_ENTRIES = 250_000
 MAX_PATH = 1024
 MAX_UNPACKED = 32 * 1024**3
 SUSPICIOUS_DELETE_FLOOR = 1000
+
+logger = logging.getLogger('ariadna')
 
 
 def _checkpoint(_name: str) -> None:
@@ -308,28 +314,49 @@ def _merge_dir_contents(source: Path, destination: Path) -> None:
 def recover(root: Path, workspace: Path | None = None, *, lock_held: bool = False) -> bool:
     root = Path(root)
     workspace = Path(workspace) if workspace is not None else root.parent / f".{root.name}-delta-state"
-    if not lock_held:
-        try:
+    try:
+        if not lock_held:
             with transaction_lock(workspace):
                 return recover(root, workspace, lock_held=True)
-        except DeltaBusy:
-            return False
-    return _recover_locked(root, workspace)
+        return _recover_locked(root, workspace)
+    except (DeltaBusy, OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning('Не удалось восстановить журнал изменений источника %s: %s', workspace, exc)
+        return False
 
 
 def _recover_locked(root: Path, workspace: Path) -> bool:
     journal = _journal_path(workspace)
-    if not journal.exists():
-        for orphan in (*workspace.glob('staging-*'), *workspace.glob('rollback-*')):
-            shutil.rmtree(orphan, ignore_errors=True)
+    try:
+        journal.stat()
+    except FileNotFoundError:
+        # Path.glob скрывает PermissionError при обходе на некоторых версиях
+        # pathlib. iterdir поднимает отказ чтения, и recover возвращает False.
+        try:
+            children = list(workspace.iterdir())
+        except FileNotFoundError:
+            return True
+        orphans = [path for path in children
+                   if fnmatchcase(path.name, 'staging-*') or
+                   fnmatchcase(path.name, 'rollback-*')]
+        for orphan in orphans:
+            result = remove_path_safely(orphan, workspace.parent)
+            if not result:
+                logger.warning('Не удалось очистить остаток транзакции %s: %s', orphan, result.reason)
+                return False
         return True
     data = json.loads(journal.read_text("utf-8"))
     backup = Path(data["backup"])
     staging = Path(data["staging"]) if data.get("staging") else None
     if data.get("committed"):
-        shutil.rmtree(backup, ignore_errors=True)
+        results = [remove_path_safely(backup, workspace.parent)]
         if staging is not None:
-            shutil.rmtree(staging, ignore_errors=True)
+            results.append(remove_path_safely(staging, workspace.parent))
+        failed = [result for result in results if not result]
+        if failed:
+            # Журнал остаётся: повторный recover дочистит, когда файл отпустят.
+            logger.warning('Не удалось дочистить резервную копию %s: %s',
+                           backup, failed[0].reason)
+            return False
         journal.unlink(missing_ok=True)
         return True
     old_by_fold = {rel.casefold(): rel for rel in data.get("old", [])}
@@ -390,9 +417,16 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
                 directory.rmdir()
             except OSError:
                 pass
-    shutil.rmtree(backup, ignore_errors=True)
+    results = [remove_path_safely(backup, workspace.parent)]
     if staging is not None:
-        shutil.rmtree(staging, ignore_errors=True)
+        results.append(remove_path_safely(staging, workspace.parent))
+    failed = [result for result in results if not result]
+    if failed:
+        # Откат выполнен, но временные каталоги остались: журнал сохраняем,
+        # чтобы повторный recover довёл очистку до конца.
+        logger.warning('Не удалось дочистить временные каталоги транзакции %s: %s',
+                       workspace, failed[0].reason)
+        return False
     for rel in sorted(data.get("removed_dirs", []), key=lambda p: p.count("/")):
         root.joinpath(*PurePosixPath(rel).parts).mkdir(parents=True, exist_ok=True)
     if data.get("root_created"):
@@ -411,9 +445,12 @@ def apply(root: Path, archive: BinaryIO, target_manifest: dict, base_version: st
     workspace = Path(workspace) if workspace is not None else root.parent / f".{root.name}-delta-state"
     if not lock_held:
         with transaction_lock(workspace):
-            recover(root, workspace, lock_held=True)
+            if not recover(root, workspace, lock_held=True):
+                raise DeltaError("Не удалось восстановить предыдущую операцию с источником")
             return _apply_locked(root, archive, target_manifest, base_version, current, workspace,
                                  journal_context=journal_context)
+    if not recover(root, workspace, lock_held=True):
+        raise DeltaError("Не удалось восстановить предыдущую операцию с источником")
     return _apply_locked(root, archive, target_manifest, base_version, current, workspace,
                          journal_context=journal_context)
 
@@ -636,9 +673,14 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
         journal_data["committed"] = True
         _atomic_json(journal, journal_data)
         _checkpoint('f')
-        shutil.rmtree(backup, ignore_errors=True)
-        _checkpoint('g')
-        journal.unlink(missing_ok=True)
+        cleanup = remove_path_safely(backup, workspace.parent)
+        if cleanup:
+            _checkpoint('g')
+            journal.unlink(missing_ok=True)
+        else:
+            # Изменения уже зафиксированы. Журнал оставляем, чтобы recover()
+            # повторил очистку занятой резервной копии после освобождения.
+            logger.warning('Не удалось удалить резервную копию %s: %s', backup, cleanup.reason)
     except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
         recover(root, workspace, lock_held=True)
         raise DeltaError("Повреждённый ZIP-архив разницы") from exc
@@ -646,5 +688,7 @@ def _apply_locked(root: Path, archive: BinaryIO, target_manifest: dict, base_ver
         recover(root, workspace, lock_held=True)
         raise
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        cleanup = remove_path_safely(staging, workspace.parent)
+        if not cleanup:
+            logger.warning('Не удалось удалить временный каталог %s: %s', staging, cleanup.reason)
     return {"applied": len(changed), "deleted": len(removed)}

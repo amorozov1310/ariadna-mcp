@@ -24,8 +24,31 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from src.core.db import Database
+from src.core import db as db_module
+from src.core.fs_safety import RemovalResult
 from src.core.project_manager import ProjectManager
 from src.mcp_server.tools import execute_tool
+
+
+def test_connect_stops_when_stale_database_cannot_be_removed(tmp_path, monkeypatch):
+    path = tmp_path / 'index.db'
+    conn = sqlite3.connect(path)
+    conn.execute('CREATE TABLE calls (id INTEGER)')
+    conn.commit()
+    conn.close()
+    original = db_module.remove_path_safely
+
+    def held(target, *args, **kwargs):
+        if Path(target) == path:
+            return RemovalResult(False, 'held')
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, 'remove_path_safely', held)
+    db = Database(str(path))
+    with pytest.raises(RuntimeError):
+        db.connect()
+    assert db.rebuild_required
+    assert db.conn is None
 
 
 class _Worker:

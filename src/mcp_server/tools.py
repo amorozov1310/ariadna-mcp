@@ -1025,7 +1025,8 @@ def _execute_tool(pm: ProjectManager, tool: str, args: dict) -> str:
             try:
                 page, more, counts, modules = check_calls(
                     engine, index, mode, source_id, limit, offset, levels, project_id, revision,
-                    project_pin=pm.project_pin)
+                    project_pin=pm.project_pin,
+                    protected_roots=pm.platform_report_roots(project_id))
             except ReportUnavailable as e:
                 return str(e)
             except (FileNotFoundError, sqlite3.OperationalError):

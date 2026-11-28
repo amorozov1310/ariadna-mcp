@@ -170,7 +170,14 @@ def remove_help(version: str):
     pm = get_pm()
     store = pm.platform_help
     try:
-        if store.remove(version):
+        from ..core.platform_check import forget_report_version
+        result = forget_report_version(
+            version, allowed_root=pm.index_dir or pm.projects_dir,
+            protected_roots=pm._protected_project_roots())
+        if not result:
+            raise OSError(result.reason or 'не удалось удалить архивы справки')
+        removed = store.remove(version)
+        if removed:
             pm.warm_platform_checks()
     except (ValueError, OSError) as e:
         return _back(error=str(e))

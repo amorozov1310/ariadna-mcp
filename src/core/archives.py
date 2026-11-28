@@ -22,7 +22,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from .fsretry import replace_with_retry, rmtree_with_retry
+from .fsretry import replace_with_retry
+from .fs_safety import remove_path_safely
 
 # Выгрузка крупной типовой конфигурации — порядка 100 тыс. файлов и 10 ГБ;
 # умолчания с большим запасом, но конечные.
@@ -101,11 +102,14 @@ def _spool(fileobj: BinaryIO, directory: Path) -> Path:
     return Path(tmp)
 
 
-def extract_archive(fileobj: BinaryIO, filename: str, dest: Path) -> None:
+def extract_archive(fileobj: BinaryIO, filename: str, dest: Path,
+                    allowed_root: Path | None = None) -> None:
     """Проверить и распаковать архив в dest, заменив его содержимое целиком.
 
     Формат — по расширению (.zip, .tar.gz/.tgz); иначе пробуется zip, затем tar.
     UnsafeArchiveError (подкласс ValueError) — архив отклонён, dest не тронут.
+    allowed_root — граница удаления прежней выгрузки (каталог проекта);
+    по умолчанию — родитель родителя dest.
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -132,12 +136,18 @@ def extract_archive(fileobj: BinaryIO, filename: str, dest: Path) -> None:
         # Распакованные файлы сразу после записи проверяет антивирус —
         # переименование каталога и удаление старого на Windows ненадолго
         # падают с «Отказано в доступе» (см. fsretry).
-        if dest.exists():
-            rmtree_with_retry(dest)
+        root = Path(allowed_root) if allowed_root is not None else dest.parent.parent
+        result = remove_path_safely(dest, root)
+        if not result:
+            raise OSError(result.reason or f'Не удалось удалить прежнюю выгрузку {dest}')
         replace_with_retry(staging, dest)
     except zipfile.BadZipFile as e:
         raise UnsafeArchiveError(f'Архив повреждён: {e}') from e
     finally:
-        spooled.unlink(missing_ok=True)
+        result = remove_path_safely(spooled, dest.parent, recursive=False)
+        if not result:
+            raise OSError(result.reason or f'Не удалось удалить временный архив {spooled}')
         if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
+            result = remove_path_safely(staging, dest.parent)
+            if not result:
+                raise OSError(result.reason or f'Не удалось удалить временный каталог {staging}')

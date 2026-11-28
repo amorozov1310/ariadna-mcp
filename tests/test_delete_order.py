@@ -13,6 +13,8 @@ import io
 import os
 import shutil
 import sqlite3
+import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from src.core import project_manager as pm_module
+from src.core.fs_safety import is_link_like
 from src.core.project_manager import ProjectFilesNotRemovedError, ProjectManager
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -85,10 +88,46 @@ def test_failed_file_removal_reports_path_and_retry_cleans_up(monkeypatch):
             pm.delete_project('p1')                 # повтор дочищает
             assert not index_parent.exists()
             assert not (pm.projects_dir / 'p1').exists()
-            with pytest.raises(KeyError):
-                pm.delete_project('p1')             # удалять больше нечего
+            assert pm.delete_project('p1') is False  # повторное удаление идемпотентно
         finally:
             pm.close_all()
+
+
+def test_retry_after_report_archive_removal_failure_cleans_unregistered_project(monkeypatch, tmp_path):
+    data_dir = tmp_path / 'data'
+    pm = ProjectManager(str(data_dir))
+    pm.create_project('p', 'p')
+    from src.core.platform_check import report_directory
+    report_dir = report_directory(pm._index_path('p'))
+    report_dir.mkdir(parents=True)
+    archive = report_dir / 'platform-check.zip'
+    archive.write_bytes(b'archive')
+    real_remove = pm_module.remove_path_safely
+    fail_once = {True}
+
+    def busy_report(path, *args, **kwargs):
+        if Path(path) == report_dir and fail_once:
+            fail_once.clear()
+            raise PermissionError(13, 'файл занят другим процессом', str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(pm_module, 'remove_path_safely', busy_report)
+    try:
+        with pytest.raises(ProjectFilesNotRemovedError):
+            pm.delete_project('p')
+        assert 'p' not in [project.id for project in pm.list_projects()]
+        assert archive.exists()
+        # Состояние незавершённого удаления переживает перезапуск и удерживает ID.
+        restarted = ProjectManager(str(data_dir))
+        with pytest.raises(ValueError, match='ещё удаляется'):
+            restarted.create_project('p', 'new')
+        assert restarted.delete_project('p') is True
+        assert not report_dir.exists()
+        assert not archive.exists()
+        assert restarted.create_project('p', 'new').id == 'p'
+        restarted.close_all()
+    finally:
+        pm.close_all()
 
 
 def test_web_ui_reports_failed_removal_as_500(monkeypatch):
@@ -114,6 +153,291 @@ def test_web_ui_reports_failed_removal_as_500(monkeypatch):
             assert not (pm.projects_dir / 'p1').exists()
         finally:
             pm.close_all()
+
+
+def test_web_api_does_not_report_delete_success_when_helper_returns_false(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    with tempfile.TemporaryDirectory(dir=tmp_path) as tmpdir:
+        pm = ProjectManager(str(Path(tmpdir) / 'data'))
+        pm.create_project('p', 'p')
+        from src.core.platform_check import report_directory
+        report_dir = report_directory(pm._index_path('p'))
+        report_dir.mkdir(parents=True)
+        archive = report_dir / 'platform-check-test.zip'
+        archive.write_bytes(b'archive')
+        monkeypatch.setattr(app_module, '_pm', pm)
+        real_remove = pm_module.remove_path_safely
+        monkeypatch.setattr(pm_module, 'remove_path_safely', lambda *a, **kw: False)
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        try:
+            for _ in range(3):
+                response = client.delete('/api/projects/p')
+                assert response.status_code == 500
+                assert 'удал' in response.json()['detail']
+                assert archive.exists()
+            monkeypatch.setattr(pm_module, 'remove_path_safely', real_remove)
+            assert client.delete('/api/projects/p').status_code == 200
+            assert not archive.exists()
+        finally:
+            pm.close_all()
+
+
+@pytest.mark.parametrize('method, path', [
+    ('delete', '/api/projects/'),
+    ('delete', '/api/projects//'),
+    ('post', '/api/projects//delete'),
+    ('post', '/api/projects//delete/'),
+])
+def test_empty_project_ids_on_both_delete_routes_are_bad_request(method, path):
+    """Матрица пустого ID: со слэшем и без, JSON и форма — всегда 400 с
+    объяснением, без 307-редиректа (405/404)."""
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'},
+                        follow_redirects=False)
+    response = getattr(client, method)(path)
+    assert response.status_code == 400
+    assert 'location' not in response.headers
+    assert 'ID проекта' in response.json()['detail']
+
+
+def test_injected_removal_reason_reaches_delete_responses(monkeypatch, tmp_path):
+    """Причина отказа общего helper'а доходит до ответа без подмены — и для
+    JSON API, и для формы, и для каталога проекта."""
+    from fastapi.testclient import TestClient
+    from src.core import fs_safety, platform_check
+    from src.web import app as app_module
+
+    pm = ProjectManager(str(tmp_path / 'data'))
+    pm.create_project('p', 'p')
+    pm.create_project('q', 'q')
+    temp_archive = pm._index_path('p').parent / '.platform-check-x.zip.1.tmp'
+    temp_archive.write_bytes(b'tmp')
+    project_dir_q = pm.projects_dir / 'q'
+    monkeypatch.setattr(app_module, '_pm', pm)
+    real_remove = fs_safety.remove_path_safely
+
+    def injected(path, *args, **kwargs):
+        if Path(path) in (temp_archive, project_dir_q):
+            return fs_safety.RemovalResult(False, 'INJECTED_BUSY')
+        return real_remove(path, *args, **kwargs)
+
+    # Временный архив чистит platform_check, каталог проекта — project_manager:
+    # отказ должен дойти от обеих точек.
+    monkeypatch.setattr(platform_check, 'remove_path_safely', injected)
+    monkeypatch.setattr(pm_module, 'remove_path_safely', injected)
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+    try:
+        for method, url in (('delete', '/api/projects/p'), ('post', '/api/projects/p/delete')):
+            response = getattr(client, method)(url)
+            assert response.status_code == 500, response.text
+            assert 'INJECTED_BUSY' in response.json()['detail']
+        assert temp_archive.exists()
+        response = client.delete('/api/projects/q')
+        assert response.status_code == 500, response.text
+        assert 'INJECTED_BUSY' in response.json()['detail']
+        assert project_dir_q.exists()
+    finally:
+        pm.close_all()
+
+
+def test_delete_does_not_follow_project_symlink(tmp_path):
+    data_dir = tmp_path / 'data'
+    projects_dir = data_dir / 'projects'
+    pm = ProjectManager(str(data_dir), str(projects_dir))
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'index.db').write_text('index')
+    (outside / 'platform-check-report.zip').write_text('archive')
+    (outside / 'other.txt').write_text('keep')
+    project_dir = pm.projects_dir / 'p'
+    try:
+        pm.create_project('p', 'p')
+        shutil.rmtree(project_dir)
+        try:
+            project_dir.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            if os.name not in {'nt', 'posix'}:
+                pytest.skip(f'directory symlinks are unsupported: {exc}')
+            pytest.fail(f'directory symlink creation failed on supported platform: {exc}')
+
+        assert pm.delete_project('p') is True
+        assert not project_dir.is_symlink()
+        assert sorted(p.name for p in outside.iterdir()) == [
+            'index.db', 'other.txt', 'platform-check-report.zip']
+    finally:
+        pm.close_all()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows junction нужен для проверки границы проекта')
+def test_intermediate_junction_to_other_project_blocks_cleanup(tmp_path):
+    from src.core.fs_safety import directory_is_safe, remove_path_safely
+    projects = tmp_path / 'projects'
+    own = projects / 'own'
+    other = projects / 'other'
+    target = other / 'shared'
+    target.mkdir(parents=True)
+    nested = target / 'nested'
+    nested.mkdir()
+    marker = nested / 'keep.txt'
+    marker.write_text('keep')
+    own.mkdir(parents=True)
+    junction = own / 'hop'
+    result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(junction), str(target)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
+    guarded = (other,)
+    assert not directory_is_safe(junction / 'nested', projects, protected_roots=guarded)
+    removal = remove_path_safely(junction / 'nested', projects, protected_roots=guarded)
+    assert not removal
+    assert marker.read_text() == 'keep'
+
+
+def test_unknown_windows_reparse_tag_is_link_like(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from src.core import fs_safety
+    info = SimpleNamespace(st_file_attributes=0x400, st_reparse_tag=0x9000001A,
+                           st_mode=stat.S_IFDIR)
+    monkeypatch.setattr(fs_safety.os, 'lstat', lambda _path: info)
+    assert fs_safety.is_link_like(tmp_path / 'unknown-reparse')
+
+
+def test_startup_report_temp_cleanup_does_not_follow_symlink(tmp_path):
+    data_dir = tmp_path / 'data'
+    pm = ProjectManager(str(data_dir))
+    try:
+        pm.create_project('p', 'p')
+        report_dir = pm._index_path('p').parent.parent / '.ariadna-service' / 'reports' / 'p'
+    finally:
+        pm.close_all()
+
+    outside = tmp_path / 'outside-reports'
+    outside.mkdir()
+    temp_archive = outside / '.platform-check-crash.zip.1.tmp'
+    temp_archive.write_text('keep')
+    cached_archive = outside / 'platform-check.zip'
+    cached_archive.write_text('keep')
+    report_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        report_dir.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        if os.name not in {'nt', 'posix'}:
+            pytest.skip(f'directory symlinks are unsupported: {exc}')
+        pytest.fail(f'directory symlink creation failed on supported platform: {exc}')
+
+    restarted = ProjectManager(str(data_dir))
+    try:
+        from src.core.platform_check import prune_report_archives
+
+        assert temp_archive.read_text() == 'keep'
+        prune_report_archives(restarted._index_path('p'))
+        assert cached_archive.read_text() == 'keep'
+        assert restarted.delete_project('p') is True
+        assert not report_dir.is_symlink()
+        assert temp_archive.read_text() == 'keep'
+    finally:
+        restarted.close_all()
+
+
+def test_delete_skips_report_path_resolved_outside_service_root(tmp_path):
+    data_dir = tmp_path / 'data'
+    pm = ProjectManager(str(data_dir))
+    try:
+        pm.create_project('p', 'p')
+        report_dir = pm._index_path('p').parent.parent / '.ariadna-service' / 'reports' / 'p'
+    finally:
+        pm.close_all()
+
+    outside_reports = tmp_path / 'outside-reports'
+    outside_project_reports = outside_reports / 'p'
+    outside_project_reports.mkdir(parents=True)
+    archive = outside_project_reports / 'platform-check.zip'
+    archive.write_text('keep')
+    report_dir.parent.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        report_dir.parent.symlink_to(outside_reports, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        if os.name not in {'nt', 'posix'}:
+            pytest.skip(f'directory symlinks are unsupported: {exc}')
+        pytest.fail(f'directory symlink creation failed on supported platform: {exc}')
+
+    restarted = ProjectManager(str(data_dir))
+    try:
+        assert restarted.delete_project('p') is True
+        assert archive.read_text() == 'keep'
+        assert report_dir.parent.is_symlink()
+    finally:
+        restarted.close_all()
+
+
+def test_web_delete_returns_explicit_not_found_result(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('p', 'p')
+    monkeypatch.setattr(app_module, '_pm', pm)
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+    try:
+        assert client.delete('/api/projects/p').json()['status'] == 'deleted'
+        response = client.delete('/api/projects/p')
+        assert response.status_code == 404
+        assert response.json() == {'status': 'not_found', 'project_id': 'p'}
+    finally:
+        pm.close_all()
+
+
+def test_missing_reserved_project_returns_404_without_removing_legacy_help(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    legacy_help = index_dir / 'platform-help'
+    marker = legacy_help / '8.3.27.1' / 'help.marker'
+    marker.parent.mkdir(parents=True)
+    marker.write_text('service data', encoding='utf-8')
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    monkeypatch.setattr(app_module, '_pm', pm)
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+    try:
+        json_response = client.delete('/api/projects/platform-help')
+        form_response = client.post('/api/projects/platform-help/delete', follow_redirects=False)
+        assert json_response.status_code == 404
+        assert form_response.status_code == 404
+        assert marker.read_text(encoding='utf-8') == 'service data'
+    finally:
+        pm.close_all()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows junction regression')
+def test_delete_does_not_follow_project_junction(tmp_path):
+    import subprocess
+
+    data_dir = tmp_path / 'data'
+    projects_dir = data_dir / 'projects'
+    pm = ProjectManager(str(data_dir), str(projects_dir))
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'index.db').write_text('index')
+    (outside / 'platform-check-report.zip').write_text('archive')
+    (outside / 'other.txt').write_text('keep')
+    project_dir = pm.projects_dir / 'p'
+    try:
+        pm.create_project('p', 'p')
+        shutil.rmtree(project_dir)
+        result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(project_dir), str(outside)],
+                                capture_output=True, text=True)
+        if result.returncode:
+            pytest.fail(f'junction creation failed on Windows: {result.stderr or result.stdout}')
+
+        assert is_link_like(project_dir)
+        assert pm.delete_project('p') is True
+        assert not os.path.lexists(project_dir)
+        assert sorted(p.name for p in outside.iterdir()) == [
+            'index.db', 'other.txt', 'platform-check-report.zip']
+    finally:
+        pm.close_all()
 
 
 # ============================================
@@ -210,6 +534,36 @@ def test_get_db_for_unregistered_project_creates_nothing():
             pm.close_all()
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows junction regression')
+def test_service_directory_junction_never_expands_trusted_root(tmp_path):
+    import subprocess
+
+    data_dir = tmp_path / 'data'
+    pm = ProjectManager(str(data_dir))
+    pm.create_project('p', 'p')
+    service_dir = pm._index_path('p').parent.parent / '.ariadna-service'
+    pm.close_all()
+
+    outside_service = tmp_path / 'outside-service'
+    outside_report = outside_service / 'reports' / 'p'
+    outside_report.mkdir(parents=True)
+    archive = outside_report / 'platform-check.zip'
+    archive.write_bytes(b'keep')
+    service_dir.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(service_dir), str(outside_service)],
+                            capture_output=True, text=True)
+    if result.returncode:
+        pytest.fail(f'junction creation failed on Windows: {result.stderr or result.stdout}')
+
+    restarted = ProjectManager(str(data_dir))
+    try:
+        assert restarted.delete_project('p') is True
+        assert archive.read_bytes() == b'keep'
+        assert is_link_like(service_dir)
+    finally:
+        restarted.close_all()
+
+
 @pytest.mark.parametrize('how', ['close', 'retire'])
 def test_read_conn_of_closed_database_does_not_recreate_deleted_file(how):
     from src.core.db import Database
@@ -284,3 +638,23 @@ def test_connection_closed_without_retire_keeps_programming_error():
         with pytest.raises(sqlite3.ProgrammingError) as exc:
             conn.execute("SELECT 1")
         assert not isinstance(exc.value, IndexRemovedError)
+
+
+def test_delete_removes_legacy_index_residue_but_preserves_other_project(tmp_path):
+    pm = ProjectManager(str(tmp_path / 'data'), index_dir=str(tmp_path / 'index'))
+    pm.create_project('other', 'Other')
+    legacy_index = pm.projects_dir / 'legacy' / 'index.db'
+    legacy_index.parent.mkdir(parents=True)
+    legacy_index.write_bytes(b'legacy index residue')
+    other_project_dir = pm.projects_dir / 'other'
+    other_index = pm._index_path('other')
+    other_index.parent.mkdir(parents=True, exist_ok=True)
+    other_index.write_bytes(b'other index')
+    try:
+        assert pm.delete_project('legacy') is True
+        assert not legacy_index.exists()
+        assert other_project_dir.is_dir()
+        assert other_index.read_bytes() == b'other index'
+        assert [project.id for project in pm.list_projects()] == ['other']
+    finally:
+        pm.close_all()

@@ -136,6 +136,27 @@ def test_bad_limit_values_fall_back_to_defaults(root, monkeypatch):
     assert (root / 'xml' / 'a').exists()
 
 
+def test_extract_replaces_link_without_touching_its_target(root):
+    """Ссылка на месте прежней выгрузки заменяется новым каталогом, а
+    содержимое цели ссылки остаётся нетронутым."""
+    import os
+
+    outside = root / 'outside'
+    outside.mkdir()
+    (outside / 'keep.txt').write_bytes(b'keep')
+    dest = root / 'xml'
+    try:
+        dest.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        if os.name not in {'nt', 'posix'}:
+            pytest.skip(f'directory symlinks are unsupported: {exc}')
+        pytest.fail(f'directory symlink creation failed on supported platform: {exc}')
+    extract_archive(_zip({'a.xml': b'1'}), 'x.zip', dest)
+    assert not dest.is_symlink()
+    assert (dest / 'a.xml').read_bytes() == b'1'
+    assert (outside / 'keep.txt').read_bytes() == b'keep'
+
+
 def test_rejected_update_keeps_previous_dump():
     """update_source раньше удалял xml/ до распаковки — отклонённый или битый
     архив оставлял источник без выгрузки."""
