@@ -638,3 +638,23 @@ def test_connection_closed_without_retire_keeps_programming_error():
         with pytest.raises(sqlite3.ProgrammingError) as exc:
             conn.execute("SELECT 1")
         assert not isinstance(exc.value, IndexRemovedError)
+
+
+def test_delete_removes_legacy_index_residue_but_preserves_other_project(tmp_path):
+    pm = ProjectManager(str(tmp_path / 'data'), index_dir=str(tmp_path / 'index'))
+    pm.create_project('other', 'Other')
+    legacy_index = pm.projects_dir / 'legacy' / 'index.db'
+    legacy_index.parent.mkdir(parents=True)
+    legacy_index.write_bytes(b'legacy index residue')
+    other_project_dir = pm.projects_dir / 'other'
+    other_index = pm._index_path('other')
+    other_index.parent.mkdir(parents=True, exist_ok=True)
+    other_index.write_bytes(b'other index')
+    try:
+        assert pm.delete_project('legacy') is True
+        assert not legacy_index.exists()
+        assert other_project_dir.is_dir()
+        assert other_index.read_bytes() == b'other index'
+        assert [project.id for project in pm.list_projects()] == ['other']
+    finally:
+        pm.close_all()

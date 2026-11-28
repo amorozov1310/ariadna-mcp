@@ -992,6 +992,7 @@ class ProjectManager:
                     raise
             elif (pending_id is None and
                   not (self._index_path(project_id).is_file() or
+                       self._index_path(project_id, legacy=True).is_file() or
                        (project_dir / 'sources').is_dir())):
                 return False
 
