@@ -2248,5 +2248,57 @@ def test_save_checks_directory_before_replacing_archive(project, monkeypatch):
     report.starts = []
     report.positions = {level: array('I') for level in platform_check.LEVELS}
     report.blocks = []
-    assert report.save(path, 'key', before_replace=lambda: None) is False
+    assert report.save(path, 'key', before_replace=lambda: None,
+                       allowed_root=pm._index_path('demo').parent.parent) is False
     assert path.read_bytes() == before
+
+
+def test_report_worker_acquires_project_pin_before_reports_lock(project, monkeypatch):
+    """Захват отчётного mutex не должен предшествовать чтению реестра в pin."""
+    from threading import Lock, get_ident
+
+    pm, _ = project
+    _join_workers(_report_workers(pm))
+    engine = pm.get_search('demo')
+    index = pm.platform_help.get(pm.platform_help_version('demo'))
+    conn = engine.db.read_conn()
+    revision = platform_check.check_index(conn, 'demo')
+
+    class ObservedLock:
+        def __init__(self):
+            self.lock = Lock()
+            self.owner = None
+
+        def __enter__(self):
+            self.lock.acquire()
+            self.owner = get_ident()
+
+        def __exit__(self, *_args):
+            self.owner = None
+            self.lock.release()
+
+    observed = ObservedLock()
+
+    class Pin:
+        def __enter__(self):
+            assert observed.owner != get_ident()
+
+        def __exit__(self, *_args):
+            pass
+
+    def pin(_project_id):
+        return Pin()
+
+    monkeypatch.setattr(platform_check, '_REPORTS_LOCK', observed)
+    key = platform_check._cache_key(engine, index, pm.platform_mode('demo'), revision)
+    cache_id = (engine.db, key)
+    platform_check._REPORTS.pop(cache_id, None)
+    archive = platform_check._archive_path(engine.db.db_path, key)
+    archive.unlink(missing_ok=True)
+    try:
+        with pytest.raises(platform_check.ReportUnavailable):
+            platform_check._request_report(
+                engine, index, pm.platform_mode('demo'), revision, 'demo', project_pin=pin)
+    finally:
+        _join_workers(_report_workers(pm))
+        engine.db.close_thread_reader()

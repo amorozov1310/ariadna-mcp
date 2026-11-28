@@ -694,8 +694,10 @@ def forget_report_version(version, allowed_root=None, protected_roots=()):
                    allowed_root / '.ariadna-service' / 'reports'):
         try:
             discovered.update(child.resolve() for child in parent.iterdir() if child.is_dir())
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            return RemovalResult(False, f'не удалось перечислить каталог {parent}')
     directories = sorted(set(directories) | set(selected_directories) | discovered, key=str)
     with ExitStack() as locks:
         for directory in directories:
@@ -710,7 +712,15 @@ def forget_report_version(version, allowed_root=None, protected_roots=()):
         # Старые ZIP не содержат версии в заголовке. Это только кэш, поэтому
         # при удалении справки очищаем такие архивы во всех известных раскладках.
         for directory in directories:
-            for path in directory.glob('platform-check*.zip'):
+            try:
+                paths = list(directory.iterdir())
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                return RemovalResult(False, f'не удалось перечислить архивы в {directory}: {exc}')
+            for path in paths:
+                if not path.name.startswith('platform-check') or not path.name.endswith('.zip'):
+                    continue
                 if not _CACHE_ARCHIVE.fullmatch(path.name) or path in obsolete:
                     continue
                 try:
@@ -831,6 +841,8 @@ def prune_report_archives(db_path, keep=(), protected_roots=()):
     """Удалить архивы предыдущего индекса и общий ZIP старого формата."""
     directory = _report_directory(db_path)
     allowed_root = Path(db_path).parent.parent
+    if not directory.exists() and not is_link_like(directory):
+        return RemovalResult(True)
     if not directory_is_safe(directory, allowed_root, protected_roots=protected_roots):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
         return RemovalResult(False, 'каталог архивов небезопасен')
@@ -840,12 +852,17 @@ def prune_report_archives(db_path, keep=(), protected_roots=()):
             selected = _SELECTED_ARCHIVES.get(directory.resolve())
         if selected:
             keep.add(selected)
-        results = []
-        for path in directory.glob('platform-check*.zip'):
-            if _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
-                results.append(_unlink_archive(path, allowed_root, protected_roots))
-        _sync_archive_registry(directory)
-        return next((result for result in results if not result), RemovalResult(True))
+        try:
+            paths = list(directory.iterdir())
+            results = []
+            for path in paths:
+                if path.name.startswith('platform-check') and path.name.endswith('.zip') and \
+                        _CACHE_ARCHIVE.fullmatch(path.name) and path.name not in keep:
+                    results.append(_unlink_archive(path, allowed_root, protected_roots))
+            _sync_archive_registry(directory)
+            return next((result for result in results if not result), RemovalResult(True))
+        except OSError as exc:
+            return RemovalResult(False, f'не удалось перечислить архивы: {exc}')
 
 
 def _sync_archive_registry(directory):
@@ -896,11 +913,16 @@ def _trim_archives(published, allowed_root=None, protected_roots=()):
     if not directory_is_safe(directory, allowed_root, protected_roots=protected_roots):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
         return RemovalResult(False, 'каталог архивов небезопасен')
-    _sync_archive_registry(directory)
+    try:
+        _sync_archive_registry(directory)
+        paths = list(directory.iterdir())
+    except OSError as exc:
+        return RemovalResult(False, f'не удалось перечислить архивы: {exc}')
     with _REPORTS_LOCK:
         selected = _SELECTED_ARCHIVES.get(directory.resolve())
-    for path in directory.glob('platform-check*.zip'):
-        if path != published and _CACHE_ARCHIVE.fullmatch(path.name):
+    for path in paths:
+        if path.name.startswith('platform-check') and path.name.endswith('.zip') and \
+                path != published and _CACHE_ARCHIVE.fullmatch(path.name):
             try:
                 stat = path.stat()
                 with _REPORTS_LOCK:
@@ -927,8 +949,12 @@ def _trim_archives(published, allowed_root=None, protected_roots=()):
     failed = next((result for result in results if not result), None)
     if failed is not None:
         return failed
-    remaining = [path for path in directory.glob('platform-check*.zip')
-                 if _CACHE_ARCHIVE.fullmatch(path.name)]
+    try:
+        remaining = [path for path in directory.iterdir()
+                     if path.name.startswith('platform-check') and path.name.endswith('.zip')
+                     and _CACHE_ARCHIVE.fullmatch(path.name)]
+    except OSError as exc:
+        return RemovalResult(False, f'не удалось перечислить архивы: {exc}')
     if len(remaining) > _MAX_ARCHIVES:
         return RemovalResult(False, 'лимит архивов не соблюдён')
     if selected and not (directory / selected).is_file():
@@ -1389,12 +1415,16 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
                 with _REPORTS_LOCK:
                     _remember(cache_id, restored)
                 return key, restored
+        # Порядок блокировок: реестр (внутри project_pin/get_db) раньше
+        # _REPORTS_LOCK. update_project сохраняет этот порядок при смене версии.
+        pin = project_pin(project_id) if project_pin is not None else None
+        if pin is not None:
+            pin.__enter__()
         with _REPORTS_LOCK:
             if db in _CLOSING_DATABASES:
+                if pin is not None:
+                    pin.__exit__(None, None, None)
                 raise ReportUnavailable('Индекс закрывается. Повторите проверку.')
-            pin = project_pin(project_id) if project_pin is not None else None
-            if pin is not None:
-                pin.__enter__()
             thread = Thread(target=prepare, args=(report, pin), daemon=True, name=f'platform-check-{project_id}')
             _REPORT_JOBS[cache_id] = thread
             try:

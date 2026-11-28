@@ -195,9 +195,97 @@ def test_report_save_checks_before_creating_temporary_zip(tmp_path, monkeypatch)
 
     monkeypatch.setattr(platform_check, 'directory_is_safe', lambda *args, **kwargs: False)
     monkeypatch.setattr(platform_check, 'NamedTemporaryFile', track_temp)
-    assert report.save(path, 'key', before_replace=lambda: None) is False
+    assert report.save(path, 'key', before_replace=lambda: None,
+                       allowed_root=tmp_path) is False
     assert not created
     assert not list(directory.glob('*.tmp'))
+
+
+def test_corrupt_cold_registry_keeps_file_and_returns_empty_registry(tmp_path):
+    registry = tmp_path / 'projects.json'
+    registry.write_text('{broken json', encoding='utf-8')
+    pm = ProjectManager(str(tmp_path))
+    try:
+        assert pm.list_projects() == []
+        assert registry.read_text(encoding='utf-8') == '{broken json'
+    finally:
+        pm.close_all()
+
+
+def test_help_migration_does_not_overwrite_or_resurrect_copied_files(tmp_path):
+    legacy = tmp_path / 'platform-help'
+    old_file = legacy / '8.3' / 'help.db'
+    old_file.parent.mkdir(parents=True)
+    old_file.write_bytes(b'old')
+    removed_file = legacy / '8.4' / 'help.db'
+    removed_file.parent.mkdir(parents=True)
+    removed_file.write_bytes(b'removed later')
+    pm = ProjectManager(str(tmp_path))
+    try:
+        new_root = pm.platform_help.root
+        assert (new_root / '8.3' / 'help.db').read_bytes() == b'old'
+        (new_root / '8.3' / 'help.db').write_bytes(b'new')
+        (new_root / '8.4' / 'help.db').unlink()
+    finally:
+        pm.close_all()
+
+    restarted = ProjectManager(str(tmp_path))
+    try:
+        assert (restarted.platform_help.root / '8.3' / 'help.db').read_bytes() == b'new'
+        assert not (restarted.platform_help.root / '8.4' / 'help.db').exists()
+    finally:
+        restarted.close_all()
+
+
+def test_delete_finalization_preserves_another_process_pending_id(tmp_path, monkeypatch):
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('remove-me', 'remove-me')
+    real = pm._forget_project_resources
+
+    def external_writer(project_id):
+        data = json.loads(pm.registry_path.read_text(encoding='utf-8'))
+        data['pending_deletions'] = ['remove-me', 'latest']
+        pm._write_registry_file(data)
+        return real(project_id)
+
+    monkeypatch.setattr(pm, '_forget_project_resources', external_writer)
+    try:
+        assert pm.delete_project('remove-me') is True
+        data = json.loads(pm.registry_path.read_text(encoding='utf-8'))
+        assert data['pending_deletions'] == ['latest']
+    finally:
+        pm.close_all()
+
+
+def test_delete_alias_does_not_clear_reserved_canonical_directory(tmp_path):
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project('Straße', 'Straße')
+    pm._pending_project_deletions.add('Straße')
+    try:
+        assert pm.delete_project('Strasse') is False
+        assert (pm.projects_dir / 'Straße').exists()
+        assert 'Straße' in pm._pending_project_deletions
+        assert json.loads(pm.registry_path.read_text(encoding='utf-8'))['pending_deletions'] == []
+    finally:
+        pm.close_all()
+
+
+def test_archive_trim_reports_directory_enumeration_failure(tmp_path, monkeypatch):
+    directory = tmp_path / '.ariadna-service' / 'reports' / 'p'
+    directory.mkdir(parents=True)
+    published = directory / ('platform-check-' + 'a' * 64 + '.zip')
+    published.write_bytes(b'zip')
+    real_iterdir = type(directory).iterdir
+
+    def fail_report_listing(path):
+        if path == directory:
+            raise PermissionError('listing denied')
+        return real_iterdir(path)
+
+    monkeypatch.setattr(type(directory), 'iterdir', fail_report_listing)
+    result = platform_check._trim_archives(published, allowed_root=tmp_path)
+    assert not result
+    assert 'перечислить' in result.reason
 
 
 def test_help_delete_retries_report_cleanup_after_help_was_removed(tmp_path, monkeypatch):
