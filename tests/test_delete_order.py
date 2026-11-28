@@ -117,9 +117,15 @@ def test_retry_after_report_archive_removal_failure_cleans_unregistered_project(
             pm.delete_project('p')
         assert 'p' not in [project.id for project in pm.list_projects()]
         assert archive.exists()
-        assert pm.delete_project('p') is True
+        # Состояние незавершённого удаления переживает перезапуск и удерживает ID.
+        restarted = ProjectManager(str(data_dir))
+        with pytest.raises(ValueError, match='ещё удаляется'):
+            restarted.create_project('p', 'new')
+        assert restarted.delete_project('p') is True
         assert not report_dir.exists()
         assert not archive.exists()
+        assert restarted.create_project('p', 'new').id == 'p'
+        restarted.close_all()
     finally:
         pm.close_all()
 
@@ -378,6 +384,28 @@ def test_web_delete_returns_explicit_not_found_result(tmp_path, monkeypatch):
         response = client.delete('/api/projects/p')
         assert response.status_code == 404
         assert response.json() == {'status': 'not_found', 'project_id': 'p'}
+    finally:
+        pm.close_all()
+
+
+def test_missing_reserved_project_returns_404_without_removing_legacy_help(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    legacy_help = index_dir / 'platform-help'
+    marker = legacy_help / '8.3.27.1' / 'help.marker'
+    marker.parent.mkdir(parents=True)
+    marker.write_text('service data', encoding='utf-8')
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    monkeypatch.setattr(app_module, '_pm', pm)
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+    try:
+        json_response = client.delete('/api/projects/platform-help')
+        form_response = client.post('/api/projects/platform-help/delete', follow_redirects=False)
+        assert json_response.status_code == 404
+        assert form_response.status_code == 404
+        assert marker.read_text(encoding='utf-8') == 'service data'
     finally:
         pm.close_all()
 

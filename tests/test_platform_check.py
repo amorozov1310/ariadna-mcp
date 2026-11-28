@@ -1009,16 +1009,86 @@ def test_legacy_shared_archive_is_ignored_and_removed_on_reindex(project):
     pm, _ = project
     assert 'НесуществующийВызов()' in _ready_check(pm)
     old = _report_archive(pm)
-    legacy = old.with_name('platform-check.zip')
-    old.rename(legacy)
+    legacy = pm._legacy_report_directory('demo') / 'platform-check.zip'
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    old.replace(legacy)
     pm.close_all()
 
     assert 'Отчёт готовится' in execute_tool(pm, 'check_platform_calls', {})
     _join_workers(_report_workers(pm))
-    assert old.is_file()
     pm.reindex('demo')
-    assert not legacy.exists() and not old.exists()
+    assert not legacy.exists()
     _assert_persisted_report(pm, VERSION)
+
+
+def test_reindex_cleans_archives_from_current_and_legacy_locations(tmp_path):
+    data_dir, index_dir = tmp_path / 'data', tmp_path / 'index'
+    pm = ProjectManager(str(data_dir), index_dir=str(index_dir))
+    try:
+        _index_fixture(pm, 'demo')
+        locations = (
+            pm._index_path('demo').parent / 'platform-check.zip',
+            pm._index_path('demo', legacy=True).parent / 'platform-check.zip',
+            pm._legacy_report_directory('demo') / 'platform-check.zip',
+        )
+        for path in locations:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'synthetic old report')
+        pm.reindex('demo')
+        assert all(not path.exists() for path in locations)
+    finally:
+        pm.close_all()
+
+
+def test_report_version_mapping_is_recovered_after_process_restart(tmp_path):
+    report_dir = tmp_path / 'demo'
+    report_dir.mkdir()
+    archive_path = report_dir / ('platform-check-' + 'c' * 64 + '.zip')
+    with ZipFile(archive_path, 'w') as archive:
+        archive.writestr('report.json', json.dumps(['key', 0, [], '8.3.27.99']))
+    result = platform_check.forget_report_version(
+        '8.3.27.99', allowed_root=tmp_path, protected_roots=(report_dir,))
+    assert result
+    assert not archive_path.exists()
+
+
+def test_cleanup_report_temps_reports_enumeration_failure(tmp_path, monkeypatch):
+    directory = tmp_path / '.ariadna-service' / 'reports' / 'demo'
+    directory.mkdir(parents=True)
+    original = Path.glob
+
+    def denied(path, pattern):
+        if path == directory:
+            raise PermissionError('enumeration denied')
+        return original(path, pattern)
+
+    monkeypatch.setattr(Path, 'glob', denied)
+    result = platform_check.cleanup_report_temps(directory, tmp_path)
+    assert not result
+
+
+def test_report_save_returns_failure_when_archive_trim_fails(tmp_path, monkeypatch):
+    directory = tmp_path / '.ariadna-service' / 'reports' / 'demo'
+    directory.mkdir(parents=True)
+    report = platform_check._Report()
+    report.count, report.starts, report.positions, report.blocks = 0, [], {}, {}
+    monkeypatch.setattr(platform_check, '_trim_archives',
+                        lambda *_args, **_kwargs: platform_check.RemovalResult(False, 'held'))
+    path = directory / ('platform-check-' + 'd' * 64 + '.zip')
+    assert report.save(path, 'key', lambda: None, version='8.3.27.1',
+                       allowed_root=tmp_path) is False
+    assert path.is_file()
+
+
+def test_report_save_does_not_create_directory_when_creation_is_refused(tmp_path, monkeypatch):
+    directory = tmp_path / 'projects' / 'demo' / '.ariadna-service' / 'reports' / 'demo'
+    report = platform_check._Report()
+    monkeypatch.setattr(platform_check, 'directory_creation_is_safe',
+                        lambda *_args, **_kwargs: False)
+    path = directory / ('platform-check-' + 'e' * 64 + '.zip')
+    assert report.save(path, 'key', lambda: None,
+                       allowed_root=tmp_path / 'projects') is False
+    assert not directory.exists()
 
 
 def test_reindex_archive_wins_over_ongoing_background_publication(project, monkeypatch):
@@ -1826,7 +1896,7 @@ def test_archive_trim_stays_bounded_when_all_mtimes_match(project):
         platform_check._record_report_archive(published, f'version-{number}')
         for archive in directory.glob('platform-check-*.zip'):
             os.utime(archive, (same_time, same_time))
-        platform_check._trim_archives(published)
+        platform_check._trim_archives(published, allowed_root=db_path.parent.parent)
 
     archives = list(directory.glob('platform-check-*.zip'))
     assert len(archives) <= platform_check._MAX_ARCHIVES
@@ -1974,7 +2044,7 @@ def test_selected_report_archive_is_recent_for_lru_pruning(project):
         path = directory / f'platform-check-{number:064x}.zip'
         path.write_bytes(b'old')
         os.utime(path, (old + number, old + number))
-    platform_check._trim_archives(published)
+    platform_check._trim_archives(published, allowed_root=pm._index_path('demo').parent.parent)
     assert selected.exists()
 
 
@@ -2155,7 +2225,8 @@ def test_prune_and_trim_respect_other_projects_inside_common_root(tmp_path):
         assert not prune and prune.reason == 'каталог архивов небезопасен'
         assert victim.exists()
         published = platform_check._archive_path(db_a, 'a' * 64)
-        trim = platform_check._trim_archives(published, protected_roots=roots)
+        trim = platform_check._trim_archives(published, allowed_root=index,
+                                             protected_roots=roots)
         assert not trim
         assert victim.exists()
     finally:

@@ -210,7 +210,8 @@ def test_help_delete_retries_report_cleanup_after_help_was_removed(tmp_path, mon
     archive.write_bytes(b'synthetic report')
     platform_check._record_report_archive(archive, version)
     monkeypatch.setattr(web, '_pm', pm)
-    monkeypatch.setattr(pm, 'warm_platform_checks', lambda *args, **kwargs: None)
+    warmed = []
+    monkeypatch.setattr(pm, 'warm_platform_checks', lambda *args, **kwargs: warmed.append((args, kwargs)))
     real_remove = platform_check.remove_path_safely
     attempts = []
 
@@ -225,10 +226,12 @@ def test_help_delete_retries_report_cleanup_after_help_was_removed(tmp_path, mon
         with TestClient(web.app, headers={'Host': '127.0.0.1'}) as client:
             first = client.post(f'/api/admin/platform-help/{version}/delete')
             assert archive.exists()
+            assert not warmed
             second = client.post(f'/api/admin/platform-help/{version}/delete')
         assert 'занят' in first.text
         assert not archive.exists()
         assert 'занят' not in second.text
+        assert len(warmed) == 1
     finally:
         pm.close_all()
 

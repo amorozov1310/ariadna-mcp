@@ -70,6 +70,15 @@ def _validate_project_id(project_id: str, *, allow_reserved: bool = False,
         raise ValueError(f"Project ID '{project_id}' is reserved for Ariadna service data.")
 
 
+def _validate_source_id(source_id: str) -> None:
+    if isinstance(source_id, str) and source_id.rstrip(' .').split('.', 1)[0].casefold() in _WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"ID источника '{source_id}' зарезервирован Windows.")
+    if (not isinstance(source_id, str) or not source_id or len(source_id) > PROJECT_ID_MAX_LENGTH
+            or len(source_id.encode('utf-8')) > PROJECT_ID_MAX_LENGTH
+            or not all(c.isalnum() or c in '-_' for c in source_id)):
+        raise ValueError(f"Недопустимый source_id: '{source_id}'. Допустимы до {PROJECT_ID_MAX_LENGTH} букв, цифр, дефисы и подчёркивания.")
+
+
 def _resolved_path(path: Path) -> str:
     """Сравнение путей с учётом правил текущей файловой системы."""
     return os.path.normcase(str(path.resolve()))
@@ -248,12 +257,15 @@ class ProjectManager:
         service_root = self.index_dir or self.data_dir
         legacy_help_root = service_root / 'platform-help'
         help_root = service_root / '.ariadna-service' / 'platform-help'
-        if legacy_help_root.exists() and not help_root.exists():
+        if legacy_help_root.exists():
             # Переносить копированием: в старой раскладке каталог мог также
             # содержать индекс проекта с ID platform-help. Старые файлы
             # остаются доступными для безопасной очистки/ручного восстановления.
-            shutil.copytree(legacy_help_root, help_root, ignore=shutil.ignore_patterns(
-                'index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'))
+            shutil.copytree(legacy_help_root, help_root, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(
+                                'index.db', 'index.db-wal', 'index.db-shm',
+                                'index.db-journal', 'platform-check*.zip',
+                                '.platform-check-*.tmp'))
         self.platform_help = PlatformHelpStore(help_root)
         self.projects_dir = self.data_dir / 'projects'
         self.registry_path = self.data_dir / 'projects.json'
@@ -276,6 +288,11 @@ class ProjectManager:
         self._reader_trim_thread: threading.Thread | None = None
         self._reader_trim_closing = False
         self._registry: dict[str, ProjectInfo] | None = None
+        self._deleting_projects: set[str] = set()
+        # ID сохраняются здесь в projects.json после удаления из списка,
+        # пока физическая очистка не завершена. Это блокирует повторную
+        # регистрацию и позволяет безопасно продолжить удаление после рестарта.
+        self._pending_project_deletions: set[str] = set()
         # Дополнительные записи старого реестра с casefold-конфликтами:
         # сохраняются на диске, но не доступны как проекты до ручного
         # разрешения конфликта.
@@ -337,7 +354,8 @@ class ProjectManager:
             cleanup_report_temps(legacy_report_dir, service_root, startup_protected,
                                  include_archives=True)
             try:
-                remove_path_safely(legacy_report_dir, service_root, recursive=False)
+                remove_path_safely(legacy_report_dir, service_root, recursive=False,
+                                   protected_roots=startup_protected)
             except OSError:
                 pass
             old_index_parent = self._index_path(project.id).parent
@@ -361,7 +379,8 @@ class ProjectManager:
         if not any(project.id.casefold() == 'reports'
                    for project in self._load_registry().values()):
             try:
-                remove_path_safely(old_reports_root, service_root, recursive=False)
+                remove_path_safely(old_reports_root, service_root, recursive=False,
+                                   protected_roots=self._protected_project_roots())
             except OSError:
                 pass
 
@@ -485,6 +504,18 @@ class ProjectManager:
             quarantined = {}
             try:
                 data = json.loads(text)
+                pending_deletions = set()
+                raw_pending = data.get('pending_deletions', [])
+                if isinstance(raw_pending, list):
+                    for pending_id in raw_pending:
+                        if not isinstance(pending_id, str):
+                            continue
+                        try:
+                            _validate_project_id(pending_id, allow_reserved=True,
+                                                allow_legacy_length=True)
+                        except ValueError:
+                            continue
+                        pending_deletions.add(pending_id)
                 projects = {}
                 project_ids_by_key = {}
                 for pid, pdata in data.get('projects', {}).items():
@@ -515,9 +546,11 @@ class ProjectManager:
                 sig = None
             self._registry = projects
             self._registry_quarantined = quarantined
+            self._pending_project_deletions = pending_deletions
             self._registry_sig = sig
         else:
             self._registry = {}
+            self._pending_project_deletions = set()
             self._registry_sig = None
 
         if migrated:
@@ -607,7 +640,8 @@ class ProjectManager:
         all_projects = dict(registry)
         all_projects.update(self._registry_quarantined)
         data = {'projects': {pid: self._project_to_dict(proj)
-                             for pid, proj in all_projects.items()}}
+                             for pid, proj in all_projects.items()},
+                'pending_deletions': sorted(self._pending_project_deletions)}
         self._write_registry_file(data)
         self._registry_sig = self._registry_signature()
 
@@ -650,7 +684,8 @@ class ProjectManager:
             all_projects = dict(self._registry or {})
             all_projects.update(self._registry_quarantined)
             disk = {'projects': {pid: self._project_to_dict(p)
-                                 for pid, p in all_projects.items()}}
+                                 for pid, p in all_projects.items()},
+                    'pending_deletions': sorted(self._pending_project_deletions)}
         projects = disk.setdefault('projects', {})
         ours = self._project_to_dict(project)
         entry = projects.get(project_id)
@@ -692,6 +727,10 @@ class ProjectManager:
         existing_id = next((pid for pid in registry if pid.casefold() == project_id.casefold()), None)
         if existing_id is not None:
             raise ValueError(f"Project '{existing_id}' already exists (IDs are case-insensitive).")
+        if (project_id.casefold() in self._deleting_projects or
+                any(pid.casefold() == project_id.casefold()
+                    for pid in self._pending_project_deletions)):
+            raise ValueError(f"Проект с ID '{project_id}' ещё удаляется.")
 
         project = ProjectInfo(
             id=project_id,
@@ -710,7 +749,11 @@ class ProjectManager:
             raise ValueError(f"Не удалось создать каталог проекта «{project_id}»: {exc}") from exc
 
         registry[project_id] = project
-        self._save_registry()
+        try:
+            self._save_registry()
+        except Exception:
+            registry.pop(project_id, None)
+            raise
         return project
 
     def get_project(self, project_id: str) -> ProjectInfo:
@@ -724,10 +767,17 @@ class ProjectManager:
         """Update project fields (name, description, status)."""
         with self._registry_lock():
             project = self.get_project(project_id)
+            previous = {}
             for key, value in kwargs.items():
                 if hasattr(project, key) and key not in ('id', 'created_at', 'sources', 'index_stats'):
+                    previous[key] = getattr(project, key)
                     setattr(project, key, value)
-            self._save_registry()
+            try:
+                self._save_registry()
+            except Exception:
+                for key, value in previous.items():
+                    setattr(project, key, value)
+                raise
             selected_help_version = self.platform_help_version(project_id) if 'platform_version' in kwargs else None
         if selected_help_version is not None:
             from .platform_check import select_report_version
@@ -760,6 +810,18 @@ class ProjectManager:
             return self._delete_project(project_id)
 
     def _delete_project(self, project_id: str) -> bool:
+        with self._registry_lock():
+            key = project_id.casefold()
+            if key in self._deleting_projects:
+                raise ValueError(f"Проект с ID '{project_id}' уже удаляется.")
+            self._deleting_projects.add(key)
+        try:
+            return self._delete_project_locked(project_id)
+        finally:
+            with self._registry_lock():
+                self._deleting_projects.discard(project_id.casefold())
+
+    def _delete_project_locked(self, project_id: str) -> bool:
         """Порядок важен: реестр → закрытие индекса → файлы.
 
         Пока проект в реестре, любой запрос MCP проходит проверку проекта и
@@ -800,11 +862,21 @@ class ProjectManager:
             if conflicting is not None:
                 raise ValueError(f"Нельзя удалить проект '{project_id}': его каталог совпадает "
                                  f"с каталогом проекта '{conflicting}'. Исправьте projects.json.")
-            if registry.pop(project_id, None) is not None:
-                self._save_registry()
-            elif not any(path.exists() or is_link_like(path)
-                         for path in (project_dir, index_parent, legacy_report_dir,
-                                      report_dir)):
+            registered = project_id in registry
+            if registered:
+                project_record = registry.pop(project_id)
+                pending_before = set(self._pending_project_deletions)
+                self._pending_project_deletions.add(project_id)
+                try:
+                    self._save_registry()
+                except Exception:
+                    registry[project_id] = project_record
+                    self._pending_project_deletions = pending_before
+                    raise
+            elif (not any(pid.casefold() == project_id.casefold()
+                          for pid in self._pending_project_deletions) and
+                  not (self._index_path(project_id).is_file() or
+                       (project_dir / 'sources').is_dir())):
                 return False
 
         with self._db_pins_changed:
@@ -823,6 +895,20 @@ class ProjectManager:
         from .platform_check import cleanup_report_temps, forget_report_project, report_directory
         from .fs_safety import directory_is_safe
         protected_roots = self._protected_project_roots(exclude=project_id)
+
+        def live_protected_roots():
+            registry_now = self._load_registry()
+            roots_now = list(self._protected_project_roots(exclude=project_id))
+            for pid in registry_now:
+                if pid != project_id:
+                    roots_now.extend((self.projects_dir / pid, current_index_root / pid))
+            return tuple(dict.fromkeys(roots_now))
+
+        def remove_live(path, root, *, recursive=True):
+            with self._registry_lock():
+                return remove_path_safely(path, root, recursive=recursive,
+                                          protected_roots=live_protected_roots())
+
         forget_report_project(self._index_path(project_id))
         # Старая раскладка хранила архивы в reports/<id> (а ещё раньше —
         # рядом с index.db). Удаляем незаконченные файлы и готовые архивы в
@@ -840,8 +926,13 @@ class ProjectManager:
                 cleanup_root = current_index_root
             else:
                 cleanup_root = service_root
-            result = cleanup_report_temps(directory, cleanup_root, protected_roots,
-                                          include_archives=True)
+            with self._registry_lock():
+                current_protected_roots = live_protected_roots()
+                if (directory.exists() and not directory_is_safe(
+                        directory, cleanup_root, protected_roots=current_protected_roots)):
+                    continue
+                result = cleanup_report_temps(directory, cleanup_root, current_protected_roots,
+                                              include_archives=True)
             if not result:
                 raise ProjectFilesNotRemovedError(project_id, directory,
                                                   OSError(getattr(result, 'reason', None) or
@@ -876,7 +967,7 @@ class ProjectManager:
                     for other in other_project_paths if other.exists()
                 )
                 if is_link_like(path):
-                    result = remove_path_safely(path, root, protected_roots=protected_roots)
+                    result = remove_live(path, root)
                     if not result:
                         raise OSError(getattr(result, 'reason', None) or 'ссылка не удалена')
                     continue
@@ -892,8 +983,7 @@ class ProjectManager:
                                         '.platform-check-*.zip.*.tmp'):
                             for owned in path.glob(pattern):
                                 if owned.is_file():
-                                    result = remove_path_safely(owned, path, recursive=False,
-                                                                protected_roots=protected_roots)
+                                    result = remove_live(owned, path, recursive=False)
                                     if not result:
                                         raise OSError(getattr(result, 'reason', None) or 'файл не удалён')
                     elif path == legacy_report_dir or path == report_dir:
@@ -901,16 +991,16 @@ class ProjectManager:
                             # Служебный родитель может оказаться внешней ссылкой.
                             # Такой каталог не принадлежит удаляемому проекту.
                             continue
-                        result = remove_path_safely(path, root, protected_roots=protected_roots)
+                        result = remove_live(path, root)
                         if not result:
                             raise OSError(getattr(result, 'reason', None) or
                                           'каталог отчётов не удалён')
                     else:
-                        result = remove_path_safely(path, root, protected_roots=protected_roots)
+                        result = remove_live(path, root)
                         if not result:
                             raise OSError(getattr(result, 'reason', None) or 'каталог проекта не удалён')
                 else:
-                    result = remove_path_safely(path, root, protected_roots=protected_roots)
+                    result = remove_live(path, root)
                     if not result:
                         raise OSError(getattr(result, 'reason', None) or
                                       'каталог проекта не удалён')
@@ -921,11 +1011,23 @@ class ProjectManager:
 
         # Удалить пустую старую общую папку после очистки последнего проекта.
         try:
-            remove_path_safely(service_reports_root, service_root, recursive=False)
+            remove_path_safely(service_reports_root, service_root, recursive=False,
+                               protected_roots=protected_roots)
         except OSError:
             pass
 
         Database.forget_schema_lock(str(self._index_path(project_id)))
+        with self._registry_lock():
+            pending_id = next((pid for pid in self._pending_project_deletions
+                               if pid.casefold() == project_id.casefold()), None)
+            if pending_id is not None:
+                self._pending_project_deletions.remove(pending_id)
+                try:
+                    self._save_registry()
+                except Exception as exc:
+                    self._pending_project_deletions.add(pending_id)
+                    raise ProjectFilesNotRemovedError(project_id, self._index_path(project_id).parent,
+                                                      exc) from exc
         return True
 
     # ============================================
@@ -949,8 +1051,10 @@ class ProjectManager:
         If files are None, assumes they are already at the expected paths
         (volume mount scenario).
         """
+        _validate_source_id(source_id)
+
         def check_new(project: ProjectInfo):
-            if any(s.id == source_id for s in project.sources):
+            if any(s.id.casefold() == source_id.casefold() for s in project.sources):
                 raise ValueError(f"Source '{source_id}' already exists in project '{project_id}'")
 
         check_new(self.get_project(project_id))
@@ -1041,13 +1145,13 @@ class ProjectManager:
         if xml_archive is not None:
             # Старый xml/ заменяется целиком (без остатков прежних файлов) и
             # только после успешной проверки и распаковки нового архива.
-            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml',
-                            allowed_root=self.projects_dir / project_id)
-            changes['xml_path'] = f'sources/{source_id}/xml'
             cache = self._source_manifest_cache_path(project_id, source_id)
             result = remove_path_safely(cache, self.projects_dir / project_id, recursive=False)
             if not result:
                 raise OSError(f"Не удалось удалить кэш манифеста источника: {result.reason}")
+            extract_archive(xml_archive, xml_archive_filename, source_dir / 'xml',
+                            allowed_root=self.projects_dir / project_id)
+            changes['xml_path'] = f'sources/{source_id}/xml'
 
         # Update metadata fields
         if label is not None:
@@ -1221,6 +1325,19 @@ class ProjectManager:
                     self._save_registry()
         return recovered
 
+    def _ensure_sources_recoverable(self, project_id: str) -> None:
+        for source in self.get_project(project_id).sources:
+            root = self._source_file_root(project_id, source.id, source)
+            workspace = self._source_delta_workspace(project_id, source.id)
+            try:
+                with source_delta.transaction_lock(workspace):
+                    recovered = self._recover_source_delta(project_id, source.id, root, workspace,
+                                                           lock_held=True)
+            except source_delta.DeltaBusy as exc:
+                raise source_delta.DeltaError(f"Нельзя восстановить источник {source.id}: операция занята") from exc
+            if not recovered:
+                raise source_delta.DeltaError(f"Не удалось восстановить источник {source.id}; переиндексация остановлена")
+
     def _is_local_source_root(self, root: Path, project_id: str, source_id: str) -> bool:
         local_root = self.projects_dir / project_id / 'sources' / source_id / 'xml'
         try:
@@ -1240,6 +1357,19 @@ class ProjectManager:
 
     def ensure_source_xml_path(self, project_id: str, source_id: str) -> None:
         """Зарегистрировать существующую локальную выгрузку перед ответом ready."""
+        source = next((s for s in self.get_project(project_id).sources if s.id == source_id), None)
+        if source is not None:
+            workspace = self._source_delta_workspace(project_id, source_id)
+            try:
+                with source_delta.transaction_lock(workspace):
+                    recovered = self._recover_source_delta(
+                        project_id, source_id,
+                        self._source_file_root(project_id, source_id, source),
+                        workspace, lock_held=True)
+            except source_delta.DeltaBusy as exc:
+                raise source_delta.DeltaError("Предыдущая операция с источником ещё выполняется") from exc
+            if not recovered:
+                raise source_delta.DeltaError("Не удалось восстановить предыдущую операцию с источником")
         project = self.get_project(project_id)
         source = next((s for s in project.sources if s.id == source_id), None)
         if source is None or source.xml_path:
@@ -1323,12 +1453,22 @@ class ProjectManager:
 
     def _protected_project_roots(self, exclude=None):
         """Корни остальных зарегистрированных проектов для безопасной очистки."""
-        projects = self._load_registry()
+        with self._registry_lock():
+            projects = self._load_registry()
+            ids = tuple(dict.fromkeys((*projects, *self._registry_quarantined)))
         roots = []
-        for pid in projects:
-            if pid == exclude or pid.casefold() in _RESERVED_PROJECT_IDS:
+        for pid in ids:
+            if pid == exclude:
                 continue
-            roots.extend((self.projects_dir / pid, (self.index_dir or self.projects_dir) / pid))
+            roots.append(self.projects_dir / pid)
+            # /index/reports одновременно служит старым хранилищем ZIP.
+            # Защищаем точные файлы старого проекта reports, оставляя кэш
+            # отчётов в дочерних каталогах доступным для адресной очистки.
+            if self.index_dir is not None and pid.casefold() == 'reports':
+                roots.extend(self.index_dir / 'reports' / name for name in
+                             ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'))
+            else:
+                roots.append((self.index_dir or self.projects_dir) / pid)
         return tuple(roots)
 
     def _index_path(self, project_id: str, legacy: bool = False) -> Path:
@@ -1478,7 +1618,9 @@ class ProjectManager:
                         self._db_pool[project_id] = db
                         event.set()
                         self._db_pins_changed.notify_all()
-            except BaseException:
+            except BaseException as exc:
+                if db is not None and db.stale_schema_removal_failed:
+                    self._record_stale_schema_removal_failure(project_id, exc)
                 if db is not None:
                     db.close()
                 with self._db_pins_changed:
@@ -1775,9 +1917,19 @@ class ProjectManager:
         ссылка между каталогами двух проектов внутри корня не распознаётся."""
         current_index_root = self.index_dir or self.projects_dir
         with self._registry_lock():
-            registry = self._load_registry()
-        return tuple(path for pid in registry if pid != project_id
-                     for path in (self.projects_dir / pid, current_index_root / pid))
+            self._load_registry()
+            ids = tuple(dict.fromkeys((*self._registry, *self._registry_quarantined)))
+        roots = []
+        for pid in ids:
+            if pid == project_id:
+                continue
+            roots.append(self.projects_dir / pid)
+            if self.index_dir is not None and pid.casefold() == 'reports':
+                roots.extend(self.index_dir / 'reports' / name for name in
+                             ('index.db', 'index.db-wal', 'index.db-shm', 'index.db-journal'))
+            else:
+                roots.append(current_index_root / pid)
+        return tuple(roots)
 
     def sync_platform_help(self) -> None:
         """Запустить поиск и построение справки установленной платформы."""
@@ -2042,6 +2194,17 @@ class ProjectManager:
             error_path.write_text(message, encoding='utf-8')
         except OSError:
             logger.exception('Не удалось сохранить причину ошибки индекса проекта %s', project_id)
+
+    def _record_stale_schema_removal_failure(self, project_id: str, error: Exception) -> None:
+        """Не оставлять прежний ready после отказа пересоздать старую БД."""
+        self._set_index_error(project_id, _index_error_text(error))
+        try:
+            with self._registry_lock():
+                project = self.get_project(project_id)
+                project.status = 'error'
+                self._save_project_to_disk(project_id, project)
+        except Exception:
+            logger.exception('Не удалось сохранить ошибку пересоздания индекса %s', project_id)
 
     def _clear_index_error(self, project_id: str) -> None:
         with self._base_diff_lock:
@@ -2423,13 +2586,18 @@ class ProjectManager:
         from .indexer import Indexer
         from .xml_walker import XMLWalker
 
+        # Синхронный CLI и повторный вход из фонового worker проходят ту же
+        # проверку журнала, что и HTTP-путь до ответа «started».
+        self._ensure_sources_recoverable(project_id)
         db = Database(str(self._index_path(project_id)))
         self._db_instances.add(db)
         try:
             db.connect()
             db.init_schema()
             project, _ = self._mark_indexing(project_id, db=db)
-        except Exception:
+        except Exception as exc:
+            if db.stale_schema_removal_failed:
+                self._record_stale_schema_removal_failure(project_id, exc)
             db.close()
             raise
         succeeded = False
@@ -2611,6 +2779,23 @@ class ProjectManager:
                                       protected_roots=self.platform_report_roots(project_id))
             except OSError:
                 logger.exception('Проект %s: не удалось удалить архивы предыдущего индекса', project_id)
+            from .platform_check import cleanup_report_temps
+            legacy_archives = (
+                (self._index_path(project_id).parent, self.index_dir or self.projects_dir),
+                (self._legacy_report_directory(project_id), self.index_dir or self.data_dir),
+                (self._index_path(project_id, legacy=True).parent, self.projects_dir),
+            )
+            seen_archive_dirs = set()
+            for directory, allowed_root in legacy_archives:
+                directory = Path(directory)
+                if directory in seen_archive_dirs or directory == self.platform_help.root:
+                    continue
+                seen_archive_dirs.add(directory)
+                result = cleanup_report_temps(
+                    directory, allowed_root, self.platform_report_roots(project_id),
+                    include_archives=True)
+                if not result:
+                    raise OSError(result.reason or f'Не удалось очистить архивы {directory}')
 
             total_stats.last_indexed = datetime.now().isoformat()
             total_stats.duration_sec = round(total_stats.duration_sec, 2)
@@ -2725,7 +2910,9 @@ class ProjectManager:
             try:
                 db.connect()
                 db.init_schema()
-            except BaseException:
+            except BaseException as exc:
+                if db.stale_schema_removal_failed:
+                    self._record_stale_schema_removal_failure(project_id, exc)
                 db._schema_lock.release()
                 db.close()
                 raise
@@ -2770,6 +2957,7 @@ class ProjectManager:
         # запись не удалась (проект удалили между вызовами), поток не
         # запускается.
         try:
+            self._ensure_sources_recoverable(project_id)
             self._clear_index_error(project_id)
             self._mark_indexing(project_id)
         except Exception as e:

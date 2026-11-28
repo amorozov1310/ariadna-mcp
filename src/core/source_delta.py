@@ -313,13 +313,14 @@ def _merge_dir_contents(source: Path, destination: Path) -> None:
 def recover(root: Path, workspace: Path | None = None, *, lock_held: bool = False) -> bool:
     root = Path(root)
     workspace = Path(workspace) if workspace is not None else root.parent / f".{root.name}-delta-state"
-    if not lock_held:
-        try:
+    try:
+        if not lock_held:
             with transaction_lock(workspace):
                 return recover(root, workspace, lock_held=True)
-        except DeltaBusy:
-            return False
-    return _recover_locked(root, workspace)
+        return _recover_locked(root, workspace)
+    except (DeltaBusy, OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning('Не удалось восстановить журнал изменений источника %s: %s', workspace, exc)
+        return False
 
 
 def _recover_locked(root: Path, workspace: Path) -> bool:

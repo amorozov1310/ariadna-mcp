@@ -128,6 +128,32 @@ def test_legacy_schema_without_xml_is_reported_as_error(tmp_path):
         manager.close_all()
 
 
+def test_refused_stale_database_removal_keeps_reindex_in_error(tmp_path, monkeypatch):
+    from src.core import db as db_module
+    from src.core.fs_safety import RemovalResult
+
+    db_path = _make_ready_project(tmp_path)
+    _remove_new_table(db_path)
+    manager = ProjectManager(str(tmp_path))
+    original = db_module.remove_path_safely
+
+    def held(path, *args, **kwargs):
+        if Path(path) == db_path:
+            return RemovalResult(False, 'файл занят')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, 'remove_path_safely', held)
+    try:
+        result = manager.reindex_async('p')
+        assert result['status'] == 'error'
+        assert manager.get_project('p').status == 'error'
+        assert Path(str(db_path) + '.reindex-required').exists()
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='module_text'").fetchone() is None
+    finally:
+        manager.close_all()
+
+
 def test_interrupted_schema_rebuild_is_requeued_on_startup(tmp_path, monkeypatch):
     fixture = Path(__file__).parent / 'fixtures' / 'xml_ru'
     manager = ProjectManager(str(tmp_path))

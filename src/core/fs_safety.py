@@ -88,6 +88,27 @@ def directory_is_safe(directory: Path, allowed_root: Path | None = None, *,
             not _overlaps_protected(directory, protected_roots))
 
 
+def directory_creation_is_safe(directory: Path, allowed_root: Path, *,
+                               protected_roots=()) -> bool:
+    """Проверить будущий каталог до его создания, включая существующие предки."""
+    directory, allowed_root = Path(directory), Path(allowed_root)
+    if not _lexically_within(directory, allowed_root):
+        return False
+    probe = directory
+    while not probe.exists():
+        if is_link_like(probe):
+            return False
+        if probe == allowed_root:
+            return False
+        probe = probe.parent
+    if is_link_like(probe) or not probe.is_dir():
+        return False
+    if not _resolved_within(probe, allowed_root, allow_equal=True):
+        return False
+    # Проверяем будущую папку, а не широкий предок с соседними проектами.
+    return not _overlaps_protected(directory, protected_roots)
+
+
 def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True,
                        protected_roots=()) -> RemovalResult:
     """Удалить путь только под разрешённым корнем и вне защищённых проектов.

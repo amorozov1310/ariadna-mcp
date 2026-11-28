@@ -34,7 +34,8 @@ from .bsl_reference import module_context_vars
 from .code_fingerprints import bundled_fingerprints
 from .db import IndexRemovedError
 from .fsretry import replace_with_retry, retry_on_permission_error
-from .fs_safety import RemovalResult, directory_is_safe, remove_path_safely
+from .fs_safety import (RemovalResult, directory_creation_is_safe, directory_is_safe,
+                        is_link_like, remove_path_safely)
 from .metadata_model import MANAGER_OBJECT_KINDS, canonicalize_kind, indexed_manager_objects
 from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
 from .platform_help import (COLLECTION_KINDS, COLLECTION_MANAGER_TYPES, compatibility_warning,
@@ -687,16 +688,49 @@ def forget_report_version(version, allowed_root=None, protected_roots=()):
                               if inside_trusted_root(directory)), key=str)
         selected_directories = [directory for directory in _SELECTED_VERSIONS
                                 if inside_trusted_root(directory)]
-    directories = sorted(set(directories) | set(selected_directories), key=str)
+    discovered = set()
+    for parent in (allowed_root, allowed_root / 'reports',
+                   allowed_root / '.ariadna-service' / 'reports'):
+        try:
+            discovered.update(child.resolve() for child in parent.iterdir() if child.is_dir())
+        except OSError:
+            continue
+    directories = sorted(set(directories) | set(selected_directories) | discovered, key=str)
     with ExitStack() as locks:
         for directory in directories:
             locks.enter_context(_lru_lock(directory))
+        for directory in directories:
+            _sync_archive_registry(directory)
         with _REPORTS_LOCK:
             obsolete = [directory / filename
                         for directory, versions in _VERSION_ARCHIVES.items()
                         if inside_trusted_root(directory)
                         if (filename := versions.get(version))]
-        results = [_unlink_archive(path, allowed_root, protected_roots) for path in obsolete]
+        # Старые ZIP не содержат версии в заголовке. Это только кэш, поэтому
+        # при удалении справки очищаем такие архивы во всех известных раскладках.
+        for directory in directories:
+            for path in directory.glob('platform-check*.zip'):
+                if not _CACHE_ARCHIVE.fullmatch(path.name) or path in obsolete:
+                    continue
+                try:
+                    with ZipFile(path) as archive:
+                        header = json.loads(archive.read('report.json'))
+                    if len(header) < 4 or not header[3]:
+                        obsolete.append(path)
+                except (OSError, BadZipFile, KeyError, ValueError, TypeError):
+                    obsolete.append(path)
+        # Удаляются только ZIP-кэши с проверенным именем внутри доверенного
+        # корня. Для старой раскладки архив лежит прямо в каталоге индекса;
+        # разрешаем удалить там конкретный ZIP, сохраняя защиту всех соседей.
+        results = []
+        for path in obsolete:
+            try:
+                own_directory = path.parent.resolve()
+                local_protection = tuple(root for root in protected_roots
+                                         if Path(root).resolve() != own_directory)
+            except OSError as exc:
+                return RemovalResult(False, str(exc))
+            results.append(_unlink_archive(path, allowed_root, local_protection))
         failed = next((result for result in results if not result), None)
         if failed is not None:
             return failed
@@ -733,6 +767,7 @@ def forget_report_project(db_path):
 def select_report_version(db_path, version):
     """Запомнить выбранную проектом версию и защитить её опубликованный отчёт."""
     directory = _report_directory(db_path).resolve()
+    _sync_archive_registry(directory)
     with _lru_lock(directory):
         with _REPORTS_LOCK:
             _SELECTED_VERSIONS[directory] = version
@@ -817,10 +852,21 @@ def _sync_archive_registry(directory):
     directory = Path(directory).resolve()
     if not directory.is_dir():
         return
-    existing = {path.name for path in directory.glob('platform-check*.zip')
-                if _CACHE_ARCHIVE.fullmatch(path.name)}
+    archives = [path for path in directory.glob('platform-check*.zip')
+                if _CACHE_ARCHIVE.fullmatch(path.name)]
+    existing = {path.name for path in archives}
+    recovered_versions = {}
+    for path in archives:
+        try:
+            with ZipFile(path) as archive:
+                header = json.loads(archive.read('report.json'))
+            if len(header) > 3 and header[3]:
+                recovered_versions[header[3]] = path.name
+        except (OSError, BadZipFile, KeyError, ValueError, TypeError):
+            continue
     with _REPORTS_LOCK:
-        versions = _VERSION_ARCHIVES.get(directory, {})
+        versions = _VERSION_ARCHIVES.setdefault(directory, {})
+        versions.update(recovered_versions)
         for version, filename in list(versions.items()):
             if filename not in existing:
                 versions.pop(version, None)
@@ -834,7 +880,7 @@ def _sync_archive_registry(directory):
                 _ARCHIVE_RECENCY.pop(path, None)
 
 
-def _trim_archives(published, protected_roots=()):
+def _trim_archives(published, allowed_root=None, protected_roots=()):
     """После публикации оставить выбранную версию и самые свежие архивы в пределах лимита.
 
     Каждая смена справки (в том числе повторная загрузка той же версии) даёт
@@ -843,11 +889,13 @@ def _trim_archives(published, protected_roots=()):
     требовал полной сборки. Вызывается под блокировкой публикации."""
     archives = []
     directory = published.parent
-    # Корень индексов, а не промежуточный .ariadna-service.
-    allowed_root = directory.parents[2]
+    if allowed_root is None:
+        return RemovalResult(False, 'не указан доверенный корень архива')
+    allowed_root = Path(allowed_root)
     if not directory_is_safe(directory, allowed_root, protected_roots=protected_roots):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
         return RemovalResult(False, 'каталог архивов небезопасен')
+    _sync_archive_registry(directory)
     with _REPORTS_LOCK:
         selected = _SELECTED_ARCHIVES.get(directory.resolve())
     for path in directory.glob('platform-check*.zip'):
@@ -890,8 +938,12 @@ def _trim_archives(published, protected_roots=()):
 def cleanup_report_temps(directory, allowed_root=None, protected_roots=(), *, include_archives=False):
     """Удалить временные архивы, оставшиеся после аварийного завершения записи."""
     directory = Path(directory)
-    if not directory.exists():
+    try:
+        directory.stat()
+    except FileNotFoundError:
         return RemovalResult(True)
+    except OSError as exc:
+        return RemovalResult(False, str(exc))
     if allowed_root is None:
         return RemovalResult(False, 'не указан доверенный корень архива')
     allowed_root = Path(allowed_root)
@@ -899,7 +951,7 @@ def cleanup_report_temps(directory, allowed_root=None, protected_roots=(), *, in
         logger.warning('Пропускаю очистку временных архивов в небезопасном каталоге %s', directory)
         # Каталог, не принадлежащий проекту (например, внешняя ссылка),
         # намеренно не очищается и не считается частью его файлов.
-        return RemovalResult(True)
+        return RemovalResult(False, 'каталог временных архивов небезопасен')
     results = []
     try:
         paths = list(directory.glob('.platform-check-*.zip.*.tmp'))
@@ -1039,7 +1091,7 @@ class _Report:
         try:
             with _publish_lock(path.parent):
                 with path.open('rb') as stream, ZipFile(stream) as archive:
-                    saved_key, count, starts = json.loads(archive.read('report.json'))
+                    saved_key, count, starts = json.loads(archive.read('report.json'))[:3]
                     if saved_key != key:
                         return
                     self._load_modules(conn)
@@ -1057,14 +1109,21 @@ class _Report:
         except (OSError, BadZipFile, KeyError, ValueError, TypeError, RuntimeError, zlib.error):
             logger.warning('Не удалось прочитать кэш диагностики %s', path, exc_info=True)
 
-    def save(self, path, key, before_replace, version=None, protected_roots=()):
+    def save(self, path, key, before_replace, version=None, *, allowed_root=None,
+             protected_roots=()):
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            if allowed_root is None:
+                logger.warning('Не публикую архив без доверенного корня: %s', path)
+                return False
+            allowed_root = Path(allowed_root)
             # Проверка до создания временного ZIP: при отказе в чужом/ссылочном
             # каталоге не появляется ни временный файл, ни его содержимое.
-            if not directory_is_safe(path.parent, path.parent.parents[2],
-                                     protected_roots=protected_roots):
+            if not directory_creation_is_safe(path.parent, allowed_root,
+                                              protected_roots=protected_roots):
                 logger.warning('Не публикую архив в небезопасном каталоге: %s', path)
+                return False
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not directory_is_safe(path.parent, allowed_root, protected_roots=protected_roots):
                 return False
             # Временный файл расположен рядом: replace атомарен, а его
             # отдельный суффикс позволяет убрать недописанный файл при старте.
@@ -1073,7 +1132,7 @@ class _Report:
                 temp = Path(stream.name)
             try:
                 with ZipFile(temp, 'w') as archive:
-                    header = json.dumps([key, self.count, self.starts], ensure_ascii=False)
+                    header = json.dumps([key, self.count, self.starts, version], ensure_ascii=False)
                     archive.writestr('report.json', header.encode(), compress_type=ZIP_DEFLATED, compresslevel=1)
                     for level, positions in self.positions.items():
                         archive.writestr(level, positions.tobytes(), compress_type=ZIP_DEFLATED, compresslevel=1)
@@ -1084,7 +1143,7 @@ class _Report:
                     # Проверить каталог до замены ZIP: при отказе прежний архив
                     # остаётся нетронутым, а save() не сообщает об успехе.
                     # Тот же корень индексов, что в _trim_archives.
-                    if not directory_is_safe(path.parent, path.parent.parents[2],
+                    if not directory_is_safe(path.parent, allowed_root,
                                              protected_roots=protected_roots):
                         logger.warning('Не публикую архив в небезопасном каталоге: %s', path)
                         return False
@@ -1094,12 +1153,15 @@ class _Report:
                     if version is not None:
                         _record_report_archive(path, version)
                     with _lru_lock(path.parent):
-                        trim_result = _trim_archives(path, protected_roots)
+                        trim_result = _trim_archives(path, allowed_root=allowed_root,
+                                                     protected_roots=protected_roots)
                     if not trim_result:
                         logger.warning('Не удалось полностью очистить старые архивы в %s: %s',
                                        path.parent, trim_result.reason)
+                        return False
             finally:
-                temp_result = remove_path_safely(temp, path.parents[3], recursive=False)
+                temp_result = remove_path_safely(temp, allowed_root, recursive=False,
+                                                 protected_roots=protected_roots)
                 if not temp_result:
                     raise OSError(temp_result.reason or f'Не удалось удалить временный архив {temp}')
         except OSError:
@@ -1291,6 +1353,7 @@ def _request_report(engine, index, mode, revision, project_id, *, warm=False, in
                 report._build(engine, reader, index, mode)
             if revision[1] == 'ready':
                 report.save(path, key, before_replace=verify, version=index.version,
+                            allowed_root=Path(db.db_path).parent.parent,
                             protected_roots=protected_roots)
             verify()
             with _REPORTS_LOCK:
@@ -1359,7 +1422,8 @@ def warm_report(engine, index, mode, ready_at, warmed_key=None, protected_roots=
             raise ReportUnavailable('Индекс или справка изменились. Повторите проверку.')
 
     if report.save(_archive_path(engine.db.db_path, key), key, before_replace=verify,
-                   version=index.version, protected_roots=protected_roots):
+                   version=index.version, allowed_root=Path(engine.db.db_path).parent.parent,
+                   protected_roots=protected_roots):
         return key
 
 

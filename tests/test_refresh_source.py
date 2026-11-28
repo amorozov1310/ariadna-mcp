@@ -261,6 +261,16 @@ def test_refresh_never_reports_ready_when_reindex_is_already_running(web, monkey
     assert response.json()['status'] == 'busy'
 
 
+def test_refresh_without_archive_refuses_failed_journal_recovery(web, monkeypatch):
+    pm, client, _ = web
+    monkeypatch.setattr(source_delta, 'recover', lambda *args, **kwargs: False)
+    monkeypatch.setattr(pm, 'reindex_async',
+                        lambda *args, **kwargs: pytest.fail('переиндексация не должна запускаться'))
+    response = client.post('/api/projects/p1/sources/main/refresh', data={'wait': '0'})
+    assert response.status_code == 409
+    assert response.json().get('status') != 'started'
+
+
 def test_refresh_retries_already_running_until_launch_succeeds(web, monkeypatch):
     pm, client, _ = web
     real_reindex = pm.reindex_async
@@ -344,6 +354,32 @@ def test_full_tree_update_invalidates_cached_source_hashes(web):
     after = pm.source_file_manifest('p1', 'main')
     assert after['version'] != before['version']
     assert after['files'][rel]['sha256'] != before['files'][rel]['sha256']
+
+
+def test_source_update_keeps_files_unchanged_when_manifest_cache_is_busy(web, monkeypatch):
+    from src.core import project_manager as pm_module
+    from src.core.fs_safety import RemovalResult
+
+    pm, _, _ = web
+    xml = pm.projects_dir / 'p1' / 'sources' / 'main' / 'xml'
+    configuration = xml / 'Configuration.xml'
+    old_bytes = configuration.read_bytes()
+    cache = pm._source_manifest_cache_path('p1', 'main')
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text('{}', encoding='utf-8')
+    archive = io.BytesIO(_zip_from_files({'Configuration.xml': b'<Configuration changed="true"/>'}))
+    original = pm_module.remove_path_safely
+
+    def held(path, *args, **kwargs):
+        if Path(path) == cache:
+            return RemovalResult(False, 'кэш занят')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(pm_module, 'remove_path_safely', held)
+    with pytest.raises(OSError):
+        pm.update_source('p1', 'main', xml_archive=archive, xml_archive_filename='replacement.zip')
+    assert configuration.read_bytes() == old_bytes
+    assert pm.get_project('p1').sources[0].xml_path == 'sources/main/xml'
 
 
 def test_full_tree_update_recovers_old_delta_journal_first(web):
