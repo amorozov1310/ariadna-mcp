@@ -288,6 +288,27 @@ def test_archive_trim_reports_directory_enumeration_failure(tmp_path, monkeypatc
     assert 'перечислить' in result.reason
 
 
+def test_forget_help_version_refuses_archive_enumeration_failure(tmp_path, monkeypatch):
+    directory = tmp_path / '.ariadna-service' / 'reports' / 'p'
+    directory.mkdir(parents=True)
+    archive = directory / ('platform-check-' + 'c' * 64 + '.zip')
+    with zipfile.ZipFile(archive, 'w') as zipped:
+        zipped.writestr('report.json', json.dumps(['key', 0, [], '8.3.27.1']))
+    platform_check._record_report_archive(archive, '8.3.27.1')
+    real_iterdir = type(directory).iterdir
+
+    def fail_report_listing(path):
+        if path == directory:
+            raise PermissionError('listing denied')
+        return real_iterdir(path)
+
+    monkeypatch.setattr(type(directory), 'iterdir', fail_report_listing)
+    result = platform_check.forget_report_version('8.3.27.1', allowed_root=tmp_path)
+    assert not result
+    assert archive.exists()
+    platform_check.forget_report_project(tmp_path / 'p' / 'index.db')
+
+
 def test_help_delete_retries_report_cleanup_after_help_was_removed(tmp_path, monkeypatch):
     pm = ProjectManager(str(tmp_path))
     version = '8.3.27.1'
