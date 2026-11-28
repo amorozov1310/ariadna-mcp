@@ -2,35 +2,37 @@
 
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
 from .fsretry import retry_on_permission_error, rmtree_with_retry
 
 
-def _is_junction(path: Path) -> bool:
-    """Определить junction/reparse point одинаково в Python 3.11 и новее."""
-    try:
-        info = os.lstat(path)
-        attrs = info.st_file_attributes
-    except (AttributeError, OSError):
-        return False
-    if not attrs & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400) or not stat.S_ISDIR(info.st_mode):
-        return False
-    # Directory symlinks are reparse points too. Only mount-point tags are
-    # junctions and require rmdir; without the tag, retain the 3.11-compatible
-    # directory-reparse fallback.
-    tag = getattr(info, 'st_reparse_tag', None)
-    mount_point = getattr(stat, 'IO_REPARSE_TAG_MOUNT_POINT', 0xA0000003)
-    return tag == mount_point if tag is not None else True
+@dataclass(frozen=True)
+class RemovalResult:
+    """Результат удаления; ошибка означает, что удаление не завершено."""
+
+    removed: bool
+    reason: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.removed
 
 
 def is_link_like(path: Path) -> bool:
-    """True для symlink, junction и других reparse points, включая Python 3.11."""
-    return path.is_symlink() or _is_junction(path)
+    """Распознать symlink и любой Windows reparse point, включая неизвестные теги."""
+    path = Path(path)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attrs = getattr(info, 'st_file_attributes', 0)
+    return bool(attrs & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400))
 
 
 def _lexically_within(path: Path, root: Path) -> bool:
-    """Проверить расположение по строковому пути, не проходя по ссылкам."""
     path_abs = Path(os.path.abspath(path))
     root_abs = Path(os.path.abspath(root))
     try:
@@ -39,60 +41,86 @@ def _lexically_within(path: Path, root: Path) -> bool:
         return False
 
 
-def directory_is_safe(directory: Path, allowed_root: Path | None = None) -> bool:
-    """Проверить, что каталог для обхода не является ссылкой и лежит в корне."""
+def _resolved_within(path: Path, root: Path, *, allow_equal: bool = False) -> bool:
+    try:
+        resolved = Path(os.path.realpath(path))
+        resolved_root = Path(os.path.realpath(root))
+        return ((allow_equal or resolved != resolved_root) and
+                resolved.is_relative_to(resolved_root))
+    except (OSError, ValueError):
+        return False
+
+
+def _belongs_to_protected(path: Path, protected_roots) -> bool:
+    try:
+        resolved = Path(os.path.realpath(path))
+        return any(resolved == Path(os.path.realpath(root)) or
+                   resolved.is_relative_to(Path(os.path.realpath(root)))
+                   for root in protected_roots)
+    except (OSError, ValueError):
+        return True
+
+
+def directory_is_safe(directory: Path, allowed_root: Path | None = None, *,
+                      protected_roots=()) -> bool:
+    """Проверить, что каталог не является ссылкой и расположен в разрешённом проекте."""
     directory = Path(directory)
     if is_link_like(directory) or not directory.is_dir():
         return False
     if allowed_root is None:
-        return True
+        return not _belongs_to_protected(directory, protected_roots)
     allowed_root = Path(allowed_root)
-    if not _lexically_within(directory, allowed_root):
-        return False
-    try:
-        return Path(os.path.realpath(directory)).is_relative_to(Path(os.path.realpath(allowed_root)))
-    except (OSError, ValueError):
-        return False
+    return (_lexically_within(directory, allowed_root) and
+            _resolved_within(directory, allowed_root) and
+            not _belongs_to_protected(directory, protected_roots))
 
 
-def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True) -> bool:
-    """Удалить объект внутри корня; внешнюю ссылку удалить только как ссылку.
+def remove_path_safely(path: Path, allowed_root: Path, *, recursive: bool = True,
+                       protected_roots=()) -> RemovalResult:
+    """Удалить путь только под разрешённым корнем и вне защищённых проектов.
 
-    Возвращает False, если путь отсутствует или его расположение небезопасно.
-
-    Проверка пути и последующее удаление не атомарны. Процесс с правом менять
-    каталоги может подменить компонент между ними (TOCTOU); защита рассчитана
-    на недоверенные ссылки в дереве, а не на гонку с враждебным процессом.
+    У ссылки проверяется расположение самой ссылки и реального пути родителя;
+    цель ссылки не обходится. Ошибка или частичная очистка возвращается как
+    неуспешный структурированный результат. Проверка и удаление не атомарны:
+    защита рассчитана на ссылки в дереве, а не на гонку с враждебным процессом.
     """
     path, allowed_root = Path(path), Path(allowed_root)
     if not _lexically_within(path, allowed_root):
-        return False
-    if is_link_like(path):
-        # unlink удаляет symlink, а rmdir — junction; ни один не обходит target.
-        def remove_link():
-            try:
-                if _is_junction(path):
-                    os.rmdir(path)
-                else:
-                    path.unlink()
-            except FileNotFoundError:
-                pass
-        retry_on_permission_error(remove_link)
-        return True
+        return RemovalResult(False, 'путь вне разрешённого корня')
+    parent = path.parent
+    if not _resolved_within(parent, allowed_root, allow_equal=True):
+        return RemovalResult(False, 'родитель пути разрешается вне корня')
+    if _belongs_to_protected(parent, protected_roots):
+        return RemovalResult(False, 'родитель пути принадлежит другому проекту')
+
+    linked = is_link_like(path)
+    if linked:
+        # Даже при удалении только самой ссылки запрещаем путь, ведущий в
+        # соседний зарегистрированный проект.
+        if _belongs_to_protected(path, protected_roots):
+            return RemovalResult(False, 'цель ссылки принадлежит другому проекту')
+        try:
+            # Удаляется только сама ссылка/reparse point, никогда её цель.
+            retry_on_permission_error(lambda: os.rmdir(path) if path.is_dir() else path.unlink())
+            return RemovalResult(True)
+        except OSError as exc:
+            return RemovalResult(False, str(exc))
+
+    if not _resolved_within(path, allowed_root):
+        if path.exists() or is_link_like(path):
+            return RemovalResult(False, 'разрешённый путь находится вне корня')
+    if _belongs_to_protected(path, protected_roots):
+        return RemovalResult(False, 'путь принадлежит другому проекту')
     try:
-        resolved = Path(os.path.realpath(path))
-        resolved_root = Path(os.path.realpath(allowed_root))
-        if not resolved.is_relative_to(resolved_root):
-            return False
-    except (OSError, ValueError):
-        return False
-    if not path.exists():
-        return True
-    if path.is_dir():
-        if recursive:
-            rmtree_with_retry(path)
+        if not path.exists():
+            return RemovalResult(True)
+        if path.is_dir():
+            if recursive:
+                rmtree_with_retry(path)
+            else:
+                retry_on_permission_error(path.rmdir)
         else:
-            retry_on_permission_error(lambda: path.rmdir())
-    else:
-        retry_on_permission_error(lambda: path.unlink(missing_ok=True))
-    return True
+            retry_on_permission_error(lambda: path.unlink(missing_ok=True))
+        return RemovalResult(True)
+    except OSError as exc:
+        return RemovalResult(False, str(exc))

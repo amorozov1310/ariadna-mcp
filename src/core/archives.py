@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 from .fsretry import replace_with_retry, rmtree_with_retry
+from .fs_safety import remove_path_safely
 
 # Выгрузка крупной типовой конфигурации — порядка 100 тыс. файлов и 10 ГБ;
 # умолчания с большим запасом, но конечные.
@@ -138,6 +139,10 @@ def extract_archive(fileobj: BinaryIO, filename: str, dest: Path) -> None:
     except zipfile.BadZipFile as e:
         raise UnsafeArchiveError(f'Архив повреждён: {e}') from e
     finally:
-        spooled.unlink(missing_ok=True)
+        result = remove_path_safely(spooled, dest.parent, recursive=False)
+        if not result:
+            raise OSError(result.reason or f'Не удалось удалить временный архив {spooled}')
         if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
+            result = remove_path_safely(staging, dest.parent)
+            if not result:
+                raise OSError(result.reason or f'Не удалось удалить временный каталог {staging}')

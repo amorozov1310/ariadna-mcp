@@ -352,6 +352,12 @@ async def delete_project(project_id: str):
     return JSONResponse({"status": "deleted", "project_id": project_id})
 
 
+@router.delete("/api/projects/")
+async def delete_project_without_id():
+    """Не позволять пустому ID пройти через slash redirect до 405."""
+    raise HTTPException(400, "Не указан ID проекта для удаления.")
+
+
 @router.post("/api/projects/{project_id}/delete")
 async def delete_project_post(project_id: str):
     pm = get_pm()
@@ -366,3 +372,9 @@ async def delete_project_post(project_id: str):
     except KeyError as e:
         raise HTTPException(404, str(e))
     return RedirectResponse("/", status_code=303)
+
+
+@router.post("/api/projects//delete")
+async def delete_project_post_without_id():
+    """Вернуть понятную ошибку для формы с пустым сегментом ID."""
+    raise HTTPException(400, "Не указан ID проекта для удаления.")

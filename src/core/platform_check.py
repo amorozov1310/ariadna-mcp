@@ -33,7 +33,7 @@ from .bsl_reference import module_context_vars
 from .code_fingerprints import bundled_fingerprints
 from .db import IndexRemovedError
 from .fsretry import replace_with_retry, retry_on_permission_error
-from .fs_safety import directory_is_safe, remove_path_safely
+from .fs_safety import RemovalResult, directory_is_safe, remove_path_safely
 from .metadata_model import MANAGER_OBJECT_KINDS, canonicalize_kind, indexed_manager_objects
 from .parser_fingerprint import index_uses_old_parser, parser_fingerprint
 from .platform_help import (COLLECTION_KINDS, COLLECTION_MANAGER_TYPES, compatibility_warning,
@@ -738,11 +738,14 @@ def _unlink_archive(path, allowed_root=None):
         allowed_root = Path(allowed_root) if allowed_root is not None else path.parents[3]
         if not directory_is_safe(path.parent, allowed_root):
             logger.warning('Пропускаю очистку архива вне безопасного каталога: %s', path)
-            return
+            return RemovalResult(False, 'каталог архива небезопасен')
         if not remove_path_safely(path, allowed_root, recursive=False):
             logger.warning('Пропускаю очистку архива вне разрешённого корня: %s', path)
+            return RemovalResult(False, 'архив вне разрешённого корня или не удалён')
+        return RemovalResult(True)
     except OSError:
         logger.info('Архив проверки платформы занят и не удалён: %s', path.name)
+        return RemovalResult(False, 'архив занят')
 
 
 def prune_report_archives(db_path, keep=()):
@@ -795,7 +798,8 @@ def _trim_archives(published):
     требовал полной сборки. Вызывается под блокировкой публикации."""
     archives = []
     directory = published.parent
-    allowed_root = directory.parent.parent
+    # Корень индексов, а не промежуточный .ariadna-service.
+    allowed_root = directory.parents[2]
     if not directory_is_safe(directory, allowed_root):
         logger.warning('Пропускаю очистку архивов в небезопасном каталоге %s', directory)
         return
@@ -835,18 +839,23 @@ def cleanup_report_temps(directory, allowed_root=None):
     """Удалить временные архивы, оставшиеся после аварийного завершения записи."""
     directory = Path(directory)
     if not directory.exists():
-        return
+        return RemovalResult(True)
     allowed_root = Path(allowed_root) if allowed_root is not None else directory.parent
     if not directory_is_safe(directory, allowed_root):
         logger.warning('Пропускаю очистку временных архивов в небезопасном каталоге %s', directory)
-        return
+        # Каталог, не принадлежащий проекту (например, внешняя ссылка),
+        # намеренно не очищается и не считается частью его файлов.
+        return RemovalResult(True)
+    results = []
     try:
         paths = directory.glob('.platform-check-*.zip.*.tmp')
         for path in paths:
-            _unlink_archive(path, allowed_root)
+            results.append(_unlink_archive(path, allowed_root))
     except OSError:
         logger.info('Не удалось очистить временные архивы проверки платформы в %s', directory,
                     exc_info=True)
+        return RemovalResult(False, 'ошибка перечисления временных архивов')
+    return next((result for result in results if not result), RemovalResult(True))
 
 
 def mark_archive_used(path):

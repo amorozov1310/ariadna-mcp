@@ -1263,7 +1263,9 @@ class PlatformHelpStore:
                 raise ValueError(f'справка {version} сейчас строится')
             existed = path.is_file()
             trusted_root = self.root.parent.parent
-            remove_path_safely(path, trusted_root, recursive=False)
+            result = remove_path_safely(path, trusted_root, recursive=False)
+            if not result:
+                raise OSError(result.reason or f'не удалось удалить справку {version}')
             self._errors.pop(version, None)
             if path.parent.is_dir() and not any(path.parent.iterdir()):
                 remove_path_safely(path.parent, trusted_root, recursive=False)

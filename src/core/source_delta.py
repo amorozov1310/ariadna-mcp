@@ -13,6 +13,8 @@ import zipfile
 import contextlib
 import zlib
 from pathlib import Path, PurePosixPath
+
+from .fs_safety import remove_path_safely
 from typing import BinaryIO
 
 MAX_ENTRIES = 250_000
@@ -321,7 +323,9 @@ def _recover_locked(root: Path, workspace: Path) -> bool:
     journal = _journal_path(workspace)
     if not journal.exists():
         for orphan in (*workspace.glob('staging-*'), *workspace.glob('rollback-*')):
-            shutil.rmtree(orphan, ignore_errors=True)
+            result = remove_path_safely(orphan, workspace.parent)
+            if not result:
+                raise OSError(result.reason or f'Не удалось удалить временный каталог {orphan}')
         return True
     data = json.loads(journal.read_text("utf-8"))
     backup = Path(data["backup"])

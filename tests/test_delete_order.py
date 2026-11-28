@@ -13,6 +13,8 @@ import io
 import os
 import shutil
 import sqlite3
+import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -147,6 +149,47 @@ def test_web_ui_reports_failed_removal_as_500(monkeypatch):
             pm.close_all()
 
 
+def test_web_api_does_not_report_delete_success_when_helper_returns_false(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    with tempfile.TemporaryDirectory(dir=tmp_path) as tmpdir:
+        pm = ProjectManager(str(Path(tmpdir) / 'data'))
+        pm.create_project('p', 'p')
+        from src.core.platform_check import report_directory
+        report_dir = report_directory(pm._index_path('p'))
+        report_dir.mkdir(parents=True)
+        archive = report_dir / 'platform-check-test.zip'
+        archive.write_bytes(b'archive')
+        monkeypatch.setattr(app_module, '_pm', pm)
+        real_remove = pm_module.remove_path_safely
+        monkeypatch.setattr(pm_module, 'remove_path_safely', lambda *a, **kw: False)
+        client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'})
+        try:
+            for _ in range(3):
+                response = client.delete('/api/projects/p')
+                assert response.status_code == 500
+                assert 'удал' in response.json()['detail']
+                assert archive.exists()
+            monkeypatch.setattr(pm_module, 'remove_path_safely', real_remove)
+            assert client.delete('/api/projects/p').status_code == 200
+            assert not archive.exists()
+        finally:
+            pm.close_all()
+
+
+def test_empty_project_ids_on_both_delete_routes_are_bad_request():
+    from fastapi.testclient import TestClient
+    from src.web import app as app_module
+    client = TestClient(app_module.app, headers={'Host': '127.0.0.1:19878'},
+                        follow_redirects=False)
+    json_response = client.delete('/api/projects/')
+    form_response = client.post('/api/projects//delete')
+    assert json_response.status_code == 400
+    assert 'ID проекта' in json_response.json()['detail']
+    assert form_response.status_code == 400
+    assert 'ID проекта' in form_response.json()['detail']
+
+
 def test_delete_does_not_follow_project_symlink(tmp_path):
     data_dir = tmp_path / 'data'
     projects_dir = data_dir / 'projects'
@@ -173,6 +216,39 @@ def test_delete_does_not_follow_project_symlink(tmp_path):
             'index.db', 'other.txt', 'platform-check-report.zip']
     finally:
         pm.close_all()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows junction нужен для проверки границы проекта')
+def test_intermediate_junction_to_other_project_blocks_cleanup(tmp_path):
+    from src.core.fs_safety import directory_is_safe, remove_path_safely
+    projects = tmp_path / 'projects'
+    own = projects / 'own'
+    other = projects / 'other'
+    target = other / 'shared'
+    target.mkdir(parents=True)
+    nested = target / 'nested'
+    nested.mkdir()
+    marker = nested / 'keep.txt'
+    marker.write_text('keep')
+    own.mkdir(parents=True)
+    junction = own / 'hop'
+    result = subprocess.run(['cmd', '/c', 'mklink', '/J', str(junction), str(target)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr or result.stdout
+    guarded = (other,)
+    assert not directory_is_safe(junction / 'nested', projects, protected_roots=guarded)
+    removal = remove_path_safely(junction / 'nested', projects, protected_roots=guarded)
+    assert not removal
+    assert marker.read_text() == 'keep'
+
+
+def test_unknown_windows_reparse_tag_is_link_like(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from src.core import fs_safety
+    info = SimpleNamespace(st_file_attributes=0x400, st_reparse_tag=0x9000001A,
+                           st_mode=stat.S_IFDIR)
+    monkeypatch.setattr(fs_safety.os, 'lstat', lambda _path: info)
+    assert fs_safety.is_link_like(tmp_path / 'unknown-reparse')
 
 
 def test_startup_report_temp_cleanup_does_not_follow_symlink(tmp_path):

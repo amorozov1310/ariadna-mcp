@@ -25,7 +25,7 @@ from weakref import WeakSet, WeakValueDictionary, ref
 from . import parser_fingerprint
 from .archives import extract_archive
 from .db import Database, IndexRemovedError, READER_IDLE_SEC
-from .fsretry import replace_with_retry, rmtree_with_retry
+from .fsretry import replace_with_retry
 from .fs_safety import is_link_like, remove_path_safely
 from .platform_help import PlatformHelpStore, default_search_roots
 from .search import SearchEngine
@@ -825,7 +825,11 @@ class ProjectManager:
                 cleanup_root = current_index_root
             else:
                 cleanup_root = service_root
-            cleanup_report_temps(directory, cleanup_root)
+            result = cleanup_report_temps(directory, cleanup_root)
+            if not result:
+                raise ProjectFilesNotRemovedError(project_id, directory,
+                                                  OSError(getattr(result, 'reason', None) or
+                                                          'не удалось очистить архивы'))
 
         # Каталоги проекта удаляются рекурсивно только если они строго внутри
         # корня и не являются предком служебного каталога или другого проекта.
@@ -834,6 +838,7 @@ class ProjectManager:
                          service_root / '.ariadna-service')
         other_project_paths = [self.projects_dir / pid for pid in registry]
         other_project_paths += [current_index_root / pid for pid in registry]
+        protected_roots = tuple(other_project_paths)
         roots = {project_dir: self.projects_dir,
                  index_parent: current_index_root,
                  legacy_report_dir: service_root,
@@ -855,32 +860,44 @@ class ProjectManager:
                     for other in other_project_paths if other.exists()
                 )
                 if is_link_like(path):
-                    if not remove_path_safely(path, root):
-                        logger.warning("Не удалось безопасно удалить ссылку проекта %s", path)
+                    result = remove_path_safely(path, root, protected_roots=protected_roots)
+                    if not result:
+                        raise OSError(getattr(result, 'reason', None) or 'ссылка не удалена')
                     continue
                 if not _is_within(path, root) or protected:
                     # Для ID, совпадающих со старым общим каталогом справки
                     # или отчётов, удаляем только явно принадлежащие проекту
                     # файлы; содержимое родителя остаётся нетронутым.
                     if path == self.platform_help.root or path == index_parent:
-                        if not directory_is_safe(path, root):
-                            logger.warning("Пропускаю очистку небезопасного каталога %s", path)
-                            continue
+                        if not directory_is_safe(path, root, protected_roots=protected_roots):
+                            raise OSError(f"небезопасный каталог {path}")
                         for pattern in ('index.db', 'index.db-wal', 'index.db-shm',
                                         'index.db-journal', 'platform-check*.zip',
                                         '.platform-check-*.zip.*.tmp'):
                             for owned in path.glob(pattern):
                                 if owned.is_file():
-                                    remove_path_safely(owned, path, recursive=False)
+                                    result = remove_path_safely(owned, path, recursive=False,
+                                                                protected_roots=protected_roots)
+                                    if not result:
+                                        raise OSError(getattr(result, 'reason', None) or 'файл не удалён')
                     elif path == legacy_report_dir or path == report_dir:
-                        if not remove_path_safely(path, root):
-                            logger.warning("Пропускаю небезопасный каталог отчётов %s", path)
+                        if not directory_is_safe(path, root, protected_roots=protected_roots):
+                            # Служебный родитель может оказаться внешней ссылкой.
+                            # Такой каталог не принадлежит удаляемому проекту.
+                            continue
+                        result = remove_path_safely(path, root, protected_roots=protected_roots)
+                        if not result:
+                            raise OSError(getattr(result, 'reason', None) or
+                                          'каталог отчётов не удалён')
                     else:
-                        if not remove_path_safely(path, root):
-                            logger.warning("Пропускаю небезопасный каталог проекта %s", path)
+                        result = remove_path_safely(path, root, protected_roots=protected_roots)
+                        if not result:
+                            raise OSError(getattr(result, 'reason', None) or 'каталог проекта не удалён')
                 else:
-                    if not remove_path_safely(path, root):
-                        logger.warning("Пропускаю небезопасный каталог проекта %s", path)
+                    result = remove_path_safely(path, root, protected_roots=protected_roots)
+                    if not result:
+                        raise OSError(getattr(result, 'reason', None) or
+                                      'каталог проекта не удалён')
             except OSError as e:
                 logger.error("Проект %s убран из реестра, но каталог %s удалить не удалось: %s. "
                              "Повторите удаление, чтобы дочистить.", project_id, path, e)
@@ -1121,7 +1138,12 @@ class ProjectManager:
         # Remove source directory — вне блокировки реестра.
         source_dir = self.projects_dir / project_id / 'sources' / source_id
         if source_dir.exists():
-            rmtree_with_retry(source_dir)
+            result = remove_path_safely(source_dir, self.projects_dir,
+                                        protected_roots=tuple(self.projects_dir / p.id
+                                                             for p in self.list_projects()
+                                                             if p.id != project_id))
+            if not result:
+                raise OSError(result.reason or f'Не удалось удалить источник {source_dir}')
 
         # Remove from registry
         with self._registry_lock():
@@ -1320,7 +1342,10 @@ class ProjectManager:
                 for leftover in (tmp, Path(f'{tmp}-journal'), Path(f'{tmp}-wal'),
                                  Path(f'{tmp}-shm')):
                     try:
-                        leftover.unlink()
+                        result = remove_path_safely(leftover, self.index_dir or self.projects_dir,
+                                                    recursive=False)
+                        if not result:
+                            raise OSError(result.reason or 'файл индекса не удалён')
                     except FileNotFoundError:
                         pass
                     except OSError:
